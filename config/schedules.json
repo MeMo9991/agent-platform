@@ -1,0 +1,16 @@
+{
+  "tasks": [
+    {
+      "id": "devops-assigned-defects",
+      "kind": "devops-defect-poll",
+      "enabled": true,
+      "intervalSeconds": 300,
+      "runOnStart": true,
+      "parameters": {
+        "sourceId": "devops-assigned",
+        "businessProjectId": 4655971863,
+        "pageSize": 10
+      }
+    }
+  ]
+}

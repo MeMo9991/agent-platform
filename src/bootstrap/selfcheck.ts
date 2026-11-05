@@ -4,6 +4,7 @@ import { createEventIngress } from '../event/ingress.js';
 const allowedMetaDataFields = { sample: ['label'] };
 const store = new SqliteStore(':memory:', allowedMetaDataFields);
 try {
+  store.registerSource('sample', 'sample', 'sample-config', true);
   const ingress = createEventIngress(store, allowedMetaDataFields);
   const sample = { sourceId: 'sample', externalId: 'bug-1', revision: '1', kind: 'bug', title: '页面报错',
     body: '中文描述与截图', attachments: [{ id: 'image-1', kind: 'image' as const, sourceRef: 'sample/image-1' }], metaData: { label: 'ui' } };

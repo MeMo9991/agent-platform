@@ -29,6 +29,8 @@ const task: Task = { id: 'task-1', repoKey: 'repo-1', title: '中文 Bug', scope
 test('event ingress preserves facts, deduplicates by source identity and survives reopen', async () => {
   const store = new SqliteStore(':memory:', allowedMetaDataFields);
   try {
+    store.registerSource('page', 'page', 'page-config', true);
+    store.registerSource('another', 'page', 'another-config', true);
     const ingress = createEventIngress(store, allowedMetaDataFields);
     const first = await ingress.accept(event);
     assert.equal(first.duplicate, false);
@@ -50,10 +52,25 @@ test('invalid event identity, unsafe attachment and secret metadata are rejected
   assert.equal(normalizedEvent.safeParse({ ...event, metaData: { credential: 'plain-secret' } }).success, false);
   const store = new SqliteStore(':memory:', allowedMetaDataFields);
   try {
+    store.registerSource('page', 'page', 'page-config', true);
     const ingress = createEventIngress(store, allowedMetaDataFields);
     await assert.rejects(ingress.accept({ ...event, metaData: { credential: 'plain-secret' } }));
     assert.throws(() => store.accept({ ...event, metaData: { credential: 'plain-secret' } }));
     assert.equal(store.db.prepare('SELECT count(*) AS n FROM source_event').get()?.n, 0);
+  } finally { store.close(); }
+});
+
+test('event repository rejects unregistered and disabled sources, including duplicate writes', () => {
+  const store = new SqliteStore(':memory:', allowedMetaDataFields);
+  try {
+    assert.throws(() => store.accept(event), /not registered or enabled/);
+    store.registerSource('page', 'page', 'page-config', false);
+    assert.throws(() => store.accept(event), /not registered or enabled/);
+    store.registerSource('page', 'page', 'page-config', true);
+    store.accept(event);
+    store.registerSource('page', 'page', 'page-config', false);
+    assert.throws(() => store.accept(event), /not registered or enabled/);
+    assert.equal(store.listPending(10).length, 1);
   } finally { store.close(); }
 });
 

@@ -34,6 +34,8 @@ export class SqliteStore implements EventRepository {
     const value = normalizedEvent.parse(input);
     validateMetadataFields(value, this.allowedMetaDataFields);
     return this.transaction(() => {
+      const source = this.db.prepare('SELECT enabled FROM event_source WHERE id=?').get(value.sourceId);
+      if (source?.enabled !== 1) throw new Error(`Source ${value.sourceId} is not registered or enabled`);
       const existing = this.db.prepare('SELECT id FROM source_event WHERE source_id=? AND external_id=? AND revision=?')
         .get(value.sourceId, value.externalId, value.revision);
       if (existing) return { eventId: String(existing.id), duplicate: true };
@@ -56,6 +58,17 @@ export class SqliteStore implements EventRepository {
       occurredAt: row.occurred_at ?? undefined, attachments: JSON.parse(String(row.attachments_json)),
       metaData: JSON.parse(String(row.meta_data)), status: row.status, receivedAt: row.received_at,
       leaseUntil: row.lease_until ?? undefined, routingData: row.routing_data ? JSON.parse(String(row.routing_data)) : undefined });
+  }
+  listPending(limit: number): SourceEvent[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('Pending event limit must be 1..100');
+    return this.db.prepare("SELECT id FROM source_event WHERE status='pending' ORDER BY received_at,id LIMIT ?")
+      .all(limit).map(row => this.get(String(row.id))!);
+  }
+  registerSource(id: string, kind: string, configRef: string, enabled: boolean): void {
+    if (![id, kind, configRef].every(value => typeof value === 'string' && value.trim())) throw new Error('Invalid source registration');
+    this.db.prepare(`INSERT INTO event_source(id,kind,config_ref,enabled) VALUES (?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,config_ref=excluded.config_ref,enabled=excluded.enabled`)
+      .run(id, kind, configRef, enabled ? 1 : 0);
   }
   saveTask(input: Task): void {
     const value = task.parse(input);

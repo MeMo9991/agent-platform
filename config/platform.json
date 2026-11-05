@@ -1,0 +1,14 @@
+{
+  "repositories": [],
+  "sources": [
+    {
+      "id": "devops-assigned",
+      "kind": "devops-defect",
+      "configRef": "devops-assigned-defects",
+      "enabled": true
+    }
+  ],
+  "agents": [],
+  "budget": { "maxRunMs": 600000 },
+  "policyRef": "default"
+}

@@ -5,6 +5,7 @@ export const attachmentRef = z.object({
   id, kind: z.enum(['image', 'file']), sourceRef: id,
   mimeType: id.optional(), expiresAt: timestamp.optional(),
 }).strict().refine(value => !/^https?:\/\//i.test(value.sourceRef) && !/[?#]/.test(value.sourceRef), 'sourceRef must be an opaque credential-free locator');
+export type AttachmentRef = z.infer<typeof attachmentRef>;
 
 export const normalizedEvent = z.object({
   sourceId: id, externalId: id, revision: id, kind: id, title: id, body: z.string(),
@@ -32,6 +33,7 @@ export const sourceCursor = z.object({ sourceId: id, value: z.string() });
 export interface EventRepository {
   accept(event: NormalizedEvent): { eventId: string; duplicate: boolean };
   get(id: string): SourceEvent | undefined;
+  listPending(limit: number): SourceEvent[];
 }
 export interface EventIngress {
   accept(event: NormalizedEvent): Promise<{ eventId: string; duplicate: boolean }>;
