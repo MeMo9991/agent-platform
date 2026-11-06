@@ -7,7 +7,7 @@ import { SqliteStore } from '../src/storage/sqlite/store.js';
 import { createEventIngress } from '../src/event/ingress.js';
 import { normalizedEvent } from '../src/event/model.js';
 import { mandate as mandateSchema, taskRecord, type Task } from '../src/agent/task/model.js';
-import { transitionTask } from '../src/agent/task/transition.js';
+import { reopenTask, transitionTask } from '../src/agent/task/transition.js';
 import { agentEvent, agentInput, agentUsage, run } from '../src/agent/worker/model.js';
 import { approvalDecision, approvalRequest, humanResponse, routeReviewDecision } from '../src/interaction/model.js';
 import { routeDecision } from '../src/agent/router/model.js';
@@ -25,6 +25,21 @@ const allowedMetaDataFields = { page: ['tag'], another: ['tag'] };
 const mandate = investigationMandate('event-1', 'repo-1', '调查', 'v1', 'intake-rule-1');
 const task: Task = { id: 'task-1', repoKey: 'repo-1', title: '中文 Bug', scope: '调查', mandate, state: 'new',
   iteration: 1, priority: 1, createdAt: now, updatedAt: now };
+
+test('released Task reopens into a new investigation iteration without old edit permission', () => {
+  const old: Task = { ...task, state: 'released', iteration: 3, baseRef: 'a'.repeat(40),
+    mandate: { ...mandate, allowedActions: ['investigate', 'edit'],
+      authority: { kind: 'human_approval', approvalRef: 'old-approval' } } };
+  const result = reopenTask(old, 'Confirmed recurrence', now, 'state-record', 'reopen-record',
+    { kind: 'human', id: 'owner' });
+  assert.equal(result.task.state, 'queued');
+  assert.equal(result.task.iteration, 4);
+  assert.equal(result.task.baseRef, undefined);
+  assert.deepEqual(result.task.mandate.allowedActions, ['investigate']);
+  assert.deepEqual(result.task.mandate.authority, { kind: 'human_approval', approvalRef: 'reopen-record' });
+  assert.equal(old.state, 'released');
+  assert.equal(old.baseRef, 'a'.repeat(40));
+});
 
 test('event ingress preserves facts, deduplicates by source identity and survives reopen', async () => {
   const store = new SqliteStore(':memory:', allowedMetaDataFields);
@@ -79,12 +94,12 @@ test('migration is idempotent, future schema rejected, transactions roll back', 
   const path = join(directory, 'test.sqlite3');
   const store = new SqliteStore(path);
   try {
-    assert.equal(store.db.prepare('PRAGMA user_version').get()?.user_version, 1);
+    assert.equal(store.db.prepare('PRAGMA user_version').get()?.user_version, 4);
     assert.throws(() => store.transaction(() => { store.db.exec("INSERT INTO event_source VALUES ('x','page','ref',NULL,1)"); throw new Error('fail'); }));
     assert.equal(store.db.prepare('SELECT count(*) AS n FROM event_source').get()?.n, 0);
   } finally { store.close(); }
   const reopened = new SqliteStore(path);
-  reopened.db.exec('PRAGMA user_version=2');
+  reopened.db.exec('PRAGMA user_version=5');
   reopened.close();
   try { assert.throws(() => new SqliteStore(path), /future database version/); }
   finally { rmSync(directory, { recursive: true, force: true }); }

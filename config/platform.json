@@ -1,5 +1,20 @@
 {
-  "repositories": [],
+  "repositories": [
+    {
+      "repoKey": "agent-platform",
+      "provider": "github",
+      "hostUrl": "https://github.com",
+      "projectRef": "MeMo9991/agent-platform",
+      "targetBranch": "main",
+      "requiredChecks": [],
+      "localChecks": [
+        { "command": "npm", "args": ["run", "typecheck"], "timeoutMs": 120000 },
+        { "command": "npm", "args": ["test"], "timeoutMs": 180000 }
+      ],
+      "credentialsRef": "unconfigured-stage3",
+      "localPath": "."
+    }
+  ],
   "sources": [
     {
       "id": "devops-assigned",
@@ -8,7 +23,19 @@
       "enabled": true
     }
   ],
-  "agents": [],
-  "budget": { "maxRunMs": 600000 },
+  "agents": [{ "kind": "qoder", "enabled": false }],
+  "interaction": {
+    "actorId": "local-owner",
+    "roles": ["answer", "route", "approve", "reopen"],
+    "credentialFile": "~/.config/agent-platform/local-api.token",
+    "port": 8765
+  },
+  "budget": {
+    "maxRunMs": 600000,
+    "maxConcurrentRuns": 2,
+    "perRepoConcurrentRuns": 2,
+    "perAgentConcurrentRuns": 2,
+    "reservedHumanResume": 1
+  },
   "policyRef": "default"
 }

@@ -13,8 +13,14 @@ export const platformConfig = z.object({ repositories: z.array(repositoryConfig)
   values => new Set(values.map(value => value.repoKey)).size === values.length, 'Duplicate repoKey'),
   sources: z.array(z.object({ id, kind: id, configRef: id, enabled: z.boolean() })),
   agents: z.array(z.object({ kind: id, enabled: z.boolean() })),
+  interaction: z.object({ actorId: id, roles: z.array(z.enum(['answer', 'route', 'approve', 'reopen'])),
+    credentialFile: id, port: z.number().int().min(1).max(65535) }).optional(),
   releasePipelines: z.array(z.object({ repoKey: id, environment: id, configRef: id })).default([]),
-  budget: z.object({ maxRunMs: z.number().int().positive() }), policyRef: id })
+  budget: z.object({ maxRunMs: z.number().int().positive(), maxConcurrentRuns: z.number().int().positive().default(2),
+    perRepoConcurrentRuns: z.number().int().positive().default(2),
+    perAgentConcurrentRuns: z.number().int().positive().default(2),
+    reservedHumanResume: z.number().int().nonnegative().default(1) }).refine(
+      value => value.reservedHumanResume < value.maxConcurrentRuns, 'Resume reservation must leave a normal slot'), policyRef: id })
   .superRefine((value, context) => {
     if (new Set(value.sources.map(item => item.id)).size !== value.sources.length ||
         new Set(value.agents.map(item => item.kind)).size !== value.agents.length ||

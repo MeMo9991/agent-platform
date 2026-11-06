@@ -1,4 +1,4 @@
-export const schemaVersion = 1;
+export const schemaVersion = 4;
 export const initialSchema = `
 CREATE TABLE event_source (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, config_ref TEXT NOT NULL,

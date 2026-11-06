@@ -2,7 +2,8 @@ import { z } from 'zod';
 import { id, timestamp } from '../shared/model.js';
 
 export const repositoryConfig = z.object({ repoKey: id, provider: z.enum(['github', 'gitlab']), hostUrl: z.url(),
-  projectRef: id, targetBranch: id, requiredChecks: z.array(id), credentialsRef: id });
+  projectRef: id, targetBranch: id, requiredChecks: z.array(id), credentialsRef: id, localPath: id.optional(),
+  localChecks: z.array(z.object({ command: id, args: z.array(z.string()), timeoutMs: z.number().int().positive() })).default([]) });
 export const changeRef = z.object({ provider: z.enum(['github', 'gitlab']), repoKey: id, id, sourceSha: id, targetSha: id });
 export const checkResult = z.object({ repoKey: id, commitSha: id, status: z.enum(['pending', 'completed']),
   conclusion: z.enum(['success', 'failure', 'unknown']), logRef: id.optional() });
