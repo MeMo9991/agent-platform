@@ -3,7 +3,7 @@ import { actorRef, evidenceRef, id, timestamp } from '../shared/model.js';
 import { action, mandate } from '../agent/task/model.js';
 import { routeCandidate } from '../agent/router/model.js';
 
-export const question = z.object({ id, taskId: id, runId: id, prompt: id, options: z.array(id).optional(), evidenceRefs: z.array(evidenceRef), status: z.enum(['open', 'answered']) });
+export const question = z.object({ id, taskId: id, runId: id, prompt: id, options: z.array(id).optional(), evidenceRefs: z.array(evidenceRef), status: z.enum(['open', 'answered', 'dismissed']) });
 const humanActor = actorRef.extend({ kind: z.literal('human') });
 export const answer = z.object({ questionId: id, actor: humanActor, content: z.string(), idempotencyKey: id });
 export const routeReviewRequest = z.object({ eventId: id, candidates: z.array(routeCandidate), reason: id });

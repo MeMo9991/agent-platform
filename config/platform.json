@@ -26,7 +26,7 @@
   "agents": [{ "kind": "qoder", "enabled": false }],
   "interaction": {
     "actorId": "local-owner",
-    "roles": ["answer", "route", "approve", "reopen"],
+    "roles": ["answer", "route", "approve", "reopen", "submit", "command", "configure"],
     "credentialFile": "~/.config/agent-platform/local-api.token",
     "port": 8765
   },

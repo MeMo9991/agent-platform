@@ -2,13 +2,15 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, statSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { resolve, extname } from 'node:path';
+import { handleDashboard, type DashboardOptions } from './dashboard.js';
 import { answer, approvalDecision, reopenTaskCommand, routeReviewDecision } from '../interaction/model.js';
 import { SqliteStore } from '../storage/sqlite/store.js';
 import type { KernelCoordinator } from '../agent/kernel/model.js';
 
-type Role = 'answer' | 'route' | 'approve' | 'reopen';
+type Role = 'answer' | 'route' | 'approve' | 'reopen' | 'submit' | 'command' | 'configure';
 export type LocalApiOptions = { credentialFile: string; actorId: string; roles: readonly Role[];
-  port?: number };
+  port?: number; dashboard?: DashboardOptions };
 
 function credential(path: string): string {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -45,34 +47,33 @@ export function startLocalApi(store: SqliteStore, coordinator: KernelCoordinator
   options: LocalApiOptions): Promise<{ port: number; stop(): Promise<void> }> {
   const expected = createHash('sha256').update(credential(options.credentialFile)).digest();
   const server = createServer(async (request, response) => {
+    const publicPath = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
+    if (request.method === 'GET' && (publicPath === '/' || publicPath === '/index.html' || /^\/assets\/[A-Za-z0-9._-]+$/.test(publicPath))) {
+      const filename = publicPath === '/' ? 'index.html' : publicPath.slice(1);
+      try {
+        const bytes = readFileSync(resolve('web/dist', filename));
+        const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+          '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' }[extname(filename)] ?? 'application/octet-stream';
+        response.writeHead(200, { 'content-type': mime, 'x-content-type-options': 'nosniff', 'cache-control': 'no-store',
+          'content-security-policy': "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'" });
+        response.end(bytes); return;
+      } catch { json(response, 404, { error: 'Dashboard is not built' }); return; }
+    }
     const auth = request.headers.authorization;
     const provided = auth?.startsWith('Bearer ') ? auth.slice(7) : '';
     const digest = createHash('sha256').update(provided).digest();
     if (!provided || !timingSafeEqual(digest, expected)) { json(response, 401, { error: 'Unauthorized' }); return; }
     const path = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
     try {
+      if (options.dashboard && await handleDashboard(request, response, store, coordinator, options.dashboard, options.roles)) return;
       if (request.method === 'GET' && path === '/inbox') {
-        const events = store.db.prepare("SELECT id FROM source_event WHERE status='needs_human' ORDER BY received_at,id")
-          .all().map(row => store.get(String(row.id)));
-        const requests = store.db.prepare("SELECT payload_json FROM task_record WHERE kind IN ('question','approval_request') AND status='open' ORDER BY at,id")
-          .all().map(row => JSON.parse(String(row.payload_json)));
-        const tasks = store.db.prepare("SELECT payload_json FROM task WHERE state IN ('waiting_human','paused','blocked') ORDER BY updated_at,id")
-          .all().map(row => JSON.parse(String(row.payload_json)));
+        const events = store.db.prepare("SELECT id,status FROM source_event WHERE status='needs_human' ORDER BY received_at,id").all();
+        const requests = store.db.prepare("SELECT id,task_id AS taskId,kind,status FROM task_record WHERE kind IN ('question','approval_request') AND status='open' ORDER BY at,id").all();
+        const tasks = store.db.prepare("SELECT id,state FROM task WHERE state IN ('waiting_human','paused','blocked') ORDER BY updated_at,id").all();
         json(response, 200, { events, requests, tasks }); return;
       }
-      if (request.method === 'GET' && /^\/tasks\/[^/]+$/.test(path)) {
-        const taskId = decodeURIComponent(path.slice(7));
-        const task = store.getTask(taskId);
-        if (!task) { json(response, 404, { error: 'Task not found' }); return; }
-        const runs = store.db.prepare('SELECT payload_json FROM run WHERE task_id=? ORDER BY created_at,id')
-          .all(taskId).map(row => JSON.parse(String(row.payload_json)));
-        const records = store.db.prepare('SELECT payload_json FROM task_record WHERE task_id=? ORDER BY at,id')
-          .all(taskId).map(row => JSON.parse(String(row.payload_json)));
-        json(response, 200, { task, runs, records }); return;
-      }
-      if (request.method === 'GET' && /^\/events\/[^/]+$/.test(path)) {
-        const event = store.get(decodeURIComponent(path.slice(8)));
-        json(response, event ? 200 : 404, event ?? { error: 'Event not found' }); return;
+      if (request.method === 'GET' && (/^\/tasks\/[^/]+$/.test(path) || /^\/events\/[^/]+$/.test(path))) {
+        json(response, 410, { error: 'Use the filtered /api view' }); return;
       }
       if (request.method !== 'POST') { json(response, 404, { error: 'Unknown endpoint' }); return; }
       const data = await body(request);

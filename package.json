@@ -2,12 +2,13 @@
   "name": "agent-platform",
   "version": "0.1.0",
   "private": true,
+  "workspaces": ["web"],
   "type": "module",
   "engines": { "node": ">=24" },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
-    "build": "tsc",
+    "build": "tsc && npm --workspace web run build",
     "start": "node dist/bootstrap/main.js",
     "selfcheck": "node dist/bootstrap/selfcheck.js"
   },

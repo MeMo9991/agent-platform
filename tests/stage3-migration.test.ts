@@ -21,7 +21,7 @@ test('stage three migration upgrades an existing version-one database in place',
   } finally { old.close(); }
   const upgraded = new SqliteStore(path);
   try {
-    assert.equal(upgraded.db.prepare('PRAGMA user_version').get()?.user_version, 4);
+    assert.equal(upgraded.db.prepare('PRAGMA user_version').get()?.user_version, 5);
     assert.equal(upgraded.db.prepare('SELECT id FROM event_source').get()?.id, 'old-source');
     assert.ok(upgraded.db.prepare("PRAGMA table_info(run)").all().some(row => row.name === 'worker_id'));
   } finally { upgraded.close(); rmSync(directory, { recursive: true, force: true }); }
@@ -41,7 +41,7 @@ test('reopen idempotency index upgrades an existing version-three database', () 
   } finally { old.close(); }
   const upgraded = new SqliteStore(path);
   try {
-    assert.equal(upgraded.db.prepare('PRAGMA user_version').get()?.user_version, 4);
+    assert.equal(upgraded.db.prepare('PRAGMA user_version').get()?.user_version, 5);
     assert.equal(upgraded.db.prepare('SELECT id FROM event_source').get()?.id, 'old-source');
     assert.ok(upgraded.db.prepare('PRAGMA index_list(task_record)').all()
       .some(row => row.name === 'task_record_reopen_key'));
@@ -61,7 +61,7 @@ test('candidate index upgrades an existing version-two database without losing d
   } finally { old.close(); }
   const upgraded = new SqliteStore(path);
   try {
-    assert.equal(upgraded.db.prepare('PRAGMA user_version').get()?.user_version, 4);
+    assert.equal(upgraded.db.prepare('PRAGMA user_version').get()?.user_version, 5);
     assert.equal(upgraded.db.prepare('SELECT id FROM event_source').get()?.id, 'old-source');
     assert.ok(upgraded.db.prepare("PRAGMA index_list(task)").all().some(row => row.name === 'task_candidate'));
   } finally { upgraded.close(); rmSync(directory, { recursive: true, force: true }); }

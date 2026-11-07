@@ -28,8 +28,15 @@ export type Subscription = z.infer<typeof subscription>;
 const recordBase = z.object({ id, taskId: id, runId: id.optional(), eventId: id.optional(), at: timestamp });
 export const taskRecord = z.discriminatedUnion('kind', [
   recordBase.extend({ kind: z.literal('event_link'), eventId: id, mode: z.enum(['handle', 'context']), status: z.enum(['recorded', 'pending', 'delivered', 'handled', 'uncertain', 'handback']) }),
-  recordBase.extend({ kind: z.literal('question'), prompt: id, status: z.enum(['open', 'answered']) }),
+  recordBase.extend({ kind: z.literal('question'), prompt: id, status: z.enum(['open', 'answered', 'dismissed']) }),
   recordBase.extend({ kind: z.literal('agent_report'), runId: id, status: z.enum(['progress', 'succeeded', 'failed']), summary: id }),
+  recordBase.extend({ kind: z.literal('content_review'), targetKind: z.enum(['question', 'result']),
+    targetId: id, text: z.string().trim().min(1).max(8192), status: z.literal('published'),
+    actor: actorRef.extend({ kind: z.literal('human') }), idempotencyKey: id }),
+  recordBase.extend({ kind: z.literal('human_result'), actor: actorRef.extend({ kind: z.literal('human') }),
+    summary: id, disposition: z.enum(['resume', 'cancel']), idempotencyKey: id,
+    codeChange: z.enum(['none', 'committed']).optional(), commitSha: id.optional(),
+    developmentRecordId: id.optional() }),
   recordBase.extend({ kind: z.literal('session_handoff'), runId: id, fromSessionId: id,
     toSessionId: id, summary: id }),
   recordBase.extend({ kind: z.literal('reopen'), relatedTaskId: id, evidenceRunId: id,

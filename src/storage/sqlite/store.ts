@@ -14,6 +14,7 @@ import { schemaVersion, initialSchema } from './migrations/001.js';
 import { migration2 } from './migrations/002.js';
 import { migration3 } from './migrations/003.js';
 import { migration4 } from './migrations/004.js';
+import { migration5 } from './migrations/005.js';
 import { approvalRequest, approvalDecision, answer } from '../../interaction/model.js';
 import type { routeReviewDecision } from '../../interaction/model.js';
 import type { RoutePlan } from '../../agent/kernel/task-loop.js';
@@ -34,6 +35,7 @@ export class SqliteStore implements EventRepository {
         if (version < 2) this.db.exec(migration2);
         if (version < 3) this.db.exec(migration3);
         if (version < 4) this.db.exec(migration4);
+        if (version < 5) this.db.exec(migration5);
         this.db.exec(`PRAGMA user_version=${schemaVersion}`);
       });
     } catch (error) { this.db.close(); throw error; }

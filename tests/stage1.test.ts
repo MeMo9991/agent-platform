@@ -94,12 +94,12 @@ test('migration is idempotent, future schema rejected, transactions roll back', 
   const path = join(directory, 'test.sqlite3');
   const store = new SqliteStore(path);
   try {
-    assert.equal(store.db.prepare('PRAGMA user_version').get()?.user_version, 4);
+    assert.equal(store.db.prepare('PRAGMA user_version').get()?.user_version, 5);
     assert.throws(() => store.transaction(() => { store.db.exec("INSERT INTO event_source VALUES ('x','page','ref',NULL,1)"); throw new Error('fail'); }));
     assert.equal(store.db.prepare('SELECT count(*) AS n FROM event_source').get()?.n, 0);
   } finally { store.close(); }
   const reopened = new SqliteStore(path);
-  reopened.db.exec('PRAGMA user_version=5');
+  reopened.db.exec('PRAGMA user_version=6');
   reopened.close();
   try { assert.throws(() => new SqliteStore(path), /future database version/); }
   finally { rmSync(directory, { recursive: true, force: true }); }

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { createEventIngress } from '../event/ingress.js';
 import { defectMetadataFields } from '../event/sources/devops/defects.js';
+import type { MetadataFields } from '../event/model.js';
 import { SqliteStore } from '../storage/sqlite/store.js';
 import { platformConfig } from './config.js';
 import { createDevopsDefectTask, devopsDefectParameters } from './devops-task.js';
@@ -22,12 +23,14 @@ export function startConfiguredSchedules(paths: { platform: string; schedules: s
     if (params.repoKey && !platform.repositories.some(repo => repo.repoKey === params.repoKey))
       throw new Error(`Unknown repository ${params.repoKey} for scheduled task ${task.id}`);
   }
-  const metadata = Object.fromEntries(platform.sources.filter(source => source.kind === 'devops-defect')
-    .map(source => [source.id, defectMetadataFields]));
+  const metadata: Record<string, readonly string[]> = Object.fromEntries(platform.sources.filter(source => source.kind === 'devops-defect')
+    .map(source => [source.id, defectMetadataFields])) satisfies MetadataFields;
+  for (const repo of platform.repositories) metadata[`manual:${repo.repoKey}`] = ['contentDigest'];
   const store = new SqliteStore(paths.database, metadata);
   try {
     store.transaction(() => {
       for (const source of platform.sources) store.registerSource(source.id, source.kind, source.configRef, source.enabled);
+      for (const repo of platform.repositories) store.registerSource(`manual:${repo.repoKey}`, 'manual', repo.repoKey, true);
     });
     const ingress = createEventIngress(store, metadata);
     const stopTimers = startSchedules(schedule, {

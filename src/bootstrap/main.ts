@@ -19,6 +19,7 @@ import { devopsDefectParameters } from './devops-task.js';
 import { createDevopsAttachmentReader } from '../event/sources/devops/attachment.js';
 import { startWorkerLoop } from './worker-loop.js';
 import { acquireInstanceLock } from './instance-lock.js';
+import { createManualAttachmentReader } from '../event/sources/manual/attachment.js';
 
 const platform = platformConfig.parse(JSON.parse(readFileSync(process.env.AGENT_PLATFORM_CONFIG ?? 'config/platform.json', 'utf8')));
 const databasePath = process.env.AGENT_PLATFORM_DATABASE ?? '.runtime/state/agent-platform.sqlite3';
@@ -46,10 +47,15 @@ const schedule = loadScheduleConfig(process.env.AGENT_PLATFORM_SCHEDULES ?? 'con
 const trustedRepoBySource = Object.fromEntries(schedule.tasks.filter(item => item.enabled && item.kind === 'devops-defect-poll')
   .map(item => devopsDefectParameters.parse(item.parameters)).filter(item => item.repoKey)
   .map(item => [item.sourceId, item.repoKey!]));
+for (const repo of platform.repositories) trustedRepoBySource[`manual:${repo.repoKey}`] = repo.repoKey;
 const attachmentReaders = Object.fromEntries(schedule.tasks.filter(item => item.enabled && item.kind === 'devops-defect-poll')
   .map(item => devopsDefectParameters.parse(item.parameters))
   .map(item => [item.sourceId, createDevopsAttachmentReader(item.sourceId,
     authorizationHeaders as () => Promise<HeadersInit>)]));
+const imageDirectory = resolve('.runtime/manual-images');
+await mkdir(imageDirectory, { recursive: true, mode: 0o700 });
+for (const repo of platform.repositories) attachmentReaders[`manual:${repo.repoKey}`] =
+  createManualAttachmentReader(`manual:${repo.repoKey}`, imageDirectory);
 const root = process.cwd();
 const cloneRoot = resolve(root, '.runtime/clones');
 const qoderRuntime = platform.agents.some(agent => agent.kind === 'qoder' && agent.enabled)
@@ -89,6 +95,15 @@ let api: Awaited<ReturnType<typeof startLocalApi>> | undefined;
 try {
   api = platform.interaction ? await startLocalApi(runtime.store, coordinator, {
     ...platform.interaction,
+    dashboard: { actorId: platform.interaction.actorId,
+      repoKeys: platform.repositories.map(repo => repo.repoKey), imageDirectory, attachmentReaders, runners,
+      evidenceRoot: resolve(root, '.runtime'),
+      settingsPaths: { platform: process.env.AGENT_PLATFORM_CONFIG ?? 'config/platform.json',
+        schedules: process.env.AGENT_PLATFORM_SCHEDULES ?? 'config/schedules.json' },
+      takeoverEvidence: { workspace, boundary: qoderRuntime?.boundary ?? { async attest() { return undefined; } },
+        localChecks: Object.fromEntries(platform.repositories.map(repo => [repo.repoKey, repo.localChecks])),
+        policyVersion: platform.policyRef },
+      workerCapacity: platform.budget.maxConcurrentRuns },
     credentialFile: platform.interaction.credentialFile.startsWith('~/')
       ? resolve(homedir(), platform.interaction.credentialFile.slice(2)) : resolve(platform.interaction.credentialFile),
   }) : undefined;
