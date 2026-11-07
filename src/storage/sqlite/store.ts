@@ -242,6 +242,16 @@ export class SqliteStore implements EventRepository {
     const row = this.db.prepare('SELECT payload_json FROM task WHERE id=?').get(id);
     return row ? task.parse(JSON.parse(String(row.payload_json))) : undefined;
   }
+  deleteTask(id: string): boolean {
+    const task = this.getTask(id);
+    if (!task) return false;
+    this.transaction(() => {
+      this.db.prepare("DELETE FROM task_record WHERE task_id=?").run(id);
+      this.db.prepare("DELETE FROM run WHERE task_id=?").run(id);
+      this.db.prepare("DELETE FROM task WHERE id=?").run(id);
+    });
+    return true;
+  }
   getReopenByKey(key: string): Extract<TaskRecord, { kind: 'reopen' }> | undefined {
     const row = this.db.prepare("SELECT id FROM task_record WHERE kind='reopen' AND idempotency_key=?").get(key);
     const record = row ? this.getRecord(String(row.id)) : undefined;

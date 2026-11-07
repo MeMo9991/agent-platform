@@ -36,7 +36,7 @@ export default function App() {
   const segments = hash.replace(/^#\//, '').split('/');
   const section = segments[0] === 'tasks' ? 'tasks' : segments[0] === 'new' ? 'new' : segments[0] === 'settings' ? 'settings' : 'overview';
   const page = segments[0] === 'tasks' && segments[1] ? <TaskDetailPage id={decodeURIComponent(segments[1])} actorId={config.actorId} roles={config.roles} />
-    : segments[0] === 'tasks' ? <TasksPage repoKeys={config.repoKeys} />
+    : segments[0] === 'tasks' ? <TasksPage repoKeys={config.repoKeys} canDelete={config.roles.includes('command')} />
     : segments[0] === 'events' && segments[1] ? <EventPage id={decodeURIComponent(segments[1])} repoKeys={config.repoKeys} canRoute={config.roles.includes('route')} />
     : segments[0] === 'new' ? config.roles.includes('submit') ? <ManualSubmit repoKeys={config.repoKeys} /> : <p>当前凭据没有提交任务权限。</p>
     : segments[0] === 'settings' ? config.roles.includes('configure') ? <SettingsPage /> : <p>当前凭据没有配置权限。</p> : <OverviewPage />;

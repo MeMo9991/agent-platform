@@ -100,6 +100,7 @@ test('an answer-only credential cannot submit or command through the dashboard',
       body: JSON.stringify({ repoKey: 'repo', body: 'work', idempotencyKey: 'one' }) })).status, 409);
     assert.equal((await fetch(`${base}/api/tasks/any/commands`, { method: 'POST', headers,
       body: JSON.stringify({ kind: 'cancel', expectedVersion: 1, idempotencyKey: 'one', reason: 'test' }) })).status, 409);
+    assert.equal((await fetch(`${base}/api/tasks/any`, { method: 'DELETE', headers })).status, 403);
     assert.equal((await fetch(`${base}/api/tasks/any/content-reviews`, { method: 'POST', headers,
       body: JSON.stringify({ expectedVersion: 1, targetKind: 'result', targetId: 'run',
         text: '未经授权的结论', idempotencyKey: 'review-one' }) })).status, 409);
@@ -116,7 +117,7 @@ test('automatically routed submission exposes its Task through the event link', 
   let server: Awaited<ReturnType<typeof startLocalApi>> | undefined;
   try {
     server = await startLocalApi(store, coordinator, { credentialFile: join(directory, 'token'),
-      actorId: 'owner', roles: ['submit'], dashboard: { actorId: 'owner', repoKeys: ['repo'],
+      actorId: 'owner', roles: ['submit', 'command'], dashboard: { actorId: 'owner', repoKeys: ['repo'],
         imageDirectory: join(directory, 'images'), attachmentReaders: {} } });
     const headers = { authorization: `Bearer ${readFileSync(join(directory, 'token'), 'utf8')}`,
       'content-type': 'application/json' };
@@ -136,6 +137,8 @@ test('automatically routed submission exposes its Task through the event link', 
     store.handbackEvent(event.taskId, first.eventId, 'Needs another owner');
     const handedBack = await (await fetch(`${base}/api/events/${first.eventId}`, { headers })).json();
     assert.equal(handedBack.taskId, undefined);
+    assert.equal((await fetch(`${base}/api/tasks/${event.taskId}`, { method: 'DELETE', headers })).status, 200);
+    assert.equal((await fetch(`${base}/api/tasks/${event.taskId}`, { headers })).status, 404);
   } finally { await server?.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 

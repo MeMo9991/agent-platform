@@ -62,3 +62,6 @@
 .chat-submit-files,.chat-submit-error{margin:8px 4px 0;overflow-wrap:anywhere}
 .chat-submit-note{text-align:center;margin:0}
 @media(max-width:680px){.workspace-main:has(.chat-submit-page) .content{padding:16px}.chat-submit-page{min-height:calc(100dvh - 196px);gap:16px}.chat-submit-content{min-height:130px}.chat-submit-result{padding:18px}.chat-submit-toolbar{align-items:flex-end}.chat-submit-options{flex-wrap:wrap}.chat-submit-options>div{max-width:170px}.chat-submit-note{line-height:1.4}}
+.task-table-card>.filter-card{border-bottom:1px solid var(--color-separator-border)}
+.task-list-meta{display:flex;align-items:center;gap:12px;white-space:nowrap;color:var(--color-text-tertiary);@apply text-caption-1-medium}
+@media(max-width:680px){.task-list-meta{align-self:flex-end}}

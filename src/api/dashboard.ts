@@ -233,6 +233,11 @@ export async function handleDashboard(request: IncomingMessage, response: Server
       send(response, 200, { items, total, limit, offset }); return true;
     }
     const taskMatch = /^\/api\/tasks\/([^/]+)$/.exec(path);
+    if (request.method === 'DELETE' && taskMatch) {
+      if (!roles.includes('command')) { send(response, 403, { error: 'Command role required' }); return true; }
+      const deleted = store.deleteTask(decodeURIComponent(taskMatch[1]!));
+      send(response, deleted ? 200 : 404, deleted ? { ok: true } : { error: 'Task not found' }); return true;
+    }
     if (request.method === 'GET' && taskMatch) {
       const id = decodeURIComponent(taskMatch[1]!);
       const task = safeTask(store, id);
