@@ -24,7 +24,7 @@ export function OverviewPage() {
     {error && <p role="alert" className="error">{error}</p>}
     {!overview && !error && <p>正在加载工作台…</p>}
     {overview && <><div className="stats">
-      <Card className="metric-card metric-people"><div className="metric-top"><span>待人处理</span><RiInbox2Line aria-hidden /></div><strong>{overview.openRequests + overview.humanEvents}</strong><small>事件与审批请求</small></Card>
+      <Card className="metric-card metric-people"><div className="metric-top"><span>待你处理</span><RiInbox2Line aria-hidden /></div><strong>{overview.openRequests + overview.humanEvents}</strong><small>事件与审批请求</small></Card>
       <Card className="metric-card metric-blocked"><div className="metric-top"><span>受阻任务</span><RiAlertLine aria-hidden /></div><strong>{overview.failedTasks}</strong><small>失败、阻塞或暂停</small></Card>
       <Card className="metric-card metric-queued"><div className="metric-top"><span>排队运行</span><RiLoader4Fill aria-hidden /></div><strong>{overview.queuedRuns}</strong><small>等待 Worker 处理</small></Card>
       <Card className="metric-card metric-worker"><div className="metric-top"><span>Worker 使用</span><RiPulseLine aria-hidden /></div><strong>{overview.runningWorkers}<em> / {overview.workerCapacity ?? '—'}</em></strong><small>当前运行 / 可用名额</small></Card>
@@ -37,7 +37,7 @@ export function OverviewPage() {
       {inbox?.requests.length ? <div className="item-list">{inbox.requests.map(request => <a className="item-row" key={request.id} href={`#/tasks/${encodeURIComponent(request.taskId)}`}>
         <span className="item-icon"><RiPulseLine aria-hidden /></span><span className="item-main"><strong>{request.kind === 'question' ? 'Agent 提问待审查' : request.request?.kind ?? '审批请求'}</strong><small>任务 {request.taskId}</small></span>
         <Badge tone="warn">{request.kind === 'question' ? '待回答' : '待审批'}</Badge></a>)}</div>
-        : <div className="empty-state"><RiPulseLine aria-hidden /><strong>暂无人的决定</strong><span>需要回答或审批时会集中展示</span></div>}</Card></div>
+        : <div className="empty-state"><RiPulseLine aria-hidden /><strong>暂无需要你的决定</strong><span>需要回答或审批时会集中展示</span></div>}</Card></div>
     <Card className="queue-card queue-blocked"><div className="card-heading"><div><span className="eyebrow">处理异常</span><h2>受阻任务</h2></div><a href="#/tasks">查看全部任务 →</a></div>
       {inbox?.tasks.length ? <div className="item-list">{inbox.tasks.map(task => <a className="item-row" key={task.id} href={`#/tasks/${encodeURIComponent(task.id)}`}>
         <span className="item-icon"><RiAlertLine aria-hidden /></span><span className="item-main"><strong>{task.title}</strong><small>{task.repoKey} · 更新于 {new Date(task.updatedAt).toLocaleString()}</small></span><Badge>{task.state}</Badge></a>)}</div>
