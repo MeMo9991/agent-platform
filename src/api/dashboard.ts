@@ -87,14 +87,19 @@ function safeRecord(record: Record<string, unknown>, evidenceRoot: string, store
   const selected: Record<string, unknown> = {};
   for (const key of ['id', 'taskId', 'runId', 'eventId', 'kind', 'at', 'status', 'content',
     'from', 'to', 'decision', 'subjectSha', 'questionId', 'policyVersion', 'reviewedSha',
-    'baseSha', 'commitSha', 'developmentRecordId', 'codeChange', 'postCheckVerified', 'exitCode', 'terminationConfirmed',
-    'timeoutMs', 'startedAt', 'endedAt'])
-    if (record[key] !== undefined) selected[key] = key === 'content' && typeof record[key] === 'string'
-      ? safeText(record[key] as string) : record[key];
+    'baseSha', 'commitSha', 'developmentRecordId', 'codeChange', 'postCheckVerified', 'postCheckError',
+    'command', 'args', 'exitCode', 'terminationConfirmed', 'timeoutMs', 'startedAt', 'endedAt',
+    'reviewRecordId', 'findingIndex', 'disposition', 'reason', 'targetSha', 'changeId', 'ready'])
+    if (record[key] !== undefined) selected[key] = key === 'args' && Array.isArray(record[key])
+      ? (record[key] as unknown[]).map(value => typeof value === 'string' ? safeText(value) : '')
+      : ['content', 'command', 'postCheckError', 'reason'].includes(key) && typeof record[key] === 'string'
+        ? safeText(record[key] as string) : record[key];
   if (record.kind === 'approval_request' && record.request && typeof record.request === 'object') {
     const request = record.request as Record<string, unknown>;
     const proposed = request.proposedMandate as Record<string, unknown> | undefined;
     selected.request = { id: request.id, kind: request.kind, sourceSha: request.sourceSha,
+      action: request.action, targetBranch: request.targetBranch, targetSha: request.targetSha,
+      changeRef: request.changeRef, reviewRecordId: request.reviewRecordId, policyVersion: request.policyVersion,
       proposedMandate: proposed ? { allowedActions: proposed.allowedActions } : undefined };
   }
   if (record.kind === 'check') {
@@ -102,6 +107,31 @@ function safeRecord(record: Record<string, unknown>, evidenceRoot: string, store
     selected.log = evidenceFile(record.logRef, evidenceRoot, record.id, ['check-logs', 'sandbox-profiles']);
   }
   if (record.kind === 'development') selected.diff = evidenceFile(record.diffRef, evidenceRoot, record.id, ['evidence']);
+  if (record.kind === 'effect') {
+    selected.action = record.action;
+    const receipt = record.receipt as Record<string, unknown> | undefined;
+    if (receipt) selected.receipt = { changeId: receipt.changeId, merged: receipt.merged,
+      mergedSha: receipt.mergedSha, observedSourceSha: receipt.observedSourceSha,
+      observedTargetSha: receipt.observedTargetSha };
+  }
+  if (record.kind === 'ci') {
+    selected.state = record.state;
+    selected.gate = record.gate;
+    selected.requiredChecks = record.requiredChecks;
+    selected.checks = Array.isArray(record.checks) ? record.checks.map(value => {
+      const check = value as Record<string, unknown>;
+      return { name: check.name, status: check.status, conclusion: check.conclusion, commitSha: check.commitSha };
+    }) : [];
+  }
+  if (record.kind === 'review') {
+    selected.verdict = record.verdict;
+    selected.findings = Array.isArray(record.findings) ? record.findings.map(item => {
+      const finding = item as Record<string, unknown>;
+      return Object.fromEntries(['file', 'line', 'severity', 'evidence', 'impact', 'action', 'verificationMethod']
+        .filter(key => finding[key] !== undefined).map(key => [key,
+          typeof finding[key] === 'string' ? safeText(finding[key]) : finding[key]]));
+    }) : [];
+  }
   if (typeof record.summary === 'string') selected.summary = record.kind === 'human_result'
     ? safeText(record.summary) : 'Agent 记录待审查';
   if (record.kind === 'question') selected.prompt = reviewedText(store, 'question', String(record.id));
@@ -165,7 +195,15 @@ function protectedDirectory(path: string): string {
 export type DashboardOptions = { actorId: string; repoKeys: readonly string[];
   imageDirectory: string; attachmentReaders: Readonly<Record<string, AttachmentReader>>;
   runners?: Readonly<Record<string, AgentRunner | undefined>>; workerCapacity?: number;
-  evidenceRoot?: string; takeoverEvidence?: TakeoverEvidencePorts; settingsPaths?: SettingsPaths };
+  evidenceRoot?: string; takeoverEvidence?: TakeoverEvidencePorts; settingsPaths?: SettingsPaths;
+  stage5OpenChange?: { prepare(taskId: string, expectedVersion: number): Promise<{
+    kind: 'scope_request' | 'action_request' | 'ready'; requestId?: string;
+    sourceSha: string; targetSha: string }>;
+    execute(taskId: string, expectedVersion: number): Promise<unknown>;
+    status(taskId: string): Promise<unknown>;
+    prepareMerge(taskId: string, expectedVersion: number): Promise<unknown>;
+    observeManualMerge(taskId: string): Promise<'pending' | 'merged'> };
+  stage5WritesEnabled?: boolean };
 
 export async function handleDashboard(request: IncomingMessage, response: ServerResponse, store: SqliteStore,
   coordinator: KernelCoordinator, options: DashboardOptions, roles: readonly string[]): Promise<boolean> {
@@ -174,7 +212,8 @@ export async function handleDashboard(request: IncomingMessage, response: Server
   if (!path.startsWith('/api/')) return false;
   try {
     if (request.method === 'GET' && path === '/api/config') {
-      send(response, 200, { actorId: options.actorId, repoKeys: options.repoKeys, roles }); return true;
+      send(response, 200, { actorId: options.actorId, repoKeys: options.repoKeys, roles,
+        stage5WritesEnabled: options.stage5WritesEnabled === true }); return true;
     }
     if (path === '/api/settings' && request.method === 'GET') {
       if (!roles.includes('configure') || !options.settingsPaths) throw new Error('Configure role required');
@@ -375,6 +414,76 @@ export async function handleDashboard(request: IncomingMessage, response: Server
         else await coordinator.onSignal({ kind: 'human_response', taskId,
           response: { kind: 'approval_decision', value: approvalDecision.parse({ ...input.value, actor, at: new Date().toISOString() }) } });
       send(response, 200, { ok: true, task: safeTask(store, taskId) }); return true;
+    }
+    const resolutionMatch = /^\/api\/tasks\/([^/]+)\/review-resolutions$/.exec(path);
+    if (request.method === 'POST' && resolutionMatch) {
+      if (!roles.includes('approve')) throw new Error('Approve role required');
+      const taskId = decodeURIComponent(resolutionMatch[1]!);
+      const input = z.object({ expectedVersion: z.number().int().positive(), reviewRecordId: z.string().min(1),
+        findingIndex: z.number().int().nonnegative(), subjectSha: z.string().regex(/^[a-f0-9]{40}$/),
+        disposition: z.enum(['accept_risk', 'false_positive']), reason: z.string().trim().min(1).max(2000),
+        idempotencyKey: z.string().min(1) }).strict().parse(await readBody(request, 65_536));
+      const prior = store.db.prepare("SELECT payload_json FROM task_record WHERE kind='review_resolution' AND idempotency_key=?")
+        .get(input.idempotencyKey);
+      if (!prior) checkVersion(store, taskId, input.expectedVersion);
+      const fullyResolved = store.transaction(() => {
+        const complete = store.saveReviewResolution({ ...input, id: randomUUID(), taskId,
+          kind: 'review_resolution', actor: { kind: 'human', id: options.actorId },
+          at: new Date().toISOString() });
+        if (complete && store.getTask(taskId)?.state === 'waiting_human')
+          store.saveTransition(taskId, 'ready_to_merge', 'Blocking review findings resolved',
+            new Date().toISOString(), randomUUID(), { kind: 'human', id: options.actorId });
+        return complete;
+      });
+      send(response, 200, { ok: true, fullyResolved, task: safeTask(store, taskId) }); return true;
+    }
+    const openChangeMatch = /^\/api\/tasks\/([^/]+)\/open-change\/prepare$/.exec(path);
+    if (request.method === 'POST' && openChangeMatch) {
+      if (!roles.includes('command') || !options.stage5OpenChange)
+        throw new Error('Code-host action is unavailable');
+      const taskId = decodeURIComponent(openChangeMatch[1]!);
+      const input = z.object({ expectedVersion: z.number().int().positive() }).strict()
+        .parse(await readBody(request, 65_536));
+      const result = await options.stage5OpenChange.prepare(taskId, input.expectedVersion);
+      send(response, 200, { ...result, task: safeTask(store, taskId) }); return true;
+    }
+    const openExecuteMatch = /^\/api\/tasks\/([^/]+)\/open-change\/execute$/.exec(path);
+    if (request.method === 'POST' && openExecuteMatch) {
+      if (!roles.includes('command') || !options.stage5WritesEnabled || !options.stage5OpenChange)
+        throw new Error('External code-host writes are not enabled');
+      const taskId = decodeURIComponent(openExecuteMatch[1]!);
+      const input = z.object({ expectedVersion: z.number().int().positive() }).strict()
+        .parse(await readBody(request, 65_536));
+      const result = await options.stage5OpenChange.execute(taskId, input.expectedVersion);
+      send(response, 200, { ...result as object, task: safeTask(store, taskId) }); return true;
+    }
+    const hostStatusMatch = /^\/api\/tasks\/([^/]+)\/code-host\/status$/.exec(path);
+    if (request.method === 'GET' && hostStatusMatch) {
+      if (!options.stage5OpenChange) throw new Error('Code-host status is unavailable');
+      const taskId = decodeURIComponent(hostStatusMatch[1]!);
+      const result = await options.stage5OpenChange.status(taskId);
+      send(response, 200, { ...result as object, task: safeTask(store, taskId) }); return true;
+    }
+    const mergePrepareMatch = /^\/api\/tasks\/([^/]+)\/merge\/prepare$/.exec(path);
+    if (request.method === 'POST' && mergePrepareMatch) {
+      if (!roles.includes('command') || !options.stage5OpenChange)
+        throw new Error('Merge preflight is unavailable');
+      const taskId = decodeURIComponent(mergePrepareMatch[1]!);
+      const input = z.object({ expectedVersion: z.number().int().positive() }).strict()
+        .parse(await readBody(request, 65_536));
+      const result = await options.stage5OpenChange.prepareMerge(taskId, input.expectedVersion);
+      send(response, 200, { ...result as object, task: safeTask(store, taskId) }); return true;
+    }
+    const mergeReceiptMatch = /^\/api\/tasks\/([^/]+)\/merge\/observe$/.exec(path);
+    if (request.method === 'POST' && mergeReceiptMatch) {
+      if (!roles.includes('command') || !options.stage5OpenChange)
+        throw new Error('Merge receipt observation is unavailable');
+      const taskId = decodeURIComponent(mergeReceiptMatch[1]!);
+      const input = z.object({ expectedVersion: z.number().int().positive() }).strict()
+        .parse(await readBody(request, 65_536));
+      checkVersion(store, taskId, input.expectedVersion);
+      const state = await options.stage5OpenChange.observeManualMerge(taskId);
+      send(response, 200, { state, task: safeTask(store, taskId) }); return true;
     }
     const commandMatch = /^\/api\/tasks\/([^/]+)\/commands$/.exec(path);
     if (request.method === 'POST' && commandMatch) {

@@ -177,6 +177,8 @@ test('agent and human messages remain typed and unknown usage stays unknown', ()
   assert.equal(routeReviewDecision.safeParse({ choice: 'ignored', eventId: 'e', actor: { kind: 'agent', id: 'bot' }, at: now, idempotencyKey: 'a', reason: 'x' }).success, false);
   assert.equal(approvalDecision.safeParse({ requestId: 'a', actor: { kind: 'agent', id: 'bot' }, decision: 'approve', at: now, idempotencyKey: 'k' }).success, false);
   assert.equal(approvalRequest.safeParse({ kind: 'action', id: 'a', taskId: 't', action: 'merge', sourceSha: 'sha', policyVersion: 'v1' }).success, false);
+  assert.equal(approvalRequest.safeParse({ kind: 'action', id: 'a', taskId: 't', action: 'open_pr', sourceSha: 'sha', policyVersion: 'v1' }).success, false);
+  assert.equal(approvalRequest.safeParse({ kind: 'action', id: 'a', taskId: 't', action: 'open_pr', sourceSha: 'sha', reviewRecordId: 'review', targetBranch: 'main', targetSha: 'base', policyVersion: 'v1' }).success, true);
   assert.equal(approvalRequest.safeParse({ kind: 'action', id: 'a', taskId: 't', action: 'release', sourceSha: 'sha', environment: 'prod', releaseVersion: 'v1', policyVersion: 'p1' }).success, false);
   assert.equal(approvalRequest.safeParse({ kind: 'action', id: 'a', taskId: 't', action: 'release', sourceSha: 'sha', environment: 'prod', releaseVersion: 'v1', releaseTargetDigest: 'digest', policyVersion: 'p1' }).success, true);
   assert.equal(routeDecision.safeParse({ kind: 'needs_human', candidates: [], reason: 'similar only' }).success, true);

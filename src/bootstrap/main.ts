@@ -20,6 +20,8 @@ import { createDevopsAttachmentReader } from '../event/sources/devops/attachment
 import { startWorkerLoop } from './worker-loop.js';
 import { acquireInstanceLock } from './instance-lock.js';
 import { createManualAttachmentReader } from '../event/sources/manual/attachment.js';
+import { createCodeHosts } from '../repository-ci/providers/index.js';
+import { createStage5OpenChange } from '../authorization/stage5-open-change.js';
 
 const platform = platformConfig.parse(JSON.parse(readFileSync(process.env.AGENT_PLATFORM_CONFIG ?? 'config/platform.json', 'utf8')));
 const databasePath = process.env.AGENT_PLATFORM_DATABASE ?? '.runtime/state/agent-platform.sqlite3';
@@ -68,19 +70,47 @@ const runners = { qoder: createQoderRunner(qoderRuntime?.launcher ?? unavailable
   resolve(root, '.runtime/logs')) };
 const agentKind = platform.agents.find(agent => agent.kind in runners)?.kind;
 if (!agentKind) throw new Error('Stage three requires one registered Agent kind');
+const stage5WorkerEnabled = process.env.AGENT_PLATFORM_STAGE5_WORKER_ENABLED === '1';
+if (stage5WorkerEnabled && !qoderRuntime) throw new Error('Stage five Worker needs an enabled isolated Qoder runtime');
 const coordinator = createKernelCoordinator(runtime.store, trustedRepoBySource, platform.policyRef,
   'configured-source', agentKind, platform.repositories.map(repo => repo.repoKey),
   createTaskCandidateFinder(runtime.store));
 let routeTimer: ReturnType<typeof setInterval> | undefined;
+let ciTimer: ReturnType<typeof setInterval> | undefined;
+let ciTick: Promise<void> | undefined;
 const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+const skills = createGitSkillLoader({ 'agent-platform': root });
+if (stage5WorkerEnabled) for (const stage of ['verify', 'review'] as const)
+  await skills.load({ repoRef: 'agent-platform', path: `skills/${stage}/SKILL.md`, commitSha: head, stage });
 const workspace = createGitWorkspaceManager(Object.fromEntries(platform.repositories.filter(repo => repo.localPath)
   .map(repo => [repo.repoKey, { path: resolve(repo.localPath!),
     remote: `${repo.hostUrl}/${repo.projectRef}.git` }])), resolve(root, '.runtime'),
-  run => runtime.store.getTask(run.taskId)?.repoKey ?? '');
+  run => runtime.store.getTask(run.taskId)?.repoKey ?? '', run => {
+    if (!run.commitSha) return undefined;
+    const row = runtime.store.db.prepare(`SELECT run_id FROM task_record WHERE task_id=? AND kind='development'
+      AND json_extract(payload_json,'$.commitSha')=? AND json_extract(payload_json,'$.postCheckVerified')=1
+      ORDER BY at DESC LIMIT 1`).get(run.taskId, run.commitSha);
+    const source = row ? runtime.store.getRun(String(row.run_id)) : undefined;
+    return source?.stage === 'develop' && source.status === 'succeeded' &&
+      source.commitSha === run.commitSha ? source.workspaceRef : undefined;
+  });
+const codeHosts = createCodeHosts(platform);
+const stage5WritesEnabled = process.env.AGENT_PLATFORM_STAGE5_WRITES_ENABLED === '1';
+if (stage5WritesEnabled) for (const repo of platform.repositories) {
+  const host = codeHosts[repo.repoKey];
+  if (!host?.readTarget || !host.readRequiredChecks || !repo.requiredChecks.length)
+    throw new Error(`Stage five write preflight is unavailable for ${repo.repoKey}`);
+  await host.readTarget(repo.targetBranch);
+  await host.readRequiredChecks(repo.targetBranch);
+}
+const stage5OpenChange = createStage5OpenChange(runtime.store,
+  Object.fromEntries(platform.repositories.map(repo => [repo.repoKey, repo])), codeHosts,
+  workspace, platform.policyRef);
 const manager = createWorkerManager({ store: runtime.store, coordinator,
   runners,
   enabledAgents: platform.agents.filter(agent => agent.enabled).map(agent => agent.kind),
-  workspace, skills: createGitSkillLoader({ 'agent-platform': root }),
+  enabledStages: stage5WorkerEnabled ? ['investigate', 'develop', 'verify', 'review'] : undefined,
+  workspace, skills,
   boundary: qoderRuntime?.boundary ?? { async attest() { return undefined; } },
   skillRepoPath: 'agent-platform', skillCommitSha: head,
   riskPolicy: { assess() { return 'unknown'; } }, policyVersion: platform.policyRef,
@@ -98,6 +128,8 @@ try {
     dashboard: { actorId: platform.interaction.actorId,
       repoKeys: platform.repositories.map(repo => repo.repoKey), imageDirectory, attachmentReaders, runners,
       evidenceRoot: resolve(root, '.runtime'),
+      stage5OpenChange,
+      stage5WritesEnabled,
       settingsPaths: { platform: process.env.AGENT_PLATFORM_CONFIG ?? 'config/platform.json',
         schedules: process.env.AGENT_PLATFORM_SCHEDULES ?? 'config/schedules.json' },
       takeoverEvidence: { workspace, boundary: qoderRuntime?.boundary ?? { async attest() { return undefined; } },
@@ -118,6 +150,30 @@ catch (error) { await api?.stop(); await workerLoop.stop(); await runtime.stop()
 routeTimer = setInterval(() => {
   try { coordinator.processPending(); } catch (error) { console.error('Event routing failed', error); }
 }, 1000);
+if (stage5WritesEnabled) {
+  const pollCodeHost = () => {
+    if (ciTick) return;
+    ciTick = (async () => {
+      const tasks = runtime.store.db.prepare(`SELECT DISTINCT effect.task_id FROM task_record AS effect
+        JOIN task ON task.id=effect.task_id WHERE effect.kind='effect' AND effect.status='done'
+        AND json_extract(effect.payload_json,'$.action')='open_pr'
+        AND task.state='ready_to_merge'`).all();
+      for (const row of tasks) {
+        const taskId = String(row.task_id);
+        try {
+          await stage5OpenChange.status(taskId);
+          const pending = runtime.store.db.prepare(`SELECT 1 FROM task_record WHERE task_id=? AND kind='effect'
+            AND status IN ('pending','uncertain') AND json_extract(payload_json,'$.action')='merge' LIMIT 1`)
+            .get(taskId);
+          if (pending) await stage5OpenChange.observeManualMerge(taskId);
+        } catch (error) { console.error(`Code-host poll failed for Task ${taskId}`, error); }
+      }
+    })().catch(error => { console.error('Code-host polling failed', error); })
+      .finally(() => { ciTick = undefined; });
+  };
+  pollCodeHost();
+  ciTimer = setInterval(pollCodeHost, 30_000);
+}
 if (api) console.log(`Local interaction API listening at http://127.0.0.1:${api.port}`);
 console.log('Agent platform ready');
 
@@ -125,10 +181,12 @@ let stopping: Promise<void> | undefined;
 const stop = () => {
   if (stopping) return;
   if (routeTimer) clearInterval(routeTimer);
+  if (ciTimer) clearInterval(ciTimer);
   stopping = (async () => {
     try {
       try { await api?.stop(); }
-      finally { try { await workerLoop.stop(); } finally { await runtime.stop(); } }
+      finally { try { await workerLoop.stop(); }
+        finally { try { await ciTick; } finally { await runtime.stop(); } } }
     }
     finally { await instanceLock.release(); }
   })()

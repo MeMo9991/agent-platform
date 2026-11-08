@@ -36,6 +36,8 @@ export interface KernelStore extends EventLoopStore {
   getRecord(id: string): TaskRecord | undefined;
   openQuestionForRun(runId: string): TaskRecord | undefined;
   hasPendingInput(taskId: string): boolean;
+  countReviewBlocks(taskId: string, iteration: number): number;
+  setRepairBaseRef(taskId: string, sourceSha: string): void;
   hasActiveRun(taskId: string): boolean;
   getReopenByKey(key: string): Extract<TaskRecord, { kind: 'reopen' }> | undefined;
   saveReopenedTask(previous: Task, next: Task, reopeningRecordId: string): void;
@@ -200,7 +202,8 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
         await this.onSignal({ kind: 'agent_event', taskId: task.id,
           event: { kind: 'result', runId: run.id, status: signal.observation.exitCode === 0 ? 'succeeded' : 'failed',
             exitCode: signal.observation.exitCode, resultRef: signal.observation.resultRef,
-            development: signal.observation.development } });
+            development: signal.observation.development, verification: signal.observation.verification,
+            review: signal.observation.review } });
         return;
       }
       if (signal.kind === 'human_response') {
@@ -226,10 +229,21 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
           store.transaction(() => {
             const approved = store.recordApproval(response.value);
             if (!approved) return;
-            store.saveTransition(approved.id, 'developing', 'Approved edit scope', response.value.at,
-              randomUUID(), response.value.actor);
-            store.saveRun(queuedRun(approved, 'develop', response.value.requestId, randomUUID(), agentKind,
-              response.value.at));
+            if (request.kind !== 'approval_request') throw new Error('Approval request changed');
+            const approvedRequest = request.request as z.infer<typeof approvalRequest>;
+            if (approvedRequest.kind === 'action') {
+              store.saveTransition(approved.id, 'ready_to_merge', 'Approved code-host action',
+                response.value.at, randomUUID(), response.value.actor);
+            } else if (approvedRequest.proposedMandate.allowedActions.includes('open_pr') ||
+                approvedRequest.proposedMandate.allowedActions.includes('merge')) {
+              store.saveTransition(approved.id, 'ready_to_merge', 'Approved code-host scope',
+                response.value.at, randomUUID(), response.value.actor);
+            } else {
+              store.saveTransition(approved.id, 'developing', 'Approved edit scope', response.value.at,
+                randomUUID(), response.value.actor);
+              store.saveRun(queuedRun(approved, 'develop', response.value.requestId, randomUUID(), agentKind,
+                response.value.at));
+            }
           });
         } else {
           if (signal.taskId && response.value.choice === 'existing_task' && signal.taskId !== response.value.taskId)
@@ -244,7 +258,9 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
         const run = store.getRun(event.runId);
         let task = store.getTask(signal.taskId);
         if (!run || !task) throw new Error('Task or Run is missing');
-        const decision = decideAgentEvent(task, run, event, store.hasPendingInput(task.id));
+        const previousReviewBlocks = event.kind === 'result' && run.stage === 'review'
+          ? store.countReviewBlocks(task.id, task.iteration) : 0;
+        const decision = decideAgentEvent(task, run, event, store.hasPendingInput(task.id), previousReviewBlocks);
         const at = new Date().toISOString();
         if (event.kind === 'input_handled') {
           store.setEventLinkStatus(task.id, event.eventId, 'delivered', 'handled');
@@ -281,12 +297,19 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
             for (const check of event.development.checks) store.saveRecord({ id: randomUUID(), taskId: task.id,
               runId: run.id, kind: 'check', subjectSha: event.development.commitSha, ...check, at });
           }
+          if (event.verification) for (const check of event.verification.checks)
+            store.saveRecord({ id: randomUUID(), taskId: task.id, runId: run.id, kind: 'check',
+              subjectSha: event.verification.subjectSha, ...check, at });
+          if (event.review) store.saveRecord({ id: randomUUID(), taskId: task.id, runId: run.id,
+            kind: 'review', iteration: task.iteration, ...event.review, at });
           store.replaceRun({ ...run, status: ['failed', 'blocked'].includes(decision.state ?? '') ? 'failed' : event.status,
             leaseUntil: undefined, workerId: undefined,
             resultRef: event.resultRef, commitSha: event.development?.commitSha ?? run.commitSha, endedAt: at }, 'running');
         }
         if (decision.state && task.state !== decision.state)
           store.saveTransition(task.id, decision.state, decision.reason ?? `Agent ${event.kind}`, at, randomUUID(), actor);
+        if (event.kind === 'result' && run.stage === 'review' && decision.queueStage === 'develop' && event.review)
+          store.setRepairBaseRef(task.id, event.review.subjectSha);
         if (decision.needsScopeApproval) {
           if (!task.baseRef) throw new Error('Cannot request edit scope without a verified base SHA');
           const requestId = `scope-${run.id}`;
@@ -298,7 +321,8 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
         if (decision.queueStage) store.saveRun({ id: randomUUID(), taskId: task.id, iteration: task.iteration,
           stage: decision.queueStage, status: 'queued', requestKey: `${task.id}:${task.iteration}:${decision.queueStage}:${run.id}`,
           agentKind, priority: run.priority, attempt: 0, createdAt: at,
-          commitSha: decision.queueStage === 'verify' && event.kind === 'result' ? event.development?.commitSha : undefined });
+          commitSha: event.kind === 'result' ? event.development?.commitSha ?? event.verification?.subjectSha ??
+            (decision.queueStage === 'develop' ? event.review?.subjectSha : undefined) : undefined });
       });
     },
   };

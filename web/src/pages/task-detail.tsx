@@ -27,6 +27,31 @@ function ContentReview({ taskId, version, targetKind, targetId, onDone }: { task
   </form>;
 }
 
+function ReviewResolution({ taskId, version, review, index, onDone }: { taskId: string; version: number;
+  review: RecordItem; index: number; onDone: () => void }) {
+  const [reason, setReason] = useState('');
+  const [disposition, setDisposition] = useState<'accept_risk' | 'false_positive'>('false_positive');
+  const [key, setKey] = useState(() => crypto.randomUUID());
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function submit(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError('');
+    try {
+      await api(`/api/tasks/${encodeURIComponent(taskId)}/review-resolutions`, { method: 'POST',
+        body: { expectedVersion: version, reviewRecordId: review.id, findingIndex: index,
+          subjectSha: review.subjectSha, disposition, reason, idempotencyKey: key } });
+      onDone();
+    } catch (cause) { setError(String(cause)); }
+    finally { setBusy(false); }
+  }
+  return <form className="stack" onSubmit={submit}><label>处理决定<select value={disposition}
+    onChange={event => { setDisposition(event.target.value as typeof disposition); setKey(crypto.randomUUID()); }}>
+    <option value="false_positive">误报</option><option value="accept_risk">接受风险</option></select></label>
+    <label>理由<textarea value={reason} onChange={event => { setReason(event.target.value); setKey(crypto.randomUUID()); }}
+      required maxLength={2000} /></label><Button type="submit" disabled={busy || !reason.trim()}>记录处理决定</Button>
+    {error && <p role="alert" className="error">{error}</p>}</form>;
+}
+
 function HumanAction({ taskId, version, record, onDone }: { taskId: string; version: number;
   record: RecordItem; onDone: () => void }) {
   const [content, setContent] = useState('');
@@ -46,7 +71,12 @@ function HumanAction({ taskId, version, record, onDone }: { taskId: string; vers
     finally { setBusy(false); }
   }
   return <div className="action-box"><p><strong>{isQuestion ? '待回答' : '待审批'}</strong> · {record.prompt ?? record.request?.kind ?? '题目待审查'}</p>
-    {record.request && <p className="muted">受审 SHA：{record.request.sourceSha} · 拟议动作：{record.request.proposedMandate?.allowedActions.join(', ')}</p>}
+    {record.request && <p className="muted">受审 SHA：{record.request.sourceSha} · 拟议动作：{record.request.action ?? record.request.proposedMandate?.allowedActions.join(', ')}
+      {record.request.targetBranch && <> · 目标分支：{record.request.targetBranch}</>}
+      {record.request.targetSha && <> · 目标 SHA：{record.request.targetSha}</>}
+      {record.request.changeRef && <> · 变更请求：{record.request.changeRef}</>}
+      {record.request.reviewRecordId && <> · 审查记录：{record.request.reviewRecordId}</>}
+      {record.request.policyVersion && <> · 策略版本：{record.request.policyVersion}</>}</p>}
     {isQuestion && !record.prompt && <ContentReview taskId={taskId} version={version} targetKind="question" targetId={record.id} onDone={onDone} />}
     {isQuestion ? record.prompt && <form onSubmit={submit} className="stack"><label>回答<textarea value={content} onChange={event => { setContent(event.target.value); setDecisionKey(crypto.randomUUID()); }} required /></label>
       <Button type="submit" disabled={busy}>提交回答</Button></form> : <div className="actions">
@@ -126,10 +156,77 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
     {receipt && <p role="status">{receipt}</p>}</Card>;
 }
 
-export function TaskDetailPage({ id, actorId, roles }: { id: string; actorId: string; roles: string[] }) {
+export function TaskDetailPage({ id, actorId, roles, stage5WritesEnabled }: { id: string; actorId: string;
+  roles: string[]; stage5WritesEnabled: boolean }) {
   const [detail, setDetail] = useState<Detail>();
   const [error, setError] = useState('');
   const [revision, setRevision] = useState(0);
+  const [hostResult, setHostResult] = useState('');
+  const [hostBusy, setHostBusy] = useState(false);
+  async function prepareOpenChange() {
+    if (!detail) return;
+    setHostBusy(true); setHostResult('');
+    try {
+      const result = await api<{ kind: 'scope_request' | 'action_request' | 'ready'; targetSha: string }>(
+        `/api/tasks/${encodeURIComponent(id)}/open-change/prepare`,
+        { method: 'POST', body: { expectedVersion: detail.task.version } });
+      setHostResult(result.kind === 'scope_request' ? `已请求范围审批，目标 SHA ${result.targetSha}`
+        : result.kind === 'action_request' ? `已请求动作审批，目标 SHA ${result.targetSha}`
+          : `动作批准有效，目标 SHA ${result.targetSha}`);
+      setRevision(value => value + 1);
+    } catch (cause) { setHostResult(String(cause)); }
+    finally { setHostBusy(false); }
+  }
+  async function executeOpenChange() {
+    if (!detail) return;
+    setHostBusy(true); setHostResult('');
+    try {
+      const result = await api<{ kind: 'opened' | 'uncertain'; changeId?: string }>(
+        `/api/tasks/${encodeURIComponent(id)}/open-change/execute`,
+        { method: 'POST', body: { expectedVersion: detail.task.version } });
+      setHostResult(result.kind === 'opened' ? `变更请求 ${result.changeId} 已由平台确认`
+        : '外部状态未确认；系统不会重复创建，请核对平台');
+      setRevision(value => value + 1);
+    } catch (cause) { setHostResult(String(cause)); }
+    finally { setHostBusy(false); }
+  }
+  async function refreshCodeHost() {
+    setHostBusy(true); setHostResult('');
+    try {
+      const result = await api<{ ready: boolean; state: string; targetSha: string }>(
+        `/api/tasks/${encodeURIComponent(id)}/code-host/status`);
+      setHostResult(`平台状态：${result.state} · 目标 SHA ${result.targetSha} · 门禁${result.ready ? '通过' : '未通过'}`);
+      setRevision(value => value + 1);
+    } catch (cause) { setHostResult(String(cause)); }
+    finally { setHostBusy(false); }
+  }
+  async function prepareMerge() {
+    if (!detail) return;
+    setHostBusy(true); setHostResult('');
+    try {
+      const result = await api<{ kind: 'scope_request' | 'action_request' | 'manual_ready';
+        targetSha: string; changeId: string }>(`/api/tasks/${encodeURIComponent(id)}/merge/prepare`,
+        { method: 'POST', body: { expectedVersion: detail.task.version } });
+      setHostResult(result.kind === 'scope_request' ? `已请求合并范围审批，变更请求 ${result.changeId}`
+        : result.kind === 'action_request' ? `已请求合并动作审批，目标 SHA ${result.targetSha}`
+          : `合并审批与检查通过；请在平台人工合并变更请求 ${result.changeId}，并确认目标 SHA ${result.targetSha}`);
+      setRevision(value => value + 1);
+    } catch (cause) { setHostResult(String(cause)); }
+    finally { setHostBusy(false); }
+  }
+  async function observeMerge() {
+    if (!detail) return;
+    setHostBusy(true); setHostResult('');
+    try {
+      const result = await api<{ state: 'pending' | 'merged' }>(
+        `/api/tasks/${encodeURIComponent(id)}/merge/observe`,
+        { method: 'POST', body: { expectedVersion: detail.task.version } });
+      setHostResult(result.state === 'merged' ? '平台合并回执已核实，等待发布'
+        : '平台尚未确认合并');
+      setRevision(value => value + 1);
+    } catch (cause) { setHostResult(String(cause)); }
+    finally { setHostBusy(false); }
+  }
   useEffect(() => { let live = true;
     const load = () => api<Detail>(`/api/tasks/${encodeURIComponent(id)}`).then(value => {
       if (live) { setDetail(value); setError(''); }
@@ -137,6 +234,9 @@ export function TaskDetailPage({ id, actorId, roles }: { id: string; actorId: st
     void load(); const timer = setInterval(load, 5000);
     return () => { live = false; clearInterval(timer); };
   }, [id, revision]);
+  const ci = detail?.records.filter(item => item.kind === 'ci').at(-1);
+  const mergedSha = detail?.records.filter(item => item.kind === 'effect' && item.action === 'merge' &&
+    item.receipt?.merged).at(-1)?.receipt?.mergedSha;
   return <div className="stack detail-page"><a className="back-link" href="#/tasks">← 返回任务列表</a>{error && <p role="alert" className="error">{error}</p>}
     {!detail && !error && <p>正在加载…</p>}
     {detail && <><header className="detail-heading"><span className="eyebrow">任务 / {detail.task.id}</span>
@@ -182,7 +282,40 @@ export function TaskDetailPage({ id, actorId, roles }: { id: string; actorId: st
           {item.kind === 'human_result' && item.commitSha && <p className="muted">人工提交 SHA {item.commitSha} · 开发证据记录 {item.developmentRecordId}</p>}
           {item.subjectSha && <p className="muted">SHA {item.subjectSha}</p>}</li>)}</ol>
         : <p className="muted">尚无记录</p>}</Card>
-      <Card><h2>后续交付</h2><p className="muted">独立验证、审查、CI、合并：尚无结果</p></Card>
+      <Card><h2>独立审查</h2>{detail.records.filter(item => item.kind === 'review').length
+        ? detail.records.filter(item => item.kind === 'review').map(item => <div className="run-row" key={item.id}>
+          <strong>{item.verdict === 'pass' ? '通过' : '阻断'} · SHA {item.subjectSha}</strong>
+          {item.findings?.map((finding, index) => <div key={index}><p>{finding.file}{finding.line ? `:${finding.line}` : ''}
+            · {finding.severity} · {finding.evidence} · 影响：{finding.impact}
+            {finding.action && ` · 处理：${finding.action}`}
+            {finding.verificationMethod && ` · 验证：${finding.verificationMethod}`}</p>
+            {detail.records.find(record => record.kind === 'review_resolution' && record.reviewRecordId === item.id &&
+              record.findingIndex === index)
+              ? <p className="muted">已有结构化处理决定</p>
+              : detail.task.state === 'waiting_human' && roles.includes('approve') &&
+                item.id === detail.records.filter(record => record.kind === 'review').at(-1)?.id &&
+                <ReviewResolution taskId={id} version={detail.task.version} review={item} index={index}
+                  onDone={() => setRevision(value => value + 1)} />}</div>)}
+        </div>) : <p className="muted">尚无结果</p>}</Card>
+      <Card><h2>CI 与合并</h2>{detail.task.state === 'ready_to_merge' && roles.includes('command') &&
+        <Button disabled={hostBusy} onClick={() => void prepareOpenChange()}>
+          {hostBusy ? '检查中…' : '发起 PR/MR 审批'}</Button>}
+        {stage5WritesEnabled && detail.task.state === 'ready_to_merge' && roles.includes('command') &&
+          <Button disabled={hostBusy} onClick={() => void executeOpenChange()}>创建已批准的 PR/MR</Button>}
+        {detail.records.some(item => item.kind === 'effect' && item.status === 'done') &&
+          <Button disabled={hostBusy} onClick={() => void refreshCodeHost()}>刷新平台检查</Button>}
+        {ci?.ready && detail.task.state === 'ready_to_merge' && roles.includes('command') &&
+          <Button disabled={hostBusy} onClick={() => void prepareMerge()}>发起合并审批</Button>}
+        {detail.records.some(item => item.kind === 'effect' && item.action === 'merge' &&
+          ['pending', 'uncertain'].includes(item.status ?? '')) && roles.includes('command') &&
+          <Button disabled={hostBusy} onClick={() => void observeMerge()}>核验人工合并回执</Button>}
+        {hostResult && <p role="status">{hostResult}</p>}
+        {ci ? <div className="run-row"><strong>变更请求 {ci.changeId} · {ci.state} · 门禁{ci.ready ? '通过' : '未通过'}</strong>
+            <p className="muted">源 SHA {ci.subjectSha} · 目标 SHA {ci.targetSha} · 平台状态 {ci.gate}</p>
+            <p>必需检查：{ci.requiredChecks?.join('、') || '未确认'}</p>
+            {ci.checks?.map((check, index) => <p key={index}>{check.name} · {check.status} · {check.conclusion} · {check.commitSha}</p>)}
+          </div> : <p className="muted">尚无平台检查或合并回执</p>}
+        {mergedSha && <p>已核实合并提交：{mergedSha}</p>}</Card>
       {roles.includes('command') && <Commands detail={detail} actorId={actorId} onDone={() => setRevision(value => value + 1)} />}
     </>}
   </div>;

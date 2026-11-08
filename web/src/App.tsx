@@ -10,7 +10,7 @@ import { TasksPage } from './pages/tasks';
 import { SettingsPage } from './pages/settings';
 import { cx } from '@/utils/cx';
 
-type Config = { actorId: string; repoKeys: string[]; roles: string[] };
+type Config = { actorId: string; repoKeys: string[]; roles: string[]; stage5WritesEnabled?: boolean };
 export default function App() {
   const [hash, setHash] = useState(location.hash || '#/');
   const [credential, setCredential] = useState(token());
@@ -35,7 +35,7 @@ export default function App() {
   </div></main>;
   const segments = hash.replace(/^#\//, '').split('/');
   const section = segments[0] === 'tasks' ? 'tasks' : segments[0] === 'new' ? 'new' : segments[0] === 'settings' ? 'settings' : 'overview';
-  const page = segments[0] === 'tasks' && segments[1] ? <TaskDetailPage id={decodeURIComponent(segments[1])} actorId={config.actorId} roles={config.roles} />
+  const page = segments[0] === 'tasks' && segments[1] ? <TaskDetailPage id={decodeURIComponent(segments[1])} actorId={config.actorId} roles={config.roles} stage5WritesEnabled={config.stage5WritesEnabled === true} />
     : segments[0] === 'tasks' ? <TasksPage repoKeys={config.repoKeys} canDelete={config.roles.includes('command')} />
     : segments[0] === 'events' && segments[1] ? <EventPage id={decodeURIComponent(segments[1])} repoKeys={config.repoKeys} canRoute={config.roles.includes('route')} />
     : segments[0] === 'new' ? config.roles.includes('submit') ? <ManualSubmit repoKeys={config.repoKeys} /> : <p>当前凭据没有提交任务权限。</p>

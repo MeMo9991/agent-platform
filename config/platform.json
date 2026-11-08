@@ -6,12 +6,12 @@
       "hostUrl": "https://github.com",
       "projectRef": "MeMo9991/agent-platform",
       "targetBranch": "main",
-      "requiredChecks": [],
+      "requiredChecks": ["verify"],
       "localChecks": [
         { "command": "npm", "args": ["run", "typecheck"], "timeoutMs": 120000 },
         { "command": "npm", "args": ["test"], "timeoutMs": 180000 }
       ],
-      "credentialsRef": "unconfigured-stage3",
+      "credentialsRef": "env:AGENT_PLATFORM_GITHUB_TOKEN",
       "localPath": "."
     }
   ],
@@ -23,7 +23,7 @@
       "enabled": true
     }
   ],
-  "agents": [{ "kind": "qoder", "enabled": false }],
+  "agents": [{ "kind": "qoder", "enabled": true }],
   "interaction": {
     "actorId": "local-owner",
     "roles": ["answer", "route", "approve", "reopen", "submit", "command", "configure"],

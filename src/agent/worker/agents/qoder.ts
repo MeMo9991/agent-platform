@@ -83,7 +83,7 @@ export function createQoderRunner(launcher: IsolatedProcessLauncher, logDirector
       const args = ['-p', '--output-format', 'stream-json', '--cwd', request.workspace.path,
         '--permission-mode', 'dont_ask', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
         '--setting-sources', '', '--append-system-prompt', systemPrompt,
-        ...(request.stage === 'investigate' ? ['--tools', 'Read', 'Grep', 'Glob',
+        ...(['investigate', 'verify', 'review'].includes(request.stage) ? ['--tools', 'Read', 'Grep', 'Glob',
           '--allowed-tools', 'Read,Grep,Glob'] : []),
         ...attachments.flatMap(path => ['--attachment', path]), prompt];
       const launched = launcher.launch('qoderclicn', args, request.workspace.path, request.execution);

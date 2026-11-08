@@ -2,10 +2,11 @@ import type { AgentEvent, Run } from '../worker/model.js';
 import type { Task, TaskState } from './model.js';
 import type { KernelSignal } from '../kernel/model.js';
 
-export type WorkflowDecision = { state?: TaskState; queueStage?: 'investigate' | 'develop' | 'verify';
+export type WorkflowDecision = { state?: TaskState; queueStage?: 'investigate' | 'develop' | 'verify' | 'review';
   needsScopeApproval?: boolean; reason?: string };
 
-export function decideAgentEvent(task: Task, run: Run, event: AgentEvent, hasPendingInput = false): WorkflowDecision {
+export function decideAgentEvent(task: Task, run: Run, event: AgentEvent, hasPendingInput = false,
+  previousReviewBlocks = 0): WorkflowDecision {
   if (run.taskId !== task.id || event.runId !== run.id || run.iteration !== task.iteration || run.status !== 'running')
     throw new Error('Agent event does not match the active Task and Run');
   if (event.kind === 'progress') return task.state === 'queued'
@@ -21,12 +22,29 @@ export function decideAgentEvent(task: Task, run: Run, event: AgentEvent, hasPen
         proof.checks.some(check => check.result !== 'passed' || check.exitCode !== 0 || !check.terminationConfirmed))
       return { state: 'blocked', reason: 'Development lacks matching diff, commit SHA and passing local checks' };
   }
+  if (run.stage === 'verify') {
+    const proof = event.verification;
+    if (!proof || proof.subjectSha !== run.commitSha || !proof.postCheckVerified ||
+        proof.checks.length === 0 || proof.checks.some(check => check.result !== 'passed' ||
+          check.exitCode !== 0 || !check.terminationConfirmed))
+      return { state: 'blocked', reason: 'Fixed-SHA verification lacks passing command evidence' };
+  }
+  if (run.stage === 'review') {
+    const review = event.review;
+    if (!review || review.subjectSha !== run.commitSha)
+      return { state: 'blocked', reason: 'Review lacks structured evidence for its pinned SHA' };
+    if (review.verdict === 'block') return previousReviewBlocks < 2
+      ? { state: 'developing', queueStage: 'develop', reason: 'Review blocking findings require repair' }
+      : { state: 'waiting_human', reason: 'Automatic repair limit reached' };
+  }
   if (hasPendingInput && (run.stage === 'investigate' || run.stage === 'develop'))
     return { queueStage: run.stage };
   if (run.stage === 'investigate') return task.mandate.allowedActions.includes('edit')
     ? { state: 'developing', queueStage: 'develop' }
     : { state: 'waiting_human', needsScopeApproval: true };
   if (run.stage === 'develop') return { state: 'verifying', queueStage: 'verify' };
+  if (run.stage === 'verify') return { state: 'reviewing', queueStage: 'review' };
+  if (run.stage === 'review') return { state: 'ready_to_merge' };
   throw new Error(`Stage ${run.stage} is not executed in stage three`);
 }
 

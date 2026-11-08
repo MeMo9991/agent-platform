@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { actorRef, evidenceRef, id, timestamp } from '../../shared/model.js';
+import { checkResult } from '../../repository-ci/model.js';
 
 export const action = z.enum(['investigate', 'edit', 'open_pr', 'merge', 'release', 'rollback']);
 export const mandate = z.object({ sourceEventId: id, repoKey: id, goal: id, allowedActions: z.array(action),
@@ -56,10 +57,26 @@ export const taskRecord = z.discriminatedUnion('kind', [
     timeoutMs: z.number().int().positive(), startedAt: timestamp, endedAt: timestamp,
     result: z.enum(['passed', 'failed', 'timeout', 'unavailable']), exitCode: z.number().int().nullable(),
     logRef: id, terminationConfirmed: z.boolean() }),
-  recordBase.extend({ kind: z.literal('review'), subjectSha: id, verdict: z.enum(['pass', 'block']), findings: z.array(z.object({ file: id, severity: id, evidence: id, impact: id })) }),
+  recordBase.extend({ kind: z.literal('ci'), subjectSha: id, targetSha: id,
+    changeId: id, state: z.enum(['open', 'merged', 'closed', 'unknown']),
+    gate: z.enum(['ready', 'blocked', 'unknown']), ready: z.boolean(),
+    requiredChecks: z.array(id), checks: z.array(checkResult) }),
+  recordBase.extend({ kind: z.literal('review'), iteration: z.number().int().positive().optional(),
+    subjectSha: id, verdict: z.enum(['pass', 'block']), findings: z.array(z.object({ file: id,
+    line: z.number().int().positive().optional(), severity: id, evidence: id, impact: id,
+    action: id.optional(), verificationMethod: id.optional() })) }),
+  recordBase.extend({ kind: z.literal('review_resolution'), reviewRecordId: id,
+    findingIndex: z.number().int().nonnegative(), subjectSha: id,
+    disposition: z.enum(['accept_risk', 'false_positive']), reason: z.string().trim().min(1).max(2000),
+    idempotencyKey: id, actor: actorRef.extend({ kind: z.literal('human') }) }),
   recordBase.extend({ kind: z.literal('approval'), requestId: id, action, subjectSha: id, policyVersion: id,
     idempotencyKey: id, actor: actorRef.extend({ kind: z.literal('human') }), decision: z.enum(['approve', 'reject']) }),
-  recordBase.extend({ kind: z.literal('effect'), action, idempotencyKey: id, status: z.enum(['pending', 'done', 'uncertain', 'failed']), subjectSha: id.optional() }),
+  recordBase.extend({ kind: z.literal('effect'), action, idempotencyKey: id,
+    status: z.enum(['pending', 'done', 'uncertain', 'failed']), subjectSha: id.optional(),
+    request: z.object({ repoKey: id, sourceBranch: id.optional(), targetBranch: id,
+      sourceSha: id, targetSha: id, changeId: id.optional(), policyVersion: id }).optional(),
+    receipt: z.object({ changeId: id, observedSourceSha: id, observedTargetSha: id,
+      merged: z.boolean(), mergedSha: id.optional() }).optional() }),
   recordBase.extend({ kind: z.literal('release'), environment: id, version: id, status: z.enum(['pending', 'succeeded', 'failed']) }),
   recordBase.extend({ kind: z.literal('state_change'), from: taskState, to: taskState, reason: id, actor: actorRef, evidenceRefs: z.array(evidenceRef).optional() }),
 ]);
