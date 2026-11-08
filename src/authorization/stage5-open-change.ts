@@ -73,17 +73,19 @@ export function createStage5OpenChange(store: SqliteStore, repositories: Readonl
     const changed = (await git('git', ['diff', '--name-only', '-z', development.baseSha, sourceSha],
       { cwd: run.workspaceRef, maxBuffer: 1024 * 1024 })).stdout.split('\0').filter(Boolean);
     if (!changed.length) throw new Error('Development diff is empty');
+    const diff = (await git('git', ['diff', '--binary', '--no-ext-diff', development.baseSha, sourceSha],
+      { cwd: run.workspaceRef, maxBuffer: 10 * 1024 * 1024 })).stdout;
     const targetSha = await host.readTarget(repo.targetBranch);
     await host.readRequiredChecks(repo.targetBranch);
-    return { task, repo, host, review, sourceSha, targetSha, changed, sourcePath: run.workspaceRef };
+    return { task, repo, host, review, sourceSha, targetSha, changed, diff, sourcePath: run.workspaceRef };
   }
   return {
     async prepare(taskId: string, expectedVersion: number): Promise<Result> {
-      const { task, repo, review, sourceSha, targetSha, changed } = await facts(taskId);
+      const { task, repo, review, sourceSha, targetSha, changed, diff } = await facts(taskId);
       const approvalValid = store.hasActionApproval({ taskId, action: 'open_pr', sourceSha,
         targetBranch: repo.targetBranch, targetSha, policyVersion });
       const decision = evaluateStage5Action({ mandate: task.mandate, repository: repo, action: 'open_pr',
-        sourceSha, targetSha, targetBranch: repo.targetBranch, changedPaths: changed, approvalValid });
+        sourceSha, targetSha, targetBranch: repo.targetBranch, changedPaths: changed, diff, approvalValid });
       if (decision.kind === 'deny') throw new Error(decision.reason);
       const version = () => Number(store.db.prepare('SELECT version FROM task WHERE id=?').get(taskId)?.version);
       if (version() !== expectedVersion) throw new Error('Task version changed before action preflight');
@@ -101,7 +103,7 @@ export function createStage5OpenChange(store: SqliteStore, repositories: Readonl
           const provisional = evaluateStage5Action({ mandate: { ...current.mandate,
             allowedActions: [...new Set(current.mandate.allowedActions).add('open_pr')], maxAutoRisk: 'high' },
             repository: repo, action: 'open_pr', sourceSha, targetSha,
-            targetBranch: repo.targetBranch, changedPaths: changed, approvalValid: false });
+            targetBranch: repo.targetBranch, changedPaths: changed, diff, approvalValid: false });
           if (provisional.risk === 'unknown') throw new Error('Risk cannot be determined');
           const maxAutoRisk = current.mandate.maxAutoRisk === 'high' || provisional.risk === 'high'
             ? 'high' : current.mandate.maxAutoRisk === 'medium' || provisional.risk === 'medium' ? 'medium' : 'low';
@@ -119,11 +121,11 @@ export function createStage5OpenChange(store: SqliteStore, repositories: Readonl
         requestId, sourceSha, targetSha };
     },
     async execute(taskId: string, expectedVersion: number): Promise<{ kind: 'opened' | 'uncertain'; changeId?: string }> {
-      const { task, repo, host, sourceSha, targetSha, changed, sourcePath } = await facts(taskId);
+      const { task, repo, host, sourceSha, targetSha, changed, diff, sourcePath } = await facts(taskId);
       const approvalValid = store.hasActionApproval({ taskId, action: 'open_pr', sourceSha,
         targetBranch: repo.targetBranch, targetSha, policyVersion });
       const decision = evaluateStage5Action({ mandate: task.mandate, repository: repo, action: 'open_pr',
-        sourceSha, targetSha, targetBranch: repo.targetBranch, changedPaths: changed, approvalValid });
+        sourceSha, targetSha, targetBranch: repo.targetBranch, changedPaths: changed, diff, approvalValid });
       if (decision.kind !== 'allow' || !host.findChangeByBranch)
         throw new Error(`Code-host action is blocked: ${decision.reason}`);
       const branch = `agent-platform/${taskId}`;
@@ -230,13 +232,13 @@ export function createStage5OpenChange(store: SqliteStore, repositories: Readonl
       sourceSha: string; targetSha: string; changeId: string }> {
       const ci = await this.status(taskId);
       if (!ci.ready || ci.state !== 'open') throw new Error('Current source, target or CI gate is not ready');
-      const { task, repo, review, sourceSha, targetSha, changed } = await facts(taskId);
+      const { task, repo, review, sourceSha, targetSha, changed, diff } = await facts(taskId);
       if (ci.subjectSha !== sourceSha || ci.targetSha !== targetSha)
         throw new Error('Merge target changed during preflight');
       const approvalValid = store.hasActionApproval({ taskId, action: 'merge', sourceSha,
         targetBranch: repo.targetBranch, targetSha, changeRef: ci.changeId, policyVersion });
       const decision = evaluateStage5Action({ mandate: task.mandate, repository: repo, action: 'merge',
-        sourceSha, targetSha, targetBranch: repo.targetBranch, changedPaths: changed, approvalValid });
+        sourceSha, targetSha, targetBranch: repo.targetBranch, changedPaths: changed, diff, approvalValid });
       if (decision.kind === 'deny') throw new Error(decision.reason);
       const version = () => Number(store.db.prepare('SELECT version FROM task WHERE id=?').get(taskId)?.version);
       if (version() !== expectedVersion) throw new Error('Task version changed before merge preflight');

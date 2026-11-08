@@ -80,7 +80,7 @@ export function createQoderRunner(launcher: IsolatedProcessLauncher, logDirector
           throw new Error('Qoder attachment is outside the Run input directory or exceeds size limit');
         return canonical;
       });
-      const args = ['-p', '--output-format', 'stream-json', '--cwd', request.workspace.path,
+      const args = ['-p', '--input-format', 'text', '--output-format', 'stream-json', '--cwd', request.workspace.path,
         '--permission-mode', 'dont_ask', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
         '--setting-sources', '', '--append-system-prompt', systemPrompt,
         ...(['investigate', 'verify', 'review'].includes(request.stage) ? ['--tools', 'Read', 'Grep', 'Glob',
@@ -188,6 +188,8 @@ export function createQoderRunner(launcher: IsolatedProcessLauncher, logDirector
           finally { if (stopTimer) clearTimeout(stopTimer); }
           if (!closed) throw new Error('Qoder termination is unconfirmed after input failure');
         }
+        if (error instanceof Error && launched.isTerminated?.() === true)
+          Object.assign(error, { terminationConfirmed: true });
         throw error;
       }
       finally { if (timer) clearTimeout(timer); }

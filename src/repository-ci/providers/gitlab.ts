@@ -89,8 +89,9 @@ export function createGitLabCodeHost(repo: Repository, fetcher: typeof fetch = f
         ? fullSha(merge.merge_commit_sha || merge.squash_commit_sha) : undefined;
       const mergedCommit = mergedSha ? await request<{ parent_ids: string[] }>(
         `/repository/commits/${mergedSha}`) : undefined;
-      const preMergeTargetSha = mergedCommit?.parent_ids[0]
-        ? fullSha(mergedCommit.parent_ids[0]) : undefined;
+      const preMergeTargetSha = mergedCommit?.parent_ids.length === 2 &&
+        fullSha(mergedCommit.parent_ids[1]!) === fullSha(merge.sha)
+        ? fullSha(mergedCommit.parent_ids[0]!) : undefined;
       return changeSnapshot.parse({ change: ref(merge, targetSha), state: merge.state === 'merged'
         ? 'merged' : merge.state === 'opened' ? 'open' : 'closed',
         sourceSha: fullSha(merge.sha), targetSha, mergedSha, preMergeTargetSha,

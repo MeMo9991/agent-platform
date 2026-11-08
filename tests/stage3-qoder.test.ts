@@ -88,7 +88,9 @@ test('Qoder confirms input only after assistant output and keeps an early exit p
     const early = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter() }) as ChildProcess;
     const earlyRunner = createQoderRunner({ verified: true,
       launch() { return { process: early, terminate: () => true, isTerminated: () => true }; } }, directory);
-    const startingEarly = assert.rejects(earlyRunner.start(request), /exited before confirming/);
+    const startingEarly = assert.rejects(earlyRunner.start(request), error =>
+      error instanceof Error && /exited before confirming/.test(error.message) &&
+      (error as Error & { terminationConfirmed?: boolean }).terminationConfirmed === true);
     early.stdout?.emit('data', JSON.stringify({ type: 'system', subtype: 'init', session_id: 'native-2' }) + '\n');
     early.emit('close', 1);
     await startingEarly;

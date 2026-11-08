@@ -21,6 +21,10 @@ export interface ExecutionBoundary {
         exitCode: number | null; logRef: string; terminationConfirmed: boolean }>;
       terminate(): Promise<{ terminated: boolean; logRef?: string }>;
     };
+  prepareDependencies?(input: { proof: ExecutionAttestation; cwd: string }): Promise<{
+    command: string; args: string[]; timeoutMs: number; startedAt: string; endedAt: string;
+    result: 'passed' | 'failed' | 'timeout' | 'unavailable'; exitCode: number | null;
+    logRef: string; terminationConfirmed: boolean }>;
   release?(proof: ExecutionAttestation): Promise<void>;
 }
 export function createWorkerManager(input: { store: SqliteStore; coordinator: KernelCoordinator;
@@ -110,13 +114,30 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
           throw new Error('Verified diff base does not match Run');
         const checks: z.infer<typeof developmentEvidence>['checks'] = [];
         let terminationUnconfirmed = false;
+        let dependencyFailed = false;
+        if (input.localChecks?.[task.repoKey]?.some(check => check.command === 'npm') &&
+            input.boundary.prepareDependencies) {
+          try {
+            const preparation = await input.boundary.prepareDependencies({ proof: run.execution, cwd: run.workspaceRef! });
+            checks.push(preparation);
+            dependencyFailed = preparation.result !== 'passed' || preparation.exitCode !== 0 ||
+              !preparation.terminationConfirmed;
+            if (!preparation.terminationConfirmed) terminationUnconfirmed = true;
+          } catch {
+            checks.push({ command: 'npm', args: ['ci', '--ignore-scripts'], timeoutMs: 180_000,
+              startedAt: new Date().toISOString(), endedAt: new Date().toISOString(),
+              result: 'unavailable', exitCode: null, logRef: await unavailableLog(), terminationConfirmed: false });
+            dependencyFailed = true;
+            terminationUnconfirmed = true;
+          }
+        }
         for (const check of input.localChecks?.[task.repoKey] ?? []) {
           const startedAt = new Date().toISOString();
           let receipt: { result: 'passed' | 'failed' | 'timeout' | 'unavailable';
             exitCode: number | null; logRef: string; terminationConfirmed: boolean };
           const controller = new AbortController();
           let handle: ReturnType<NonNullable<ExecutionBoundary['runCheck']>> | undefined;
-          const noStart = !input.boundary.runCheck || terminationUnconfirmed;
+          const noStart = !input.boundary.runCheck || terminationUnconfirmed || dependencyFailed;
           try {
             if (noStart) receipt = { result: 'unavailable', exitCode: null,
               logRef: await unavailableLog(), terminationConfirmed: true };
@@ -149,6 +170,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
         }
         let postCheckError: string | undefined;
         if (terminationUnconfirmed) postCheckError = 'Local check process termination is unconfirmed';
+        else if (dependencyFailed) postCheckError = 'Dependency preparation failed';
         else {
           try {
             if (!input.workspace.verifyAfterChecks) throw new Error('Post-check Git verifier is unavailable');
@@ -280,10 +302,12 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
         if (claimed.execution) await input.boundary.release?.(claimed.execution);
       }
       const mode = claimed.stage === 'develop' ? 'write' : 'read';
+      const risk = mode === 'write' ? input.riskPolicy?.assess(task, claimed) ?? 'unknown' : 'low';
+      const riskRank = { low: 0, medium: 1, high: 2, unknown: 3 } as const;
       if (mode === 'write' && (!task.mandate.allowedActions.includes('edit') ||
           task.mandate.repoKey !== task.repoKey ||
           (input.policyVersion && task.mandate.policyVersion !== input.policyVersion) ||
-          (input.riskPolicy?.assess(task, claimed) ?? 'unknown') !== 'low'))
+          risk === 'unknown' || riskRank[risk] > riskRank[task.mandate.maxAutoRisk]))
         throw new Error('Edit Mandate does not authorize this repository');
       let skill;
       try { skill = await input.skills.load({ repoRef: input.skillRepoPath,
@@ -490,8 +514,10 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
       }
       if (attested) await input.boundary.release?.(attested);
       if (attachmentDirectory) await rm(attachmentDirectory, { recursive: true, force: true });
+      const startupTerminated = error instanceof Error &&
+        (error as Error & { terminationConfirmed?: boolean }).terminationConfirmed === true;
       input.coordinator.onWorkerFailure(claimed.id, error instanceof Error ? error.message : 'Worker preflight failed',
-        'pause', attemptedNewSession && !launchedSession);
+        'pause', attemptedNewSession && !launchedSession && !startupTerminated);
       return true;
     }
   }, async poll(): Promise<number> {

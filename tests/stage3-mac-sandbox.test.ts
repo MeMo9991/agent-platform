@@ -51,15 +51,19 @@ test('trusted check reuses the Run sandbox and confirms timeout termination',
     const bin = join(home, '.local', 'bin');
     const qoder = join(bin, 'qoderclicn');
     const previousHome = process.env.HOME;
+    const previousPat = process.env.QODERCN_PERSONAL_ACCESS_TOKEN;
     mkdirSync(bin, { recursive: true });
     mkdirSync(join(home, '.qoder-cn'));
-    writeFileSync(qoder, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    writeFileSync(join(home, '.qoder-cn', 'sensitive'), 'fixture-only');
+    writeFileSync(join(home, '.qoder-cn', 'settings.json'), JSON.stringify({ vpcInstanceName: 'acme' }));
+    writeFileSync(qoder, '#!/bin/sh\n[ "$QODERCN_PERSONAL_ACCESS_TOKEN" = fixture-only ] || exit 1\n[ "$1" = --settings ] && [ "$2" = \'{"vpcInstanceName":"acme"}\' ]\n', { mode: 0o700 });
     const cloneRoot = join(root, 'clones');
     const clone = join(cloneRoot, 'runcheck');
     const profileRoot = join(root, 'profiles');
     mkdirSync(clone, { recursive: true });
     execFileSync('git', ['init', '-q', clone]);
     process.env.HOME = home;
+    process.env.QODERCN_PERSONAL_ACCESS_TOKEN = 'fixture-only';
     try {
       const runtime = await createMacQoderRuntime({ cloneRoot, profileRoot, qoderPath: qoder });
       const proof = await runtime.boundary.attest({ runId: 'runcheck', repoKey: 'repo',
@@ -69,6 +73,7 @@ test('trusted check reuses the Run sandbox and confirms timeout termination',
       assert.ok(proof);
       const launched = runtime.launcher.launch('qoderclicn', ['--version'], clone, proof);
       await new Promise<void>(resolve => launched.process.once('close', () => resolve()));
+      assert.equal(launched.process.exitCode, 0);
       assert.throws(() => runtime.boundary.runCheck!({ proof: { ...proof, configDigest: 'forged' },
         command: '/usr/bin/git', args: ['status'], cwd: clone, timeoutMs: 5000,
         signal: new AbortController().signal }), /verified isolation/);
@@ -82,6 +87,10 @@ test('trusted check reuses the Run sandbox and confirms timeout termination',
         args: [join(root, 'outside')], cwd: clone, timeoutMs: 5000, signal: new AbortController().signal });
       assert.equal((await denied.completion).result, 'failed');
       assert.equal(existsSync(join(root, 'outside')), false);
+      const credentialRead = runtime.boundary.runCheck!({ proof, command: '/bin/cat',
+        args: [join(home, '.qoder-cn', 'sensitive')], cwd: clone, timeoutMs: 5000,
+        signal: new AbortController().signal });
+      assert.equal((await credentialRead.completion).result, 'failed');
       const slow = runtime.boundary.runCheck!({ proof, command: '/bin/sleep',
         args: ['30'], cwd: clone, timeoutMs: 100, signal: new AbortController().signal });
       assert.equal((await slow.terminate()).terminated, true);
@@ -98,10 +107,15 @@ test('trusted check reuses the Run sandbox and confirms timeout termination',
           allowedActions: ['investigate'], maxAutoRisk: 'low', policyVersion: 'p1',
           authority: { kind: 'trusted_rule', ruleRef: 'test' } } });
       assert.ok(next);
-      assert.equal(readdirSync(profileRoot).filter(name => name.endsWith('.sb')).length, 2);
+      assert.equal(readdirSync(profileRoot).filter(name => name.endsWith('.sb')).length, 4);
       await restarted.boundary.release!(next);
       await runtime.boundary.release!(stale);
-    } finally { process.env.HOME = previousHome; rmSync(root, { recursive: true, force: true }); }
+    } finally {
+      process.env.HOME = previousHome;
+      if (previousPat === undefined) delete process.env.QODERCN_PERSONAL_ACCESS_TOKEN;
+      else process.env.QODERCN_PERSONAL_ACCESS_TOKEN = previousPat;
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
 test('sandboxed process leaves a durable Qoder result readable after Runner restart',

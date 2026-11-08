@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { SqliteStore } from '../src/storage/sqlite/store.js';
 import { createKernelCoordinator } from './kernel-fixture.js';
 import { startLocalApi } from '../src/api/local.js';
+import { executeTaskCommand } from '../src/api/task-command.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-function saveApprovedTask(store: SqliteStore, state: 'ready_to_merge' | 'waiting_human', at: string) {
+function saveApprovedTask(store: SqliteStore, state: 'ready_to_merge' | 'waiting_human' | 'reviewing', at: string) {
   store.saveTask({ id: 'task', repoKey: 'repo', title: 'Task', scope: 'Task', state,
     iteration: 1, priority: 0, baseRef: 'c'.repeat(40), createdAt: at, updatedAt: at,
     mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Task',
@@ -46,6 +47,11 @@ test('action approval binds reviewed source, target and policy without resuming 
     assert.equal(store.hasActionApproval({ ...input, policyVersion: 'v2' }), false);
     store.saveRecord({ id: 'new-review', taskId: 'task', kind: 'review', subjectSha: 'e'.repeat(40),
       iteration: 1, verdict: 'pass', findings: [], at: new Date(Date.now() + 1000).toISOString() });
+    assert.equal(store.hasActionApproval(input), false);
+    store.saveRecord({ id: 'contradictory-review', taskId: 'task', kind: 'review', subjectSha: sourceSha,
+      iteration: 1, verdict: 'pass', findings: [{ file: 'src/a.ts', severity: 'high',
+        evidence: 'Regression', impact: 'Breaks behavior' }], at: new Date(Date.now() + 2000).toISOString() });
+    assert.equal(store.latestReviewedSha('task'), undefined);
     assert.equal(store.hasActionApproval(input), false);
   } finally { store.close(); }
 });
@@ -86,6 +92,11 @@ test('blocking findings require a decision for every item and invalidate earlier
     assert.equal(store.latestReviewedSha('task'), undefined);
     assert.equal(store.hasActionApproval(input), false);
     store.saveTransition('task', 'waiting_human', 'Resolve review', later, 'waiting-again', { kind: 'system', id: 'test' });
+    for (const index of [0, 1]) store.saveRecord({ id: `published-${index}`, taskId: 'task',
+      kind: 'review_finding_publication', reviewRecordId: 'review-block', findingIndex: index,
+      subjectSha: sourceSha, file: `src/${index}.ts`, severity: 'high', evidence: 'Reviewed evidence',
+      impact: 'Reviewed impact', status: 'published', actor: { kind: 'human', id: 'reviewer' },
+      idempotencyKey: `publish-${index}`, at: later });
     const resolution = { id: 'resolution-1', taskId: 'task', kind: 'review_resolution' as const,
       reviewRecordId: 'review-block', findingIndex: 0, subjectSha: sourceSha,
       disposition: 'false_positive' as const, reason: 'Checked against the cited line',
@@ -107,13 +118,30 @@ test('review resolution API binds the approver identity and current Task version
   const at = new Date().toISOString();
   let writes = 0;
   try {
-    saveApprovedTask(store, 'waiting_human', at);
-    store.saveRecord({ id: 'block', taskId: 'task', kind: 'review', iteration: 1,
-      subjectSha: 'a'.repeat(40), verdict: 'block', findings: [
-        { file: 'src/a.ts', severity: 'high', evidence: 'A', impact: 'A' }], at });
+    saveApprovedTask(store, 'reviewing', at);
+    for (let index = 0; index < 2; index++) {
+      store.saveRun({ id: `prior-${index}`, taskId: 'task', iteration: 1, stage: 'review',
+        status: 'succeeded', priority: 0, attempt: index + 1, agentKind: 'qoder',
+        commitSha: 'a'.repeat(40), createdAt: new Date(Date.now() - (index + 2) * 1000).toISOString() });
+      store.saveRecord({ id: `prior-review-${index}`, taskId: 'task', runId: `prior-${index}`,
+        kind: 'review', iteration: 1, subjectSha: 'a'.repeat(40), verdict: 'pass',
+        findings: [{ file: 'src/a.ts', severity: 'high', evidence: 'A', impact: 'A' }],
+        at: new Date(Date.now() - (index + 2) * 1000).toISOString() });
+    }
+    store.saveRun({ id: 'current-review', taskId: 'task', iteration: 1, stage: 'review',
+      status: 'running', priority: 0, attempt: 3, agentKind: 'qoder',
+      commitSha: 'a'.repeat(40), createdAt: at });
     const coordinator = createKernelCoordinator(store, {}, 'v1', 'fixture', 'qoder', ['repo']);
+    await coordinator.onSignal({ kind: 'agent_event', taskId: 'task', event: { kind: 'result',
+      runId: 'current-review', status: 'succeeded', exitCode: 0, resultRef: 'review-result',
+      review: { subjectSha: 'a'.repeat(40), verdict: 'pass', findings: [
+        { file: 'src/a.ts', severity: 'high', evidence: 'A', impact: 'A' }] } } });
+    assert.equal(store.getTask('task')?.state, 'waiting_human');
+    assert.equal(store.countReviewBlocks('task', 1), 3);
+    assert.equal(store.latestReviewedSha('task'), undefined);
+    const reviewId = store.latestReview('task')!.id;
     api = await startLocalApi(store, coordinator, { credentialFile: join(directory, 'credential'),
-      actorId: 'local-owner', roles: ['approve'], dashboard: { actorId: 'local-owner',
+      actorId: 'local-owner', roles: ['approve', 'command'], dashboard: { actorId: 'local-owner',
         repoKeys: ['repo'], imageDirectory: directory, attachmentReaders: {},
         stage5OpenChange: { async prepare() { throw new Error('Unexpected prepare'); },
           async execute() { writes++; return {}; }, async status() { return {}; },
@@ -128,8 +156,29 @@ test('review resolution API binds the approver identity and current Task version
     const send = (value: unknown) => fetch(url, { method: 'POST', headers: {
       authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(value) });
     const input = { expectedVersion: Number(store.db.prepare('SELECT version FROM task WHERE id=?').get('task')?.version),
-      reviewRecordId: 'block', findingIndex: 0, subjectSha: 'a'.repeat(40),
+      reviewRecordId: reviewId, findingIndex: 0, subjectSha: 'a'.repeat(40),
       disposition: 'false_positive', reason: 'Verified cited line', idempotencyKey: 'decision' };
+    assert.equal((await send(input)).status, 409);
+    const publish = (value: unknown) => fetch(`http://127.0.0.1:${api!.port}/api/tasks/task/review-findings`,
+      { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify(value) });
+    const publication = { expectedVersion: input.expectedVersion, reviewRecordId: reviewId,
+      findingIndex: 0, subjectSha: input.subjectSha, file: 'src/a.ts', severity: 'high',
+      evidence: 'Confirmed regression', impact: 'Breaks current behavior', idempotencyKey: 'publish-one' };
+    assert.equal((await publish({ ...publication, findingIndex: 1 })).status, 409);
+    assert.equal((await publish({ ...publication, subjectSha: 'b'.repeat(40) })).status, 409);
+    assert.equal((await publish(publication)).status, 200);
+    const detail = await fetch(`http://127.0.0.1:${api.port}/api/tasks/task`,
+      { headers: { authorization: `Bearer ${token}` } }).then(response => response.json()) as { records: Record<string, unknown>[] };
+    assert.equal(detail.records.find(record => record.id === reviewId)?.findings, undefined);
+    const shown = detail.records.find(record => record.kind === 'review_finding_publication');
+    assert.equal(shown?.reviewRecordId, reviewId);
+    assert.equal(shown?.findingIndex, 0);
+    assert.equal(shown?.subjectSha, input.subjectSha);
+    assert.equal(shown?.file, 'src/a.ts');
+    assert.equal(shown?.evidence, 'Confirmed regression');
+    assert.equal(shown?.impact, 'Breaks current behavior');
+    assert.equal((await publish({ ...publication, file: 'src/other.ts', idempotencyKey: 'publish-again' })).status, 409);
     assert.equal((await send({ ...input, actor: { kind: 'human', id: 'attacker' } })).status, 400);
     assert.equal((await send({ ...input, expectedVersion: input.expectedVersion - 1 })).status, 409);
     assert.equal((await send(input)).status, 200);
@@ -137,4 +186,41 @@ test('review resolution API binds the approver identity and current Task version
     const saved = store.getRecord(String(store.db.prepare("SELECT id FROM task_record WHERE kind='review_resolution'").get()?.id));
     assert.equal(saved?.kind === 'review_resolution' && saved.actor.id, 'local-owner');
   } finally { await api?.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('empty blocking review requires human retry on the same SHA before merge readiness', async () => {
+  const store = new SqliteStore(':memory:');
+  const at = new Date().toISOString();
+  const sourceSha = 'a'.repeat(40);
+  try {
+    saveApprovedTask(store, 'reviewing', at);
+    store.saveRun({ id: 'first-review', taskId: 'task', iteration: 1, stage: 'review',
+      status: 'running', priority: 0, attempt: 1, agentKind: 'qoder', commitSha: sourceSha, createdAt: at });
+    const coordinator = createKernelCoordinator(store, {}, 'v1', 'fixture', 'qoder', ['repo']);
+    await coordinator.onSignal({ kind: 'agent_event', taskId: 'task', event: { kind: 'result',
+      runId: 'first-review', status: 'succeeded', exitCode: 0, resultRef: 'first-result',
+      review: { subjectSha: sourceSha, verdict: 'block', findings: [] } } });
+    assert.equal(store.getTask('task')?.state, 'waiting_human');
+    assert.equal(store.latestReviewedSha('task'), undefined);
+    assert.equal(store.db.prepare("SELECT count(*) AS n FROM run WHERE stage='develop'").get()?.n, 0);
+    assert.throws(() => store.saveReviewResolution({ id: 'fabricated', taskId: 'task',
+      kind: 'review_resolution', reviewRecordId: store.latestReview('task')!.id, findingIndex: 0,
+      subjectSha: sourceSha, disposition: 'false_positive', reason: 'No finding exists',
+      idempotencyKey: 'fabricated', actor: { kind: 'human', id: 'owner' }, at }), /stale/);
+    const version = Number(store.db.prepare('SELECT version FROM task WHERE id=?').get('task')?.version);
+    await executeTaskCommand(store, {}, 'owner', { kind: 'retry', taskId: 'task', expectedVersion: version,
+      reason: 'Review supplied no actionable finding', idempotencyKey: 'retry-empty-review' });
+    assert.equal(store.getTask('task')?.state, 'reviewing');
+    const row = store.db.prepare('SELECT id FROM run WHERE task_id=? AND status=?').get('task', 'queued');
+    const retry = store.getRun(String(row?.id))!;
+    assert.equal(retry.stage, 'review');
+    assert.equal(retry.commitSha, sourceSha);
+    assert.equal(retry.attempt, 2);
+    store.replaceRun({ ...retry, status: 'running' }, 'queued');
+    await coordinator.onSignal({ kind: 'agent_event', taskId: 'task', event: { kind: 'result',
+      runId: retry.id, status: 'succeeded', exitCode: 0, resultRef: 'second-result',
+      review: { subjectSha: sourceSha, verdict: 'pass', findings: [] } } });
+    assert.equal(store.getTask('task')?.state, 'ready_to_merge');
+    assert.equal(store.latestReviewedSha('task'), sourceSha);
+  } finally { store.close(); }
 });

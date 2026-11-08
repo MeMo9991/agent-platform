@@ -4,7 +4,7 @@ import { Badge, Button, Card } from '../components/ui';
 import type { Detail, RecordItem } from '../shared/types';
 
 function ContentReview({ taskId, version, targetKind, targetId, onDone }: { taskId: string; version: number;
-  targetKind: 'question' | 'result'; targetId: string; onDone: () => void }) {
+  targetKind: 'question' | 'result' | 'review'; targetId: string; onDone: () => void }) {
   const [text, setText] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -19,11 +19,45 @@ function ContentReview({ taskId, version, targetKind, targetId, onDone }: { task
     finally { setBusy(false); }
   }
   return <form className="stack content-review" onSubmit={publish}>
-    <p className="muted">{targetKind === 'question' ? '题目' : 'Agent 结论'}待审查。请核对原生会话后，填写可在任务页展示的文字。</p>
+    <p className="muted">{targetKind === 'question' ? '题目' : targetKind === 'review' ? 'Agent 审查意见' : 'Agent 结论'}待审查。请核对原生会话后，填写可在任务页展示的文字。</p>
     <label>审查后内容<textarea value={text} onChange={event => { setText(event.target.value); setKey(crypto.randomUUID()); }}
       required maxLength={8192} placeholder="填写已核对且不含凭据或本机路径的内容" /></label>
     <Button type="submit" disabled={busy || !text.trim()}>{busy ? '发布中…' : '发布审查内容'}</Button>
     {error && <p role="alert" className="error">{error.includes('version') ? '任务已更新，请刷新后重试' : error}</p>}
+  </form>;
+}
+
+function ReviewFindingPublication({ taskId, version, review, index, onDone }: { taskId: string; version: number;
+  review: RecordItem; index: number; onDone: () => void }) {
+  const [finding, setFinding] = useState({ file: '', severity: '', evidence: '', impact: '', action: '', verificationMethod: '' });
+  const [line, setLine] = useState('');
+  const [key, setKey] = useState(() => crypto.randomUUID());
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function publish(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError('');
+    try {
+      await api(`/api/tasks/${encodeURIComponent(taskId)}/review-findings`, { method: 'POST',
+        body: { expectedVersion: version, reviewRecordId: review.id, findingIndex: index,
+          subjectSha: review.subjectSha, ...finding, ...(line ? { line: Number(line) } : {}), idempotencyKey: key } });
+      onDone();
+    } catch (cause) { setError(String(cause)); }
+    finally { setBusy(false); }
+  }
+  return <form className="stack content-review" onSubmit={publish}>
+    <p className="muted">请核对原生审查记录中意见 #{index + 1} 的文件、证据和影响，再发布供批准人处理。</p>
+    {(['file', 'severity', 'evidence', 'impact', 'action', 'verificationMethod'] as const).map(field =>
+      <label key={field}>{({ file: '文件', severity: '严重度', evidence: '证据', impact: '影响', action: '建议处理',
+        verificationMethod: '验证方法' })[field]}
+        <textarea value={finding[field]} required={['file', 'severity', 'evidence', 'impact'].includes(field)}
+          maxLength={field === 'file' ? 500 : field === 'severity' ? 40 : field === 'evidence' || field === 'impact' ? 4000 : 2000}
+          onChange={event => { setFinding(value => ({ ...value, [field]: event.target.value })); setKey(crypto.randomUUID()); }} />
+      </label>)}
+    <label>行号（可选）<input type="number" min="1" step="1" value={line}
+      onChange={event => { setLine(event.target.value); setKey(crypto.randomUUID()); }} /></label>
+    <Button type="submit" disabled={busy || !finding.file.trim() || !finding.severity.trim() ||
+      !finding.evidence.trim() || !finding.impact.trim()}>{busy ? '发布中…' : '发布这条意见'}</Button>
+    {error && <p role="alert" className="error">{error}</p>}
   </form>;
 }
 
@@ -285,17 +319,33 @@ export function TaskDetailPage({ id, actorId, roles, stage5WritesEnabled }: { id
       <Card><h2>独立审查</h2>{detail.records.filter(item => item.kind === 'review').length
         ? detail.records.filter(item => item.kind === 'review').map(item => <div className="run-row" key={item.id}>
           <strong>{item.verdict === 'pass' ? '通过' : '阻断'} · SHA {item.subjectSha}</strong>
-          {item.findings?.map((finding, index) => <div key={index}><p>{finding.file}{finding.line ? `:${finding.line}` : ''}
-            · {finding.severity} · {finding.evidence} · 影响：{finding.impact}
-            {finding.action && ` · 处理：${finding.action}`}
-            {finding.verificationMethod && ` · 验证：${finding.verificationMethod}`}</p>
-            {detail.records.find(record => record.kind === 'review_resolution' && record.reviewRecordId === item.id &&
-              record.findingIndex === index)
-              ? <p className="muted">已有结构化处理决定</p>
-              : detail.task.state === 'waiting_human' && roles.includes('approve') &&
-                item.id === detail.records.filter(record => record.kind === 'review').at(-1)?.id &&
-                <ReviewResolution taskId={id} version={detail.task.version} review={item} index={index}
-                  onDone={() => setRevision(value => value + 1)} />}</div>)}
+          {item.summary ? <p>{item.summary}</p> : roles.includes('command')
+            ? <ContentReview taskId={id} version={detail.task.version} targetKind="review" targetId={item.id}
+                onDone={() => setRevision(value => value + 1)} />
+            : <p className="muted">意见正文待人工审查</p>}
+          {item.verdict === 'block' && item.findingCount === 0 && <p className="muted">审查未给出具体意见；请在任务操作中填写原因并重试审查。</p>}
+          {Array.from({ length: item.findingCount ?? 0 }, (_, index) => {
+            const published = detail.records.find(record => record.kind === 'review_finding_publication' &&
+              record.reviewRecordId === item.id && record.findingIndex === index && record.subjectSha === item.subjectSha);
+            const resolved = detail.records.some(record => record.kind === 'review_resolution' &&
+              record.reviewRecordId === item.id && record.findingIndex === index);
+            const current = detail.task.state === 'waiting_human' &&
+              item.id === detail.records.filter(record => record.kind === 'review').at(-1)?.id;
+            return <div key={index}><p>意见 #{index + 1} · 审查记录 {item.id}</p>
+              {published ? <div><p>{published.file}{published.line ? `:${published.line}` : ''} · {published.severity}</p>
+                <p>证据：{published.evidence}</p><p>影响：{published.impact}</p>
+                {published.action && <p>建议处理：{published.action}</p>}
+                {published.verificationMethod && <p>验证方法：{published.verificationMethod}</p>}
+                <p className="muted">人工核对：{published.reviewer} · SHA {published.subjectSha}</p></div>
+                : current && roles.includes('command')
+                  ? <ReviewFindingPublication taskId={id} version={detail.task.version} review={item} index={index}
+                      onDone={() => setRevision(value => value + 1)} />
+                  : <p className="muted">该条意见尚未人工核对发布</p>}
+              {resolved ? <p className="muted">已有结构化处理决定</p>
+                : published && current && roles.includes('approve') &&
+                  <ReviewResolution taskId={id} version={detail.task.version} review={item} index={index}
+                    onDone={() => setRevision(value => value + 1)} />}</div>;
+          })}
         </div>) : <p className="muted">尚无结果</p>}</Card>
       <Card><h2>CI 与合并</h2>{detail.task.state === 'ready_to_merge' && roles.includes('command') &&
         <Button disabled={hostBusy} onClick={() => void prepareOpenChange()}>

@@ -10,7 +10,8 @@ test('stage five risk cannot be reduced by model or stale approval', () => {
     maxAutoRisk: 'high' as const, policyVersion: 'v1',
     authority: { kind: 'human_approval' as const, approvalRef: 'approval' } };
   const input = { mandate, repository, action: 'open_pr' as const, targetBranch: 'main',
-    sourceSha: 'a'.repeat(40), targetSha: 'b'.repeat(40), changedPaths: ['src/feature.ts'], approvalValid: false };
+    sourceSha: 'a'.repeat(40), targetSha: 'b'.repeat(40), changedPaths: ['src/feature.ts'],
+    diff: 'diff --git a/src/feature.ts b/src/feature.ts\n@@ -1 +1 @@\n-old\n+new\n', approvalValid: false };
   assert.equal(evaluateStage5Action(input).kind, 'needs_approval');
   assert.equal(evaluateStage5Action({ ...input, approvalValid: true }).kind, 'allow');
   assert.equal(evaluateStage5Action({ ...input, targetBranch: 'other', approvalValid: true }).kind, 'deny');
@@ -19,4 +20,7 @@ test('stage five risk cannot be reduced by model or stale approval', () => {
   assert.equal(evaluateStage5Action({ ...input, modelRisk: 'unknown', approvalValid: true }).kind, 'deny');
   assert.equal(evaluateStage5Action({ ...input, mandate: { ...mandate, maxAutoRisk: 'low' },
     approvalValid: true }).kind, 'needs_scope');
+  assert.equal(evaluateStage5Action({ ...input, diff: '', approvalValid: true }).kind, 'deny');
+  assert.equal(evaluateStage5Action({ ...input, diff: input.diff.replace('+new', '+permission changed'),
+    modelRisk: 'low', approvalValid: true }).risk, 'high');
 });

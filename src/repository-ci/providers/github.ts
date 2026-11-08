@@ -111,7 +111,9 @@ export function createGitHubCodeHost(repo: Repository, fetcher: typeof fetch = f
       const targetSha = await target(repo.targetBranch);
       const mergedSha = pull.merged && pull.merge_commit_sha ? fullSha(pull.merge_commit_sha) : undefined;
       const mergedCommit = mergedSha ? await request<{ parents: { sha: string }[] }>(`/commits/${mergedSha}`) : undefined;
-      const preMergeTargetSha = mergedCommit?.parents[0] ? fullSha(mergedCommit.parents[0].sha) : undefined;
+      const preMergeTargetSha = mergedCommit?.parents.length === 2 &&
+        fullSha(mergedCommit.parents[1]!.sha) === fullSha(pull.head.sha)
+        ? fullSha(mergedCommit.parents[0]!.sha) : undefined;
       return changeSnapshot.parse({ change: ref(pull, targetSha), state: pull.merged ? 'merged'
         : pull.state === 'open' ? 'open' : 'closed', sourceSha: fullSha(pull.head.sha), targetSha,
         mergedSha, preMergeTargetSha,

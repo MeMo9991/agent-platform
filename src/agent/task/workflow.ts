@@ -5,6 +5,15 @@ import type { KernelSignal } from '../kernel/model.js';
 export type WorkflowDecision = { state?: TaskState; queueStage?: 'investigate' | 'develop' | 'verify' | 'review';
   needsScopeApproval?: boolean; reason?: string };
 
+export function hasBlockingReviewFindings(findings: readonly { severity: string }[]): boolean {
+  return findings.some(finding => typeof finding.severity !== 'string' ||
+    !['low', 'medium'].includes(finding.severity.toLowerCase()));
+}
+export function isBlockingReview(review: { verdict: 'pass' | 'block';
+  findings: readonly { severity: string }[] }): boolean {
+  return review.verdict === 'block' || hasBlockingReviewFindings(review.findings);
+}
+
 export function decideAgentEvent(task: Task, run: Run, event: AgentEvent, hasPendingInput = false,
   previousReviewBlocks = 0): WorkflowDecision {
   if (run.taskId !== task.id || event.runId !== run.id || run.iteration !== task.iteration || run.status !== 'running')
@@ -33,7 +42,9 @@ export function decideAgentEvent(task: Task, run: Run, event: AgentEvent, hasPen
     const review = event.review;
     if (!review || review.subjectSha !== run.commitSha)
       return { state: 'blocked', reason: 'Review lacks structured evidence for its pinned SHA' };
-    if (review.verdict === 'block') return previousReviewBlocks < 2
+    if (review.verdict === 'block' && review.findings.length === 0)
+      return { state: 'waiting_human', reason: 'Blocking review has no findings; human re-review is required' };
+    if (isBlockingReview(review)) return previousReviewBlocks < 2
       ? { state: 'developing', queueStage: 'develop', reason: 'Review blocking findings require repair' }
       : { state: 'waiting_human', reason: 'Automatic repair limit reached' };
   }

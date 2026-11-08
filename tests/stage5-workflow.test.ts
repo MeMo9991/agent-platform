@@ -45,4 +45,6 @@ test('review blocks after two automatic repair rounds', () => {
   assert.equal(decideAgentEvent(task, run, event, false, 2).state, 'waiting_human');
   assert.equal(decideAgentEvent(task, run, { ...event, review: { ...event.review,
     subjectSha: 'c'.repeat(40) } }).state, 'blocked');
+  assert.equal(decideAgentEvent(task, run, { ...event, review: { ...event.review,
+    verdict: 'pass' } }, false, 0).queueStage, 'develop');
 });

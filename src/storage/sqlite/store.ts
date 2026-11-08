@@ -5,6 +5,7 @@ import { task, taskRecord, type Task, type TaskRecord } from '../../agent/task/m
 import { subscription, type Subscription } from '../../agent/task/model.js';
 import { routeDecision } from '../../agent/router/model.js';
 import { transitionTask } from '../../agent/task/transition.js';
+import { isBlockingReview } from '../../agent/task/workflow.js';
 import type { TaskTransitionResult } from '../../agent/task/transition.js';
 import type { z } from 'zod';
 import type { actorRef } from '../../shared/model.js';
@@ -358,7 +359,7 @@ export class SqliteStore implements EventRepository {
   latestReviewedSha(taskId: string): string | undefined {
     const review = this.latestReview(taskId);
     if (!review) return undefined;
-    if (review.verdict === 'pass') return review.subjectSha;
+    if (!isBlockingReview(review)) return review.subjectSha;
     if (!review.findings.length) return undefined;
     const rows = this.db.prepare(`SELECT payload_json FROM task_record WHERE task_id=?
       AND kind='review_resolution' AND json_extract(payload_json,'$.reviewRecordId')=?`)
@@ -367,7 +368,15 @@ export class SqliteStore implements EventRepository {
       const value = taskRecord.parse(JSON.parse(String(row.payload_json)));
       return value.kind === 'review_resolution' ? value.findingIndex : -1;
     }));
-    return review.findings.every((_, index) => resolved.has(index)) ? review.subjectSha : undefined;
+    return review.findings.every((_, index) => resolved.has(index) &&
+      this.hasPublishedReviewFinding(taskId, review.id, review.subjectSha, index)) ? review.subjectSha : undefined;
+  }
+  hasPublishedReviewFinding(taskId: string, reviewRecordId: string, subjectSha: string, findingIndex: number): boolean {
+    return Boolean(this.db.prepare(`SELECT 1 FROM task_record WHERE task_id=? AND kind='review_finding_publication'
+      AND json_extract(payload_json,'$.reviewRecordId')=?
+      AND json_extract(payload_json,'$.subjectSha')=?
+      AND json_extract(payload_json,'$.findingIndex')=? LIMIT 1`)
+      .get(taskId, reviewRecordId, subjectSha, findingIndex));
   }
   saveReviewResolution(input: Extract<TaskRecord, { kind: 'review_resolution' }>): boolean {
     const value = taskRecord.parse(input);
@@ -385,9 +394,10 @@ export class SqliteStore implements EventRepository {
       }
       const current = this.getTask(value.taskId);
       const review = this.latestReview(value.taskId);
-      if (!current || current.state !== 'waiting_human' || !review || review.verdict !== 'block' ||
+      if (!current || current.state !== 'waiting_human' || !review || !isBlockingReview(review) ||
           review.id !== value.reviewRecordId || review.subjectSha !== value.subjectSha ||
           value.findingIndex >= review.findings.length ||
+          !this.hasPublishedReviewFinding(value.taskId, review.id, review.subjectSha, value.findingIndex) ||
           this.db.prepare(`SELECT 1 FROM task_record WHERE task_id=? AND kind='review_resolution'
             AND json_extract(payload_json,'$.reviewRecordId')=?
             AND json_extract(payload_json,'$.findingIndex')=?`).get(value.taskId, value.reviewRecordId, value.findingIndex))
@@ -545,11 +555,13 @@ export class SqliteStore implements EventRepository {
     return row ? run.parse(JSON.parse(String(row.payload_json))) : undefined;
   }
   countReviewBlocks(taskId: string, iteration: number): number {
-    const row = this.db.prepare(`SELECT count(*) AS n FROM task_record AS record
+    const rows = this.db.prepare(`SELECT record.payload_json FROM task_record AS record
       JOIN run ON run.id=record.run_id WHERE record.task_id=? AND run.iteration=?
-      AND record.kind='review' AND json_extract(record.payload_json,'$.verdict')='block'`)
-      .get(taskId, iteration);
-    return Number(row?.n ?? 0);
+      AND run.stage='review' AND record.kind='review'`).all(taskId, iteration);
+    return rows.filter(row => {
+      const record = taskRecord.parse(JSON.parse(String(row.payload_json)));
+      return record.kind === 'review' && isBlockingReview(record);
+    }).length;
   }
   setRepairBaseRef(taskId: string, sourceSha: string): void {
     const current = this.getTask(taskId);

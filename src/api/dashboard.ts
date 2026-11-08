@@ -9,6 +9,7 @@ import type { AttachmentReader } from '../event/model.js';
 import { createEventIngress } from '../event/ingress.js';
 import { answer, approvalDecision, routeReviewDecision } from '../interaction/model.js';
 import type { AgentRunner } from '../agent/worker/model.js';
+import { isBlockingReview } from '../agent/task/workflow.js';
 import { completeTakeover, executeTaskCommand, type TakeoverEvidencePorts } from './task-command.js';
 import { taskCommand } from '../interaction/task-command.js';
 import { readSettings, saveSettings, settingsGroup, type SettingsPaths } from './settings.js';
@@ -55,7 +56,7 @@ function safeText(value: string): string {
     .replace(/(^|[\s"'`(=:])\/(?!\/)[^\s"'`<>)]{2,}/gm, '$1[本机路径]')
     .replace(/\b(authorization|api[_-]?key|token|password)\s*[:=][^\r\n]*/gi, '$1=[已隐藏]');
 }
-function reviewedText(store: SqliteStore, targetKind: 'question' | 'result', targetId: string): string | undefined {
+function reviewedText(store: SqliteStore, targetKind: 'question' | 'result' | 'review', targetId: string): string | undefined {
   const row = store.db.prepare(`SELECT payload_json FROM task_record WHERE kind='content_review'
     AND json_extract(payload_json,'$.targetKind')=? AND json_extract(payload_json,'$.targetId')=?
     ORDER BY at DESC,id DESC LIMIT 1`).get(targetKind, targetId);
@@ -124,13 +125,16 @@ function safeRecord(record: Record<string, unknown>, evidenceRoot: string, store
     }) : [];
   }
   if (record.kind === 'review') {
-    selected.verdict = record.verdict;
-    selected.findings = Array.isArray(record.findings) ? record.findings.map(item => {
-      const finding = item as Record<string, unknown>;
-      return Object.fromEntries(['file', 'line', 'severity', 'evidence', 'impact', 'action', 'verificationMethod']
-        .filter(key => finding[key] !== undefined).map(key => [key,
-          typeof finding[key] === 'string' ? safeText(finding[key]) : finding[key]]));
-    }) : [];
+    selected.verdict = !Array.isArray(record.findings) || isBlockingReview(record as {
+      verdict: 'pass' | 'block'; findings: { severity: string }[] })
+      ? 'block' : record.verdict;
+    selected.findingCount = Array.isArray(record.findings) ? record.findings.length : 0;
+    selected.summary = reviewedText(store, 'review', String(record.id));
+  }
+  if (record.kind === 'review_finding_publication') {
+    for (const key of ['file', 'line', 'severity', 'evidence', 'impact', 'action', 'verificationMethod'])
+      if (record[key] !== undefined) selected[key] = typeof record[key] === 'string' ? safeText(record[key] as string) : record[key];
+    selected.reviewer = (record.actor as { id?: string } | undefined)?.id;
   }
   if (typeof record.summary === 'string') selected.summary = record.kind === 'human_result'
     ? safeText(record.summary) : 'Agent 记录待审查';
@@ -298,7 +302,7 @@ export async function handleDashboard(request: IncomingMessage, response: Server
     const reviewMatch = /^\/api\/tasks\/([^/]+)\/content-reviews$/.exec(path);
     if (request.method === 'POST' && reviewMatch) {
       const taskId = decodeURIComponent(reviewMatch[1]!);
-      const input = z.object({ expectedVersion: z.number().int().positive(), targetKind: z.enum(['question', 'result']),
+      const input = z.object({ expectedVersion: z.number().int().positive(), targetKind: z.enum(['question', 'result', 'review']),
         targetId: z.string().min(1), text: z.string().trim().min(1).max(8192),
         idempotencyKey: z.string().min(1) }).strict().parse(await readBody(request, 16_384));
       if (!roles.includes(input.targetKind === 'question' ? 'answer' : 'command')) throw new Error('Role not permitted');
@@ -308,9 +312,13 @@ export async function handleDashboard(request: IncomingMessage, response: Server
           const target = store.getRecord(input.targetId);
           if (!target || target.taskId !== taskId || target.kind !== 'question' || target.status !== 'open')
             throw new Error('Review target is unavailable');
-        } else {
+        } else if (input.targetKind === 'result') {
           const target = store.getRun(input.targetId);
           if (!target || target.taskId !== taskId || !target.resultRef) throw new Error('Review target is unavailable');
+        } else {
+          const target = store.getRecord(input.targetId);
+          if (!target || target.taskId !== taskId || target.kind !== 'review')
+            throw new Error('Review target is unavailable');
         }
         const existing = store.db.prepare(`SELECT payload_json FROM task_record WHERE kind='content_review'
           AND task_id=? AND json_extract(payload_json,'$.targetKind')=?
@@ -324,6 +332,45 @@ export async function handleDashboard(request: IncomingMessage, response: Server
           targetId: input.targetId, text: input.text, status: 'published',
           actor: { kind: 'human', id: options.actorId }, idempotencyKey: input.idempotencyKey,
           at: new Date().toISOString() });
+        return false;
+      });
+      send(response, 200, { ok: true, duplicate }); return true;
+    }
+    const findingMatch = /^\/api\/tasks\/([^/]+)\/review-findings$/.exec(path);
+    if (request.method === 'POST' && findingMatch) {
+      if (!roles.includes('command')) throw new Error('Command role required');
+      const taskId = decodeURIComponent(findingMatch[1]!);
+      const input = z.object({ expectedVersion: z.number().int().positive(), reviewRecordId: z.string().min(1),
+        findingIndex: z.number().int().nonnegative(), subjectSha: z.string().regex(/^[a-f0-9]{40}$/),
+        file: z.string().trim().min(1).max(500), line: z.number().int().positive().optional(),
+        severity: z.string().trim().min(1).max(40), evidence: z.string().trim().min(1).max(4000),
+        impact: z.string().trim().min(1).max(4000), action: z.string().trim().max(2000).optional(),
+        verificationMethod: z.string().trim().max(2000).optional(),
+        idempotencyKey: z.string().min(1) }).strict().parse(await readBody(request, 16_384));
+      const duplicate = store.transaction(() => {
+        checkVersion(store, taskId, input.expectedVersion);
+        const review = store.latestReview(taskId);
+        if (store.getTask(taskId)?.state !== 'waiting_human' || !review || review.id !== input.reviewRecordId ||
+            review.subjectSha !== input.subjectSha || input.findingIndex >= review.findings.length)
+          throw new Error('Review finding is stale or unavailable');
+        const sameKey = store.db.prepare("SELECT payload_json FROM task_record WHERE kind='review_finding_publication' AND idempotency_key=? LIMIT 1")
+          .get(input.idempotencyKey);
+        const existing = store.db.prepare(`SELECT payload_json FROM task_record WHERE task_id=?
+          AND kind='review_finding_publication' AND json_extract(payload_json,'$.reviewRecordId')=?
+          AND json_extract(payload_json,'$.findingIndex')=? LIMIT 1`)
+          .get(taskId, input.reviewRecordId, input.findingIndex);
+        if (sameKey && (!existing || String(sameKey.payload_json) !== String(existing.payload_json)))
+          throw new Error('Review publication idempotency key conflicts');
+        if (existing) {
+          const prior = JSON.parse(String(existing.payload_json)) as Record<string, unknown>;
+          const { expectedVersion, ...published } = input;
+          if (prior.idempotencyKey === input.idempotencyKey &&
+              (prior.actor as { id: string }).id === options.actorId &&
+              Object.entries(published).every(([key, value]) => prior[key] === value)) return true;
+          throw new Error('Review finding already has published content');
+        }
+        store.saveRecord({ ...input, id: randomUUID(), taskId, kind: 'review_finding_publication',
+          status: 'published', actor: { kind: 'human', id: options.actorId }, at: new Date().toISOString() });
         return false;
       });
       send(response, 200, { ok: true, duplicate }); return true;

@@ -374,6 +374,34 @@ test('verified runner receives linked input once and only its explicit receipt h
   } finally { store.close(); }
 });
 
+test('confirmed Qoder startup exit does not block unrelated queued Runs', async () => {
+  const store = new SqliteStore(':memory:', { [sourceId]: [] });
+  try {
+    store.registerSource(sourceId, 'fixture', 'fixture', true);
+    store.accept(event);
+    const coordinator = createKernelCoordinator(store, { [sourceId]: 'agent-platform' },
+      'p1', 'fixture', 'qoder', ['agent-platform']);
+    coordinator.processPending();
+    const manager = createWorkerManager({ store, coordinator, enabledAgents: ['qoder'],
+      runners: { qoder: { capabilities: () => ({ start: 'supported' }),
+        async start() { throw Object.assign(new Error('Authentication failed'), { terminationConfirmed: true }); },
+        async read() { return { kind: 'unknown', runId: 'none' }; },
+        async cancel() { return { kind: 'accepted' }; } } },
+      workspace: { async prepare() { return { repoKey: 'agent-platform', path: '/tmp/confirmed-startup-exit',
+        baseSha: 'a'.repeat(40) }; } },
+      skills: { async load(ref) { return { ref, content: 'Investigate safely' }; } },
+      boundary: { async attest(value) { return { verified: true, runId: value.runId,
+        repoKey: value.repoKey, workspacePath: value.workspacePath,
+        mode: 'read', adapterVersion: 'test', configDigest: 'test' }; } },
+      skillRepoPath: 'agent-platform', skillCommitSha: 'a'.repeat(40), maxRunMs: 60_000,
+      limits: { maxConcurrentRuns: 2, perRepoConcurrentRuns: 2, perAgentConcurrentRuns: 2, reservedHumanResume: 1 } });
+    assert.equal(await manager.tick(), true);
+    const run = store.getRun(String(store.db.prepare('SELECT id FROM run').get()?.id));
+    assert.equal(run?.status, 'paused');
+    assert.equal(run?.processTerminationUnconfirmed, false);
+  } finally { store.close(); }
+});
+
 test('a question keeps its slot until the same process has durable termination evidence', async () => {
   for (const confirmed of [true, false]) {
     const store = new SqliteStore(':memory:', { [sourceId]: [] });

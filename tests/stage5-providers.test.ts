@@ -93,6 +93,8 @@ test('merged snapshots expose the platform commit parent for target-SHA receipt 
   const approvedTarget = 'b'.repeat(40);
   const mergedSha = 'c'.repeat(40);
   const currentTarget = 'd'.repeat(40);
+  let githubParents = [{ sha: approvedTarget }, { sha: sourceSha }];
+  let gitlabParents = [approvedTarget, sourceSha];
   try {
     const base = { repoKey: 'repo', targetBranch: 'main', requiredChecks: ['verify'],
       credentialsRef: 'env:AGENT_STAGE5_TEST_TOKEN', localChecks: [] };
@@ -102,7 +104,7 @@ test('merged snapshots expose the platform commit parent for target-SHA receipt 
       if (url.includes('/pulls/42')) return Response.json({ number: 42, state: 'closed', merged: true,
         merge_commit_sha: mergedSha, mergeable: null, mergeable_state: 'unknown',
         head: { sha: sourceSha, ref: 'agent-platform/task' }, base: { sha: currentTarget, ref: 'main' } });
-      if (url.includes(`/commits/${mergedSha}`)) return Response.json({ parents: [{ sha: approvedTarget }, { sha: sourceSha }] });
+      if (url.includes(`/commits/${mergedSha}`)) return Response.json({ parents: githubParents });
       if (url.includes('/branches/main')) return Response.json({ commit: { sha: currentTarget } });
       if (url.includes('/check-runs')) return Response.json({ check_runs: [] });
       if (url.includes('/status?')) return Response.json({ statuses: [] });
@@ -112,6 +114,12 @@ test('merged snapshots expose the platform commit parent for target-SHA receipt 
       id: '42', sourceSha, targetSha: approvedTarget });
     assert.equal(githubSnapshot.mergedSha, mergedSha);
     assert.equal(githubSnapshot.preMergeTargetSha, approvedTarget);
+    githubParents = [{ sha: 'e'.repeat(40) }];
+    assert.equal((await github.readChange({ provider: 'github', repoKey: 'repo',
+      id: '42', sourceSha, targetSha: approvedTarget })).preMergeTargetSha, undefined);
+    githubParents = [{ sha: 'e'.repeat(40) }, { sha: sourceSha }];
+    assert.notEqual((await github.readChange({ provider: 'github', repoKey: 'repo',
+      id: '42', sourceSha, targetSha: approvedTarget })).preMergeTargetSha, approvedTarget);
     const gitlab = createGitLabCodeHost({ ...base, provider: 'gitlab',
       hostUrl: 'https://gitlab.example.test', projectRef: 'team/repo' },
     (async (input: string | URL | Request) => {
@@ -119,7 +127,7 @@ test('merged snapshots expose the platform commit parent for target-SHA receipt 
       if (url.includes('/merge_requests/42')) return Response.json({ iid: 42, state: 'merged',
         source_branch: 'agent-platform/task', target_branch: 'main', sha: sourceSha,
         detailed_merge_status: 'mergeable', merge_commit_sha: mergedSha });
-      if (url.includes(`/repository/commits/${mergedSha}`)) return Response.json({ parent_ids: [approvedTarget, sourceSha] });
+      if (url.includes(`/repository/commits/${mergedSha}`)) return Response.json({ parent_ids: gitlabParents });
       if (url.includes('/repository/branches/main')) return Response.json({ commit: { id: currentTarget } });
       if (url.includes('/pipelines?')) return Response.json([]);
       throw new Error(`Unexpected GitLab request ${url}`);
@@ -128,5 +136,8 @@ test('merged snapshots expose the platform commit parent for target-SHA receipt 
       id: '42', sourceSha, targetSha: approvedTarget });
     assert.equal(gitlabSnapshot.mergedSha, mergedSha);
     assert.equal(gitlabSnapshot.preMergeTargetSha, approvedTarget);
+    gitlabParents = [approvedTarget];
+    assert.equal((await gitlab.readChange({ provider: 'gitlab', repoKey: 'repo',
+      id: '42', sourceSha, targetSha: approvedTarget })).preMergeTargetSha, undefined);
   } finally { delete process.env.AGENT_STAGE5_TEST_TOKEN; }
 });

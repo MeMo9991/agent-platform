@@ -104,6 +104,8 @@ test('an answer-only credential cannot submit or command through the dashboard',
     assert.equal((await fetch(`${base}/api/tasks/any/content-reviews`, { method: 'POST', headers,
       body: JSON.stringify({ expectedVersion: 1, targetKind: 'result', targetId: 'run',
         text: '未经授权的结论', idempotencyKey: 'review-one' }) })).status, 409);
+    assert.equal((await fetch(`${base}/api/tasks/any/review-findings`, { method: 'POST', headers,
+      body: JSON.stringify({}) })).status, 409);
     assert.equal(store.db.prepare('SELECT count(*) AS n FROM source_event').get()?.n, 0);
   } finally { await server?.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
@@ -217,6 +219,9 @@ test('task detail withholds unreviewed Agent text and returns path-free developm
     store.saveRecord({ id: 'check', taskId: 'task', kind: 'check', subjectSha: 'b'.repeat(40),
       command: 'npm', args: ['--config=/Users/test/config', 'token: Bearer check-secret'], timeoutMs: 1000, startedAt: at, endedAt: at,
       result: 'passed', exitCode: 0, logRef: checkLog, terminationConfirmed: true, at });
+    store.saveRecord({ id: 'review-secret', taskId: 'task', kind: 'review', subjectSha: 'b'.repeat(40),
+      verdict: 'block', findings: [{ file: '/Users/test/private.js', severity: 'high',
+        evidence: 'token: Bearer sensitive-review-value', impact: 'Sensitive output' }], at });
     server = await startLocalApi(store, coordinator, { credentialFile: join(directory, 'token'),
       actorId: 'owner', roles: ['answer', 'command'], dashboard: { actorId: 'owner', repoKeys: ['repo'],
         imageDirectory: join(directory, 'images'), attachmentReaders: {}, evidenceRoot: directory,
@@ -229,7 +234,9 @@ test('task detail withholds unreviewed Agent text and returns path-free developm
     assert.equal(detail.runs[0].hasResult, true);
     assert.equal(detail.records.find((item: any) => item.id === 'secret-progress').summary, 'Agent 记录待审查');
     assert.equal(detail.records.find((item: any) => item.id === 'secret-question').prompt, undefined);
-    assert.doesNotMatch(JSON.stringify(detail), /\/Users\/test|demo-secret|super-secret|progress-secret|question-secret|error-secret|check-secret/);
+    assert.doesNotMatch(JSON.stringify(detail), /\/Users\/test|demo-secret|super-secret|progress-secret|question-secret|error-secret|check-secret|sensitive-review-value/);
+    assert.equal(detail.records.find((item: any) => item.id === 'review-secret').findingCount, 1);
+    assert.equal(detail.records.find((item: any) => item.id === 'review-secret').findings, undefined);
     assert.equal(JSON.stringify(detail).includes(directory), false);
     assert.equal(detail.records.find((item: any) => item.id === 'development').commitSha, 'b'.repeat(40));
     assert.equal(detail.records.find((item: any) => item.id === 'development').diff.sha256,
@@ -256,6 +263,10 @@ test('task detail withholds unreviewed Agent text and returns path-free developm
     };
     await review('question', 'secret-question', '请确认复现步骤与预期行为');
     await review('result', 'run', '调查完成，已核对代码证据');
+    const reviewText = await fetch(`http://127.0.0.1:${server.port}/api/tasks/task/content-reviews`,
+      { method: 'POST', headers, body: JSON.stringify({ expectedVersion: detail.task.version,
+        targetKind: 'review', targetId: 'review-secret', text: '审查意见已人工核对', idempotencyKey: 'review-finding' }) });
+    assert.equal(reviewText.status, 200);
     const duplicate = await fetch(`http://127.0.0.1:${server.port}/api/tasks/task/content-reviews`,
       { method: 'POST', headers, body: JSON.stringify({ expectedVersion: detail.task.version,
         targetKind: 'result', targetId: 'run', text: '调查完成，已核对代码证据', idempotencyKey: 'review-run' }) });
@@ -263,6 +274,8 @@ test('task detail withholds unreviewed Agent text and returns path-free developm
     const published = await (await fetch(`http://127.0.0.1:${server.port}/api/tasks/task`, { headers })).json() as Record<string, any>;
     assert.equal(published.records.find((item: any) => item.id === 'secret-question').prompt, '请确认复现步骤与预期行为');
     assert.equal(published.runs[0].conclusion, '调查完成，已核对代码证据');
+    assert.equal(published.records.find((item: any) => item.id === 'review-secret').summary, '审查意见已人工核对');
+    assert.doesNotMatch(JSON.stringify(published), /sensitive-review-value/);
     assert.doesNotMatch(JSON.stringify(published), /demo-secret|super-secret|question-secret|"resultRef"/);
   } finally { await server?.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
