@@ -72,8 +72,8 @@ test('trusted check reuses the Run sandbox and confirms timeout termination',
       assert.throws(() => runtime.boundary.runCheck!({ proof: { ...proof, configDigest: 'forged' },
         command: '/usr/bin/git', args: ['status'], cwd: clone, timeoutMs: 5000,
         signal: new AbortController().signal }), /verified isolation/);
-      const check = runtime.boundary.runCheck!({ proof, command: '/usr/bin/git',
-        args: ['status', '--short'], cwd: clone, timeoutMs: 5000, signal: new AbortController().signal });
+      const check = runtime.boundary.runCheck!({ proof, command: '/usr/bin/true',
+        args: [], cwd: clone, timeoutMs: 5000, signal: new AbortController().signal });
       const passed = await check.completion;
       assert.equal(passed.result, 'passed');
       assert.equal(passed.terminationConfirmed, true);
