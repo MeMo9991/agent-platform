@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createMacSandboxProfile, createMacQoderRuntime } from '../src/agent/worker/mac-sandbox.js';
 import { createQoderRunner } from '../src/agent/worker/agents/qoder.js';
@@ -48,14 +47,21 @@ test('macOS sandbox limits read and write paths for each Run mode',
 test('trusted check reuses the Run sandbox and confirms timeout termination',
   { skip: process.platform !== 'darwin' }, async () => {
     const root = mkdtempSync('/private/tmp/agent-run-check-');
+    const home = join(root, 'home');
+    const bin = join(home, '.local', 'bin');
+    const qoder = join(bin, 'qoderclicn');
+    const previousHome = process.env.HOME;
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(home, '.qoder-cn'));
+    writeFileSync(qoder, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
     const cloneRoot = join(root, 'clones');
     const clone = join(cloneRoot, 'runcheck');
     const profileRoot = join(root, 'profiles');
     mkdirSync(clone, { recursive: true });
     execFileSync('git', ['init', '-q', clone]);
+    process.env.HOME = home;
     try {
-      const runtime = await createMacQoderRuntime({ cloneRoot, profileRoot,
-        qoderPath: join(homedir(), '.local/bin/qoderclicn') });
+      const runtime = await createMacQoderRuntime({ cloneRoot, profileRoot, qoderPath: qoder });
       const proof = await runtime.boundary.attest({ runId: 'runcheck', repoKey: 'repo',
         workspacePath: clone, mode: 'read', mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'read',
           allowedActions: ['investigate'], maxAutoRisk: 'low', policyVersion: 'p1',
@@ -66,8 +72,8 @@ test('trusted check reuses the Run sandbox and confirms timeout termination',
       assert.throws(() => runtime.boundary.runCheck!({ proof: { ...proof, configDigest: 'forged' },
         command: '/usr/bin/git', args: ['status'], cwd: clone, timeoutMs: 5000,
         signal: new AbortController().signal }), /verified isolation/);
-      const check = runtime.boundary.runCheck!({ proof, command: '/usr/bin/git',
-        args: ['status', '--short'], cwd: clone, timeoutMs: 5000, signal: new AbortController().signal });
+      const check = runtime.boundary.runCheck!({ proof, command: '/usr/bin/true',
+        args: [], cwd: clone, timeoutMs: 5000, signal: new AbortController().signal });
       const passed = await check.completion;
       assert.equal(passed.result, 'passed');
       assert.equal(passed.terminationConfirmed, true);
@@ -86,8 +92,7 @@ test('trusted check reuses the Run sandbox and confirms timeout termination',
           allowedActions: ['investigate'], maxAutoRisk: 'low', policyVersion: 'p1',
           authority: { kind: 'trusted_rule', ruleRef: 'test' } } });
       assert.ok(stale);
-      const restarted = await createMacQoderRuntime({ cloneRoot, profileRoot,
-        qoderPath: join(homedir(), '.local/bin/qoderclicn') });
+      const restarted = await createMacQoderRuntime({ cloneRoot, profileRoot, qoderPath: qoder });
       const next = await restarted.boundary.attest({ runId: 'runcheck', repoKey: 'repo',
         workspacePath: clone, mode: 'read', mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'read',
           allowedActions: ['investigate'], maxAutoRisk: 'low', policyVersion: 'p1',
@@ -96,12 +101,14 @@ test('trusted check reuses the Run sandbox and confirms timeout termination',
       assert.equal(readdirSync(profileRoot).filter(name => name.endsWith('.sb')).length, 2);
       await restarted.boundary.release!(next);
       await runtime.boundary.release!(stale);
-    } finally { rmSync(root, { recursive: true, force: true }); }
+    } finally { process.env.HOME = previousHome; rmSync(root, { recursive: true, force: true }); }
   });
 
 test('sandboxed process leaves a durable Qoder result readable after Runner restart',
   { skip: process.platform !== 'darwin' }, async () => {
     const root = mkdtempSync('/private/tmp/agent-durable-run-');
+    const previousHome = process.env.HOME;
+    mkdirSync(join(root, 'home', '.qoder-cn'), { recursive: true });
     const cloneRoot = join(root, 'clones');
     const clone = join(cloneRoot, 'run-1');
     const bin = join(root, 'bin');
@@ -114,6 +121,7 @@ test('sandboxed process leaves a durable Qoder result readable after Runner rest
       "printf '%s\\n' '{\"type\":\"assistant\",\"session_id\":\"durable-session\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Investigating\"}]}}'\n" +
       "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"durable-session\",\"result\":\"Verified conclusion\",\"is_error\":false}'\n",
     { mode: 0o700 });
+    process.env.HOME = join(root, 'home');
     try {
       const runtime = await createMacQoderRuntime({ cloneRoot, profileRoot: join(root, 'profiles'), qoderPath: cli });
       const mandate = { sourceEventId: 'event', repoKey: 'repo', goal: 'Investigate',
@@ -143,5 +151,5 @@ test('sandboxed process leaves a durable Qoder result readable after Runner rest
       assert.equal((await fresh.readDurable!('run-1', started.sessionId)).kind, 'finished');
       assert.equal(await fresh.resultSummary!('run-1', started.sessionId, finished.resultRef!), 'Verified conclusion');
       await runtime.boundary.release!(proof);
-    } finally { rmSync(root, { recursive: true, force: true }); }
+    } finally { process.env.HOME = previousHome; rmSync(root, { recursive: true, force: true }); }
   });
