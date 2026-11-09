@@ -22,6 +22,8 @@ import { acquireInstanceLock } from './instance-lock.js';
 import { createManualAttachmentReader } from '../event/sources/manual/attachment.js';
 import { createCodeHosts } from '../repository-ci/providers/index.js';
 import { createStage5OpenChange } from '../authorization/stage5-open-change.js';
+import { autoPrMandate, autoPrRuleRef } from '../authorization/auto-pr.js';
+import { randomUUID } from 'node:crypto';
 
 const platform = platformConfig.parse(JSON.parse(readFileSync(process.env.AGENT_PLATFORM_CONFIG ?? 'config/platform.json', 'utf8')));
 const databasePath = process.env.AGENT_PLATFORM_DATABASE ?? '.runtime/state/agent-platform.sqlite3';
@@ -64,7 +66,8 @@ const qoderRuntime = platform.agents.some(agent => agent.kind === 'qoder' && age
   ? await (async () => {
     await mkdir(cloneRoot, { recursive: true, mode: 0o700 });
     return createMacQoderRuntime({ cloneRoot, profileRoot: resolve(root, '.runtime/sandbox-profiles'),
-      qoderPath: resolve(homedir(), '.local/bin/qoderclicn') });
+      qoderPath: resolve(homedir(), '.local/bin/qoderclicn'),
+      writeEnabled: process.env.AGENT_PLATFORM_QODER_WRITE_ENABLED === '1' });
   })() : undefined;
 const runners = { qoder: createQoderRunner(qoderRuntime?.launcher ?? unavailableQoderLauncher,
   resolve(root, '.runtime/logs')) };
@@ -74,7 +77,10 @@ const stage5WorkerEnabled = process.env.AGENT_PLATFORM_STAGE5_WORKER_ENABLED ===
 if (stage5WorkerEnabled && !qoderRuntime) throw new Error('Stage five Worker needs an enabled isolated Qoder runtime');
 const coordinator = createKernelCoordinator(runtime.store, trustedRepoBySource, platform.policyRef,
   'configured-source', agentKind, platform.repositories.map(repo => repo.repoKey),
-  createTaskCandidateFinder(runtime.store));
+  createTaskCandidateFinder(runtime.store), event => {
+    const repo = platform.repositories.find(item => item.repoKey === event.repoKey);
+    return repo && autoPrMandate(event, repo, platform.policyRef);
+  });
 let routeTimer: ReturnType<typeof setInterval> | undefined;
 let ciTimer: ReturnType<typeof setInterval> | undefined;
 let ciTick: Promise<void> | undefined;
@@ -113,7 +119,12 @@ const manager = createWorkerManager({ store: runtime.store, coordinator,
   workspace, skills,
   boundary: qoderRuntime?.boundary ?? { async attest() { return undefined; } },
   skillRepoPath: 'agent-platform', skillCommitSha: head,
-  riskPolicy: { assess(task) { return task.mandate.authority.kind === 'human_approval' ? 'high' : 'unknown'; } },
+  riskPolicy: { assess(task) {
+    if (task.mandate.authority.kind === 'human_approval') return 'high';
+    const repo = platform.repositories.find(item => item.repoKey === task.repoKey);
+    return repo && task.mandate.authority.kind === 'auto_pr' &&
+      task.mandate.authority.ruleRef === autoPrRuleRef(repo, platform.policyRef) ? 'high' : 'unknown';
+  } },
   policyVersion: platform.policyRef,
   localChecks: Object.fromEntries(platform.repositories.map(repo => [repo.repoKey, repo.localChecks])),
   attachmentReaders,
@@ -127,7 +138,9 @@ try {
   api = platform.interaction ? await startLocalApi(runtime.store, coordinator, {
     ...platform.interaction,
     dashboard: { actorId: platform.interaction.actorId,
-      repoKeys: platform.repositories.map(repo => repo.repoKey), imageDirectory, attachmentReaders, runners,
+      repoKeys: platform.repositories.map(repo => repo.repoKey),
+      autoPrRepoKeys: platform.repositories.filter(repo => autoPrRuleRef(repo, platform.policyRef)).map(repo => repo.repoKey),
+      imageDirectory, attachmentReaders, runners,
       evidenceRoot: resolve(root, '.runtime'),
       stage5OpenChange,
       stage5WritesEnabled,
@@ -155,6 +168,27 @@ if (stage5WritesEnabled) {
   const pollCodeHost = () => {
     if (ciTick) return;
     ciTick = (async () => {
+      const automatic = runtime.store.db.prepare(`SELECT task.id,task.version FROM task
+        WHERE task.state='ready_to_merge' AND json_extract(task.mandate,'$.authority.kind')='auto_pr'
+        AND NOT EXISTS (SELECT 1 FROM task_record AS effect WHERE effect.task_id=task.id
+          AND effect.kind='effect' AND effect.status='done'
+          AND json_extract(effect.payload_json,'$.action')='open_pr')`).all();
+      for (const row of automatic) {
+        const taskId = String(row.id);
+        try {
+          const preflight = await stage5OpenChange.prepare(taskId, Number(row.version));
+          if (preflight.kind === 'ready') await stage5OpenChange.execute(taskId, Number(row.version));
+        } catch (error) {
+          console.error(`Automatic PR blocked for Task ${taskId}`, error);
+          runtime.store.transaction(() => {
+            const current = runtime.store.getTask(taskId);
+            const version = Number(runtime.store.db.prepare('SELECT version FROM task WHERE id=?').get(taskId)?.version);
+            if (current?.state === 'ready_to_merge' && version === Number(row.version))
+              runtime.store.saveTransition(taskId, 'waiting_human', 'Automatic PR preflight failed',
+                new Date().toISOString(), randomUUID(), { kind: 'system', id: 'auto-pr' });
+          });
+        }
+      }
       const tasks = runtime.store.db.prepare(`SELECT DISTINCT effect.task_id FROM task_record AS effect
         JOIN task ON task.id=effect.task_id WHERE effect.kind='effect' AND effect.status='done'
         AND json_extract(effect.payload_json,'$.action')='open_pr'

@@ -4,11 +4,12 @@ import { SqliteStore } from '../src/storage/sqlite/store.js';
 import { createKernelCoordinator } from './kernel-fixture.js';
 import { startLocalApi } from '../src/api/local.js';
 import { executeTaskCommand } from '../src/api/task-command.js';
+import { parseReviewOutput } from '../src/agent/worker/manager.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-function saveApprovedTask(store: SqliteStore, state: 'ready_to_merge' | 'waiting_human' | 'reviewing', at: string) {
+function saveApprovedTask(store: SqliteStore, state: 'ready_to_merge' | 'waiting_human' | 'reviewing' | 'blocked', at: string) {
   store.saveTask({ id: 'task', repoKey: 'repo', title: 'Task', scope: 'Task', state,
     iteration: 1, priority: 0, baseRef: 'c'.repeat(40), createdAt: at, updatedAt: at,
     mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Task',
@@ -21,6 +22,114 @@ function saveApprovedTask(store: SqliteStore, state: 'ready_to_merge' | 'waiting
   store.db.prepare('UPDATE task SET mandate=?,payload_json=? WHERE id=?')
     .run(JSON.stringify(approved.mandate), JSON.stringify(approved), 'task');
 }
+
+test('review accepts only a raw object or one validated JSON code block', () => {
+  const object = JSON.stringify({ subjectSha: 'a'.repeat(40), verdict: 'pass', findings: [] });
+  assert.equal(parseReviewOutput(object).verdict, 'pass');
+  assert.equal(parseReviewOutput(`Analysis.\n\n\`\`\`json\n${object}\n\`\`\``).subjectSha, 'a'.repeat(40));
+  assert.equal(parseReviewOutput(`Analysis.\n\n${object}`).subjectSha, 'a'.repeat(40));
+  assert.throws(() => parseReviewOutput(`\`\`\`json\n${object}\n\`\`\`\n\`\`\`json\n${object}\n\`\`\``));
+  assert.throws(() => parseReviewOutput(`Analysis.\n${object}\nAfterword`));
+  assert.throws(() => parseReviewOutput(`${object}\n${object}`));
+  assert.throws(() => parseReviewOutput(`Analysis.\n\`\`\`json\n{"subjectSha":"bad","verdict":"pass","findings":[]}\n\`\`\``));
+  assert.throws(() => parseReviewOutput(JSON.stringify({ subjectSha: 'a'.repeat(40), verdict: 'pass',
+    findings: [{ file: 'file.txt', severity: 'info', evidence: 'No issue', impact: 'None',
+      action: 'No action', verificationMethod: 'Read file' }] })));
+  assert.throws(() => parseReviewOutput(`The review passes for ${'a'.repeat(40)}`));
+});
+
+test('latest review uses insertion order when timestamps are equal', () => {
+  const store = new SqliteStore(':memory:');
+  const at = new Date().toISOString();
+  try {
+    saveApprovedTask(store, 'reviewing', at);
+    store.saveRecord({ id: 'z-block', taskId: 'task', kind: 'review', iteration: 1,
+      subjectSha: 'a'.repeat(40), verdict: 'block', findings: [], at });
+    store.saveRecord({ id: 'a-pass', taskId: 'task', kind: 'review', iteration: 1,
+      subjectSha: 'a'.repeat(40), verdict: 'pass', findings: [], at });
+    assert.equal(store.latestReview('task')?.id, 'a-pass');
+    assert.equal(store.latestReviewedSha('task'), 'a'.repeat(40));
+  } finally { store.close(); }
+});
+
+test('failed verify can be retried on the same reviewed development SHA', async () => {
+  const store = new SqliteStore(':memory:');
+  const at = new Date().toISOString();
+  const sha = 'a'.repeat(40);
+  try {
+    saveApprovedTask(store, 'blocked', at);
+    store.saveRecord({ id: 'development', taskId: 'task', runId: 'develop-run', kind: 'development',
+      baseSha: 'c'.repeat(40), commitSha: sha, diffRef: '/tmp/diff.patch', postCheckVerified: true, at });
+    store.saveRun({ id: 'verify-run', taskId: 'task', iteration: 1, stage: 'verify', status: 'failed',
+      priority: 0, attempt: 1, agentKind: 'qoder', commitSha: sha, createdAt: at });
+    const version = Number(store.db.prepare('SELECT version FROM task WHERE id=?').get('task')?.version);
+    await executeTaskCommand(store, {}, 'owner', { kind: 'retry', taskId: 'task', expectedVersion: version,
+      reason: 'Retry after isolated test configuration changed', idempotencyKey: 'verify-retry' });
+    const row = store.db.prepare("SELECT id FROM run WHERE task_id=? AND status='queued'").get('task');
+    const retry = store.getRun(String(row?.id))!;
+    assert.equal(retry.stage, 'verify');
+    assert.equal(retry.commitSha, sha);
+    store.replaceRun({ ...retry, status: 'running' }, 'queued');
+    const coordinator = createKernelCoordinator(store, {}, 'v1', 'fixture', 'qoder', ['repo']);
+    await coordinator.onSignal({ kind: 'agent_event', taskId: 'task',
+      event: { kind: 'progress', runId: retry.id, text: 'Verifying pinned SHA' } });
+    assert.equal(store.getTask('task')?.state, 'verifying');
+  } finally { store.close(); }
+});
+
+test('failed review output can be retried on its verified SHA without accepting prose', async () => {
+  const store = new SqliteStore(':memory:');
+  const at = new Date().toISOString();
+  const sha = 'a'.repeat(40);
+  try {
+    saveApprovedTask(store, 'blocked', at);
+    store.saveRun({ id: 'verify-run', taskId: 'task', iteration: 1, stage: 'verify', status: 'succeeded',
+      priority: 0, attempt: 1, agentKind: 'qoder', commitSha: sha, createdAt: at });
+    store.saveRun({ id: 'review-run', taskId: 'task', iteration: 1, stage: 'review', status: 'failed',
+      priority: 0, attempt: 1, agentKind: 'qoder', commitSha: sha,
+      createdAt: new Date(Date.parse(at) + 1000).toISOString() });
+    const version = Number(store.db.prepare('SELECT version FROM task WHERE id=?').get('task')?.version);
+    await executeTaskCommand(store, {}, 'owner', { kind: 'retry', taskId: 'task', expectedVersion: version,
+      reason: 'Retry malformed structured review output', idempotencyKey: 'review-retry' });
+    const row = store.db.prepare("SELECT id FROM run WHERE task_id=? AND status='queued'").get('task');
+    const retry = store.getRun(String(row?.id))!;
+    assert.equal(retry.stage, 'review');
+    assert.equal(retry.commitSha, sha);
+    store.replaceRun({ ...retry, status: 'running' }, 'queued');
+    const coordinator = createKernelCoordinator(store, {}, 'v1', 'fixture', 'qoder', ['repo']);
+    await coordinator.onSignal({ kind: 'agent_event', taskId: 'task',
+      event: { kind: 'progress', runId: retry.id, text: 'Reviewing pinned SHA' } });
+    assert.equal(store.getTask('task')?.state, 'reviewing');
+  } finally { store.close(); }
+});
+
+test('unsupported review severity can be re-reviewed after an unchanged repair failure', async () => {
+  const store = new SqliteStore(':memory:');
+  const at = new Date().toISOString();
+  const sha = 'a'.repeat(40);
+  try {
+    saveApprovedTask(store, 'blocked', at);
+    store.saveRun({ id: 'verify-run', taskId: 'task', iteration: 1, stage: 'verify', status: 'succeeded',
+      priority: 0, attempt: 1, agentKind: 'qoder', commitSha: sha, createdAt: at });
+    store.saveRun({ id: 'review-run', taskId: 'task', iteration: 1, stage: 'review', status: 'succeeded',
+      priority: 0, attempt: 1, agentKind: 'qoder', commitSha: sha,
+      createdAt: new Date(Date.parse(at) + 1000).toISOString() });
+    store.saveRecord({ id: 'review', taskId: 'task', runId: 'review-run', kind: 'review',
+      iteration: 1, subjectSha: sha, verdict: 'pass', findings: [{ file: 'file.txt', severity: 'info',
+        evidence: 'No issue', impact: 'None' }], at: new Date(Date.parse(at) + 1000).toISOString() });
+    store.saveRun({ id: 'repair-run', taskId: 'task', iteration: 1, stage: 'develop', status: 'failed',
+      priority: 0, attempt: 1, agentKind: 'qoder', commitSha: sha,
+      createdAt: new Date(Date.parse(at) + 2000).toISOString() });
+    const version = Number(store.db.prepare('SELECT version FROM task WHERE id=?').get('task')?.version);
+    await executeTaskCommand(store, {}, 'owner', { kind: 'retry', taskId: 'task', expectedVersion: version,
+      reason: 'Re-review unsupported informational severity', idempotencyKey: 'review-severity-retry' });
+    const row = store.db.prepare("SELECT id FROM run WHERE task_id=? AND status='queued'").get('task');
+    const retry = store.getRun(String(row?.id))!;
+    assert.equal(retry.stage, 'review');
+    assert.equal(retry.commitSha, sha);
+    assert.equal(store.latestReview('task')?.id, 'review');
+  } finally { store.close(); }
+});
 
 test('action approval binds reviewed source, target and policy without resuming development', async () => {
   const store = new SqliteStore(':memory:');

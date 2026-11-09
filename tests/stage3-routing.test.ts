@@ -261,7 +261,10 @@ test('successful investigation requests SHA-bound edit scope and queues no devel
     assert.equal(store.db.prepare("SELECT count(*) AS n FROM run WHERE stage='develop'").get()?.n, 0);
     const request = store.getRecord(`scope-${claimed.id}`);
     assert.equal(request?.kind, 'approval_request');
-    if (request?.kind === 'approval_request') assert.equal((request.request as { sourceSha: string }).sourceSha, sha);
+    if (request?.kind === 'approval_request') {
+      assert.equal((request.request as { sourceSha: string }).sourceSha, sha);
+      assert.equal((request.request as { proposedMandate: { maxAutoRisk: string } }).proposedMandate.maxAutoRisk, 'high');
+    }
   } finally { store.close(); }
 });
 

@@ -52,6 +52,14 @@ export function createGitHubCodeHost(repo: Repository, fetcher: typeof fetch = f
   const ref = (pull: Pull, targetSha: string) => changeRef.parse({ provider: 'github', repoKey: repo.repoKey,
     id: String(pull.number), sourceSha: fullSha(pull.head.sha), targetSha });
   return { repoKey: repo.repoKey, provider: 'github', readTarget: target, readChecks: checks,
+    async readBranch(branch) {
+      if (!/^agent-platform\/[A-Za-z0-9_-]+$/.test(branch)) throw new Error('Task branch is invalid');
+      try { return await branchSha(branch); }
+      catch (error) {
+        if (error instanceof Error && error.message === 'github API GET returned HTTP 404') return undefined;
+        throw error;
+      }
+    },
     async readRequiredChecks(branch) {
       if (branch !== repo.targetBranch) throw new Error('Target branch differs from repository configuration');
       const required = new Set<string>();

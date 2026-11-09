@@ -51,11 +51,13 @@ test('opening a change requests approval for the reviewed SHA and rechecks the t
     let currentTarget = target;
     let platformRequired = ['verify'];
     let existingChange: Awaited<ReturnType<NonNullable<CodeHost['findChangeByBranch']>>>;
+    let pushedSha: string | undefined;
     let failCreate = false;
     const host: CodeHost = { repoKey: 'repo', provider: 'github',
       async readTarget() { return currentTarget; }, async readChecks() { return []; },
       async readRequiredChecks() { return platformRequired; },
       async findChangeByBranch() { return existingChange; },
+      async readBranch() { return pushedSha; },
       async openChange() { if (failCreate) throw new Error('Timeout after create request');
         existingChange = { provider: 'github', repoKey: 'repo', id: '42',
         sourceSha, targetSha: currentTarget }; return existingChange; },
@@ -67,7 +69,7 @@ test('opening a change requests approval for the reviewed SHA and rechecks the t
     let pushes = 0;
     const service = createStage5OpenChange(store, { repo }, { repo: host },
       { async prepare() { throw new Error('No clone expected'); },
-        async verifyAfterChecks() {} }, 'v1', async () => { pushes++; });
+        async verifyAfterChecks() {} }, 'v1', async () => { pushes++; pushedSha = sourceSha; });
     const version = () => Number(store.db.prepare('SELECT version FROM task WHERE id=?').get('task')?.version);
     const request = await service.prepare('task', version());
     assert.equal(request.kind, 'action_request');
@@ -110,8 +112,13 @@ test('opening a change requests approval for the reviewed SHA and rechecks the t
       value: { requestId: second.requestId!, decision: 'approve', actor: { kind: 'human', id: 'owner' },
         at, idempotencyKey: 'approve-second' } } });
     assert.deepEqual(await service.execute('task', version()), { kind: 'uncertain' });
-    assert.deepEqual(await service.execute('task', version()), { kind: 'uncertain' });
+    pushedSha = 'd'.repeat(40);
+    await assert.rejects(service.execute('task', version()), /branch differs from approved source SHA/);
     assert.equal(pushes, 2);
+    pushedSha = sourceSha;
+    failCreate = false;
+    assert.deepEqual(await service.execute('task', version()), { kind: 'opened', changeId: '42' });
+    assert.equal(pushes, 3);
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 

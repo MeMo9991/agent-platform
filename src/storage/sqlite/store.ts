@@ -149,7 +149,8 @@ export class SqliteStore implements EventRepository {
       let taskId: string;
       if (decision.kind === 'new_task') {
         if (decision.mandate.sourceEventId !== eventId || decision.mandate.repoKey !== decision.repoKey ||
-            decision.mandate.authority.kind !== 'trusted_rule') throw new Error('Invalid intake Mandate');
+            (decision.mandate.authority.kind !== 'trusted_rule' &&
+              decision.mandate.authority.kind !== 'auto_pr')) throw new Error('Invalid intake Mandate');
         if (!plan.task || !plan.run || plan.task.id !== plan.run.taskId || plan.taskId !== plan.task.id ||
             plan.task.repoKey !== decision.repoKey || plan.task.mandate.sourceEventId !== eventId ||
             plan.task.parentTaskId !== decision.parentTaskId ||
@@ -232,7 +233,14 @@ export class SqliteStore implements EventRepository {
   }
   saveTask(input: Task): void {
     const value = task.parse(input);
-    if (value.mandate.authority.kind !== 'trusted_rule') throw new Error('Human-approved Mandate requires a verified authorization service');
+    if (value.mandate.authority.kind === 'auto_pr') {
+      const event = this.get(value.mandate.sourceEventId);
+      if (!event || event.status !== 'routing' || value.originEventId !== event.id ||
+          event.sourceId !== `manual:${value.repoKey}` || event.repoKey !== value.repoKey ||
+          event.metaData.autoPr !== true || event.attachments.length || value.mandate.goal !== event.title)
+        throw new Error('Automatic PR intake lacks trusted opt-in');
+    } else if (value.mandate.authority.kind !== 'trusted_rule')
+      throw new Error('Human-approved Mandate requires a verified authorization service');
     this.db.prepare(`INSERT INTO task
       (id,origin_event_id,repo_key,title,scope,mandate,state,iteration,priority,owner,base_ref,parent_task_id,created_at,updated_at,payload_json)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(value.id, value.originEventId ?? null, value.repoKey, value.title,
@@ -351,7 +359,7 @@ export class SqliteStore implements EventRepository {
     const current = this.getTask(taskId);
     if (!current) return undefined;
     const row = this.db.prepare(`SELECT payload_json FROM task_record WHERE task_id=? AND kind='review'
-      ORDER BY at DESC,id DESC LIMIT 1`).get(taskId);
+      ORDER BY at DESC,rowid DESC LIMIT 1`).get(taskId);
     if (!row) return undefined;
     const review = taskRecord.parse(JSON.parse(String(row.payload_json)));
     return review.kind === 'review' && review.iteration === current.iteration ? review : undefined;
@@ -652,6 +660,17 @@ export class SqliteStore implements EventRepository {
         throw new Error('Effect intent is outside the current Task Mandate');
       this.saveRecord(input);
       return input;
+    });
+  }
+  rearmUncertainEffect(id: string): void {
+    this.transaction(() => {
+      const record = this.getRecord(id);
+      if (record?.kind !== 'effect' || record.action !== 'open_pr' || record.status !== 'uncertain' ||
+          !record.request || record.receipt) throw new Error('Effect is not eligible for recovery');
+      const next = taskRecord.parse({ ...record, status: 'pending' });
+      const changed = this.db.prepare('UPDATE task_record SET status=?,payload_json=? WHERE id=? AND status=?')
+        .run('pending', JSON.stringify(next), id, 'uncertain');
+      if (changed.changes !== 1) throw new Error('Effect changed before recovery');
     });
   }
   settleEffect(id: string, status: 'done' | 'uncertain' | 'failed',

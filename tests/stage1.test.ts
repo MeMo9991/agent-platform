@@ -144,6 +144,19 @@ test('state transitions cannot persist a caller-forged Mandate', () => {
   } finally { store.close(); }
 });
 
+test('a queued develop retry can enter developing without changing its Mandate', () => {
+  const store = new SqliteStore(':memory:');
+  const actor = { kind: 'system' as const, id: 'worker' };
+  try {
+    store.saveTask(task);
+    store.saveTransition(task.id, 'triaged', 'accepted', now, 'retry-transition-1', actor);
+    store.saveTransition(task.id, 'queued', 'queued retry', now, 'retry-transition-2', actor);
+    store.saveTransition(task.id, 'developing', 'develop Run started', now, 'retry-transition-3', actor);
+    assert.equal(store.getTask(task.id)?.state, 'developing');
+    assert.deepEqual(store.getTask(task.id)?.mandate, task.mandate);
+  } finally { store.close(); }
+});
+
 test('task and mandate cannot name different repositories', () => {
   const store = new SqliteStore(':memory:');
   try {

@@ -47,9 +47,10 @@ export interface KernelStore extends EventLoopStore {
 
 export function createKernelCoordinator(store: KernelStore, trustedRepoBySource: Readonly<Record<string, string>>,
   policyVersion: string, ruleRef: string, agentKind: string,
-  allowedRepos: readonly string[], finder: TaskCandidateFinder): KernelCoordinator & { processPending(limit?: number): number;
+  allowedRepos: readonly string[], finder: TaskCandidateFinder,
+  autoMandate?: (event: SourceEvent) => Task['mandate'] | undefined): KernelCoordinator & { processPending(limit?: number): number;
     resolveHumanRoute(value: z.infer<typeof routeReviewDecision>): string | undefined } {
-  const eventLoop = createEventLoop(store, trustedRepoBySource, policyVersion, ruleRef, agentKind, finder);
+  const eventLoop = createEventLoop(store, trustedRepoBySource, policyVersion, ruleRef, agentKind, finder, 60_000, autoMandate);
   const actor = { kind: 'system' as const, id: 'kernel' };
   return {
     onQuestionProcessEnded(runId, sessionId) {
@@ -103,7 +104,10 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
         }
         const owner = value.choice === 'existing_task' ? store.getTask(value.taskId)
           : value.choice === 'new_task' && value.parentTaskId ? store.getTask(value.parentTaskId) : undefined;
-        const decision = decideHumanRoute(value, event, owner, allowedRepos, policyVersion);
+        const routed = decideHumanRoute(value, event, owner, allowedRepos, policyVersion);
+        const automatic = routed.kind === 'new_task' ? autoMandate?.(event) : undefined;
+        const decision = automatic && routed.kind === 'new_task' && automatic.repoKey === routed.repoKey
+          ? { ...routed, mandate: automatic } : routed;
         const plan = planRoute(event, decision, owner, owner ? store.hasBusyRun(owner.id, owner.iteration) : false,
           agentKind, value.at);
         store.claimHumanRoute(event.id);
@@ -316,6 +320,7 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
           store.saveApprovalRequest({ kind: 'scope_change', id: requestId, taskId: task.id,
             iteration: task.iteration, sourceSha: task.baseRef, policyVersion: task.mandate.policyVersion,
             proposedMandate: { ...task.mandate, allowedActions: ['investigate', 'edit'],
+              maxAutoRisk: 'high',
               authority: { kind: 'human_approval', approvalRef: requestId } } });
         }
         if (decision.queueStage) store.saveRun({ id: randomUUID(), taskId: task.id, iteration: task.iteration,

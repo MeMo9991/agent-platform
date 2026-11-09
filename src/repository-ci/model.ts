@@ -3,6 +3,7 @@ import { id, timestamp } from '../shared/model.js';
 
 export const repositoryConfig = z.object({ repoKey: id, provider: z.enum(['github', 'gitlab']), hostUrl: z.url(),
   projectRef: id, targetBranch: id, requiredChecks: z.array(id), credentialsRef: id, localPath: id.optional(),
+  autoPr: z.object({ enabled: z.boolean(), allowedPrefixes: z.array(z.enum(['src/', 'tests/', 'web/src/'])) }).optional(),
   localChecks: z.array(z.object({ command: id, args: z.array(z.string()), timeoutMs: z.number().int().positive() })).default([]) });
 export const changeRef = z.object({ provider: z.enum(['github', 'gitlab']), repoKey: id, id, sourceSha: id, targetSha: id });
 export const checkResult = z.object({ repoKey: id, commitSha: id, status: z.enum(['pending', 'completed']),
@@ -22,6 +23,7 @@ export interface CodeHost {
   readonly provider: 'github' | 'gitlab';
   readChecks(commitSha: string): Promise<z.infer<typeof checkResult>[]>;
   readTarget?(branch: string): Promise<string>;
+  readBranch?(branch: string): Promise<string | undefined>;
   readRequiredChecks?(branch: string): Promise<string[]>;
   findChangeByBranch?(branch: string): Promise<z.infer<typeof changeRef> | undefined>;
   openChange(request: { sourceSha: string; sourceBranch?: string; targetBranch: string;

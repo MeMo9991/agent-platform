@@ -6,6 +6,7 @@ import { SqliteStore } from '../storage/sqlite/store.js';
 import { platformConfig } from './config.js';
 import { createDevopsDefectTask, devopsDefectParameters } from './devops-task.js';
 import { loadScheduleConfig, startSchedules } from './scheduler.js';
+import { autoPrRuleRef } from '../authorization/auto-pr.js';
 
 export function startConfiguredSchedules(paths: { platform: string; schedules: string; database: string },
   authorizationHeaders: () => Promise<HeadersInit>, onError: (taskId: string, error: unknown) => void,
@@ -25,7 +26,8 @@ export function startConfiguredSchedules(paths: { platform: string; schedules: s
   }
   const metadata: Record<string, readonly string[]> = Object.fromEntries(platform.sources.filter(source => source.kind === 'devops-defect')
     .map(source => [source.id, defectMetadataFields])) satisfies MetadataFields;
-  for (const repo of platform.repositories) metadata[`manual:${repo.repoKey}`] = ['contentDigest'];
+  for (const repo of platform.repositories) metadata[`manual:${repo.repoKey}`] = autoPrRuleRef(repo, platform.policyRef)
+    ? ['contentDigest', 'autoPr'] : ['contentDigest'];
   const store = new SqliteStore(paths.database, metadata);
   try {
     store.transaction(() => {

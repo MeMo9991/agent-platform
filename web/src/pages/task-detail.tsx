@@ -107,6 +107,7 @@ function HumanAction({ taskId, version, record, onDone }: { taskId: string; vers
   return <div className="action-box"><p><strong>{isQuestion ? '待回答' : '待审批'}</strong> · {record.prompt ?? record.request?.kind ?? '题目待审查'}</p>
     {record.request && <p className="muted">受审 SHA：{record.request.sourceSha} · 拟议动作：{record.request.action ?? record.request.proposedMandate?.allowedActions.join(', ')}
       {record.request.targetBranch && <> · 目标分支：{record.request.targetBranch}</>}
+      {record.request.proposedMandate?.maxAutoRisk && <> · 自动执行风险上限：{record.request.proposedMandate.maxAutoRisk}</>}
       {record.request.targetSha && <> · 目标 SHA：{record.request.targetSha}</>}
       {record.request.changeRef && <> · 变更请求：{record.request.changeRef}</>}
       {record.request.reviewRecordId && <> · 审查记录：{record.request.reviewRecordId}</>}
@@ -114,7 +115,7 @@ function HumanAction({ taskId, version, record, onDone }: { taskId: string; vers
     {isQuestion && !record.prompt && <ContentReview taskId={taskId} version={version} targetKind="question" targetId={record.id} onDone={onDone} />}
     {isQuestion ? record.prompt && <form onSubmit={submit} className="stack"><label>回答<textarea value={content} onChange={event => { setContent(event.target.value); setDecisionKey(crypto.randomUUID()); }} required /></label>
       <Button type="submit" disabled={busy}>提交回答</Button></form> : <div className="actions">
-      <Button disabled={busy} onClick={event => void submit(event, 'approve')}>批准</Button>
+      <Button variant="primary" disabled={busy} onClick={event => void submit(event, 'approve')}>批准</Button>
       <Button disabled={busy} onClick={event => void submit(event, 'reject')}>驳回</Button></div>}
     {error && <p role="alert" className="error">{error.includes('version') ? '任务已更新，请刷新后重新决定' : error}</p>}</div>;
 }
@@ -282,6 +283,12 @@ export function TaskDetailPage({ id, actorId, roles, stage5WritesEnabled }: { id
       <Card><h2>来源</h2>{detail.events.length ? detail.events.map(event => <p key={event.id}>
         <a href={`#/events/${encodeURIComponent(event.id)}`}>{event.title}</a> <Badge>{event.status}</Badge></p>)
         : <p className="muted">尚无来源记录</p>}</Card>
+      <Card><h2>待决定事项</h2>{detail.records.filter(item => item.status === 'open' && ['question','approval_request'].includes(item.kind)).length
+        ? detail.records.filter(item => item.status === 'open' && ['question','approval_request'].includes(item.kind)).map(item =>
+          (item.kind === 'question' ? roles.includes('answer') : roles.includes('approve'))
+            ? <HumanAction key={item.id} taskId={id} version={detail.task.version} record={item} onDone={() => setRevision(value => value + 1)} />
+            : <p key={item.id}>{item.prompt ?? item.request?.kind} · 当前凭据无决定权限</p>)
+        : <p className="muted">暂无待决定事项</p>}</Card>
       <Card><h2>运行与会话</h2>{detail.runs.length ? detail.runs.map(run => <div className="run-row" key={run.id}>
         <Badge>{run.status}</Badge> <strong>{run.stage}</strong> · {run.agentKind ?? 'Agent 待定'}
         {run.sessionId && <> · Session {run.sessionId} <Button onClick={() => void navigator.clipboard.writeText(run.sessionId!)}>复制引用</Button></>}
@@ -304,12 +311,6 @@ export function TaskDetailPage({ id, actorId, roles, stage5WritesEnabled }: { id
             <p>日志记录 {item.log?.recordId} · {item.log?.sha256 ? `SHA-256 ${item.log.sha256} · ${item.log.bytes} 字节`
               : item.log?.truncated ? '文件超过预览上限' : '文件暂不可读取'}</p></>}</div>)
         : <p className="muted">尚无开发证据</p>}</Card>
-      <Card><h2>待决定事项</h2>{detail.records.filter(item => item.status === 'open' && ['question','approval_request'].includes(item.kind)).length
-        ? detail.records.filter(item => item.status === 'open' && ['question','approval_request'].includes(item.kind)).map(item =>
-          (item.kind === 'question' ? roles.includes('answer') : roles.includes('approve'))
-            ? <HumanAction key={item.id} taskId={id} version={detail.task.version} record={item} onDone={() => setRevision(value => value + 1)} />
-            : <p key={item.id}>{item.prompt ?? item.request?.kind} · 当前凭据无决定权限</p>)
-        : <p className="muted">暂无待决定事项</p>}</Card>
       <Card><h2>事实时间线</h2>{detail.records.length ? <ol className="timeline">{detail.records.map(item =>
         <li key={item.id}><time>{new Date(item.at).toLocaleString()}</time> <Badge>{item.kind}</Badge>
           <p>{item.prompt ?? item.summary ?? item.reason ?? item.content ?? item.result ?? item.status ?? item.decision ?? item.commitSha ?? item.id}</p>

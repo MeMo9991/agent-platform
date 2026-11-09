@@ -12,6 +12,21 @@ import type { SqliteStore } from '../../storage/sqlite/store.js';
 import type { AttachmentReader, AttachmentRef } from '../../event/model.js';
 
 export type ExecutionAttestation = z.infer<typeof executionAttestation>;
+export function parseReviewOutput(summary: string): z.infer<typeof reviewEvidence> {
+  try { return reviewEvidence.parse(JSON.parse(summary)); }
+  catch { /* Qoder may wrap its structured result in one JSON code block. */ }
+  const lines = summary.split(/\r?\n/);
+  const fences = lines.flatMap((line, index) => line.startsWith('```') ? [index] : []);
+  if (!fences.length) {
+    const starts = lines.flatMap((line, index) => line.startsWith('{') ? [index] : []);
+    if (starts.length !== 1) throw new Error('Review result has no unique final JSON object');
+    return reviewEvidence.parse(JSON.parse(lines.slice(starts[0]!).join('\n')));
+  }
+  if (fences.length !== 2 || !/^```json[ \t]*$/.test(lines[fences[0]!]!) ||
+      !/^```[ \t]*$/.test(lines[fences[1]!]!) || fences[1]! <= fences[0]! + 1)
+    throw new Error('Review result has no unique JSON code block');
+  return reviewEvidence.parse(JSON.parse(lines.slice(fences[0]! + 1, fences[1]!).join('\n')));
+}
 export interface ExecutionBoundary {
   attest(input: { runId: string; repoKey: string; workspacePath: string; mode: 'read' | 'write';
     mandate: TaskMandate }): Promise<ExecutionAttestation | undefined>;
@@ -194,7 +209,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
           throw new Error('Review session or isolation proof is missing');
         const summary = await runner.resultSummary(run.id, run.sessionId, snapshot.resultRef);
         if (Buffer.byteLength(summary, 'utf8') > 65_536) throw new Error('Review result exceeds limit');
-        review = reviewEvidence.parse(JSON.parse(summary));
+        review = parseReviewOutput(summary);
         if (review.subjectSha !== run.commitSha) throw new Error('Review result names another SHA');
         await input.workspace.verifyAfterChecks(run, run.commitSha);
       } catch (error) {

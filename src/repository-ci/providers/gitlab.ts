@@ -47,6 +47,14 @@ export function createGitLabCodeHost(repo: Repository, fetcher: typeof fetch = f
   const ref = (merge: Merge, targetSha: string) => changeRef.parse({ provider: 'gitlab', repoKey: repo.repoKey,
     id: String(merge.iid), sourceSha: fullSha(merge.sha), targetSha });
   return { repoKey: repo.repoKey, provider: 'gitlab', readTarget: target, readChecks: checks,
+    async readBranch(branch) {
+      if (!/^agent-platform\/[A-Za-z0-9_-]+$/.test(branch)) throw new Error('Task branch is invalid');
+      try { return await branchSha(branch); }
+      catch (error) {
+        if (error instanceof Error && error.message === 'gitlab API GET returned HTTP 404') return undefined;
+        throw error;
+      }
+    },
     async readRequiredChecks(branch) {
       if (branch !== repo.targetBranch) throw new Error('Target branch differs from repository configuration');
       const project = await request<{ only_allow_merge_if_pipeline_succeeds?: boolean }>('');

@@ -4,7 +4,7 @@ import type { actorRef } from '../../shared/model.js';
 
 const next: Partial<Record<TaskState, TaskState[]>> = {
   new: ['triaged', 'cancelled'], triaged: ['queued', 'waiting_human', 'cancelled'],
-  queued: ['investigating', 'waiting_human', 'paused', 'blocked', 'cancelled'], investigating: ['developing', 'waiting_human', 'blocked', 'failed', 'cancelled'],
+  queued: ['investigating', 'developing', 'verifying', 'reviewing', 'waiting_human', 'paused', 'blocked', 'cancelled'], investigating: ['developing', 'waiting_human', 'blocked', 'failed', 'cancelled'],
   developing: ['verifying', 'waiting_human', 'blocked', 'failed', 'cancelled'],
   verifying: ['reviewing', 'developing', 'blocked', 'failed'], reviewing: ['ready_to_merge', 'developing', 'waiting_human', 'blocked'],
   ready_to_merge: ['merging', 'waiting_human', 'blocked'], merging: ['merged', 'blocked', 'failed'],

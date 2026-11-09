@@ -46,6 +46,25 @@ test('GitHub and GitLab normalize checks without mixing repository identities', 
   } finally { delete process.env.AGENT_STAGE5_TEST_TOKEN; }
 });
 
+test('code hosts recover only a missing task branch, not other read failures', async () => {
+  process.env.AGENT_STAGE5_TEST_TOKEN = 'fixture-token';
+  const base = { repoKey: 'repo', targetBranch: 'main', requiredChecks: ['verify'],
+    credentialsRef: 'env:AGENT_STAGE5_TEST_TOKEN', localChecks: [] };
+  try {
+    const github = createGitHubCodeHost({ ...base, provider: 'github', hostUrl: 'https://github.com',
+      projectRef: 'team/repo' }, (async () => new Response(null, { status: 404 })) as typeof fetch);
+    const gitlab = createGitLabCodeHost({ ...base, provider: 'gitlab',
+      hostUrl: 'https://gitlab.example.test', projectRef: 'team/repo' },
+    (async () => new Response(null, { status: 404 })) as typeof fetch);
+    assert.equal(await github.readBranch?.('agent-platform/task'), undefined);
+    assert.equal(await gitlab.readBranch?.('agent-platform/task'), undefined);
+    await assert.rejects(github.readBranch?.('main'), /Task branch is invalid/);
+    const denied = createGitHubCodeHost({ ...base, provider: 'github', hostUrl: 'https://github.com',
+      projectRef: 'team/repo' }, (async () => new Response(null, { status: 403 })) as typeof fetch);
+    await assert.rejects(denied.readBranch?.('agent-platform/task'), /HTTP 403/);
+  } finally { delete process.env.AGENT_STAGE5_TEST_TOKEN; }
+});
+
 test('GitHub reads every active required check and rejects incomplete branch rules', async () => {
   process.env.AGENT_STAGE5_TEST_TOKEN = 'fixture-token';
   const repo = { repoKey: 'one', provider: 'github' as const, hostUrl: 'https://github.com',

@@ -7,6 +7,69 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createQoderRunner } from '../src/agent/worker/agents/qoder.js';
 
+test('develop grants only the built-in tools needed to edit and commit in its sandbox', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'qoder-develop-'));
+  const workspace = join(directory, 'clone');
+  mkdirSync(workspace);
+  const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(),
+    kill: () => true }) as unknown as ChildProcess;
+  const runner = createQoderRunner({ verified: true, launch(_command, args) {
+    assert.equal(args[args.indexOf('--permission-mode') + 1], 'bypass_permissions');
+    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /Commit authorized changes.*Git worktree clean/);
+    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /previousResults are historical, unverified reports/);
+    assert.equal(args[args.indexOf('--setting-sources') + 1], 'user');
+    assert.deepEqual(args.slice(args.indexOf('--tools'), args.indexOf('--tools') + 9),
+      ['--tools', 'Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash',
+        '--allowed-tools', 'Read,Grep,Glob,Edit,Write,Bash']);
+    return { process: child, terminate: () => true, isTerminated: () => true };
+  } }, directory);
+  try {
+    const started = runner.start({ taskId: 'task', runId: 'run', stage: 'develop', repoKey: 'repo',
+      mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Edit', allowedActions: ['edit'],
+        maxAutoRisk: 'high', policyVersion: 'p1', authority: { kind: 'human_approval', approvalRef: 'approval' } },
+      workspace: { repoKey: 'repo', path: workspace, baseSha: 'a'.repeat(40) },
+      input: { kind: 'task', runId: 'run', prompt: 'Edit', sourceEventIds: [] },
+      skill: { content: 'Edit', ref: { repoRef: 'repo', path: 'skills/develop/SKILL.md',
+        commitSha: 'a'.repeat(40), stage: 'develop' } },
+      execution: { verified: true, runId: 'run', repoKey: 'repo', workspacePath: workspace,
+        mode: 'write', adapterVersion: 'test', configDigest: 'digest' }, timeoutMs: 1000 });
+    child.stdout?.emit('data', JSON.stringify({ type: 'result', subtype: 'success',
+      session_id: 'develop-session', result: 'Done', is_error: false }) + '\n');
+    child.emit('close', 0);
+    await started;
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('review asks for one raw JSON verdict bound to the pinned SHA', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'qoder-review-'));
+  const workspace = join(directory, 'clone');
+  mkdirSync(workspace);
+  const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(),
+    kill: () => true }) as unknown as ChildProcess;
+  const sha = 'b'.repeat(40);
+  const runner = createQoderRunner({ verified: true, launch(_command, args) {
+    assert.equal(args[args.indexOf('--permission-mode') + 1], 'dont_ask');
+    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, new RegExp(`raw JSON object with subjectSha exactly ${sha}`));
+    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /No Markdown, code fences or prose/);
+    return { process: child, terminate: () => true, isTerminated: () => true };
+  } }, directory);
+  try {
+    const started = runner.start({ taskId: 'task', runId: 'review-run', stage: 'review', repoKey: 'repo',
+      mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Review', allowedActions: ['investigate'],
+        maxAutoRisk: 'low', policyVersion: 'p1', authority: { kind: 'trusted_rule', ruleRef: 'rule' } },
+      workspace: { repoKey: 'repo', path: workspace, baseSha: sha },
+      input: { kind: 'task', runId: 'review-run', prompt: 'Review', sourceEventIds: [] },
+      skill: { content: 'Review', ref: { repoRef: 'repo', path: 'skills/review/SKILL.md',
+        commitSha: sha, stage: 'review' } },
+      execution: { verified: true, runId: 'review-run', repoKey: 'repo', workspacePath: workspace,
+        mode: 'read', adapterVersion: 'test', configDigest: 'digest' }, timeoutMs: 1000 });
+    child.stdout?.emit('data', JSON.stringify({ type: 'result', subtype: 'success',
+      session_id: 'review-session', result: `{"subjectSha":"${sha}","verdict":"pass","findings":[]}`, is_error: false }) + '\n');
+    child.emit('close', 0);
+    await started;
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('Qoder confirms input only after assistant output and keeps an early exit pending', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'qoder-runner-'));
   const workspace = join(directory, 'clone');
@@ -27,6 +90,8 @@ test('Qoder confirms input only after assistant output and keeps an early exit p
     assert.doesNotMatch(args[args.indexOf('--append-system-prompt') + 1]!, /Bug/);
     assert.match(args.at(-1)!, /Bug/);
     assert.equal(args[args.indexOf('--output-format') + 1], 'stream-json');
+    assert.equal(args[args.indexOf('--permission-mode') + 1], 'dont_ask');
+    assert.equal(args[args.indexOf('--setting-sources') + 1], '');
     assert.deepEqual(args.slice(args.indexOf('--tools'), args.indexOf('--tools') + 6),
       ['--tools', 'Read', 'Grep', 'Glob', '--allowed-tools', 'Read,Grep,Glob']);
     assert.equal(args[args.indexOf('--attachment') + 1], realpathSync(imagePath));

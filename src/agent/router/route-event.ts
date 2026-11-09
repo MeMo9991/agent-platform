@@ -1,4 +1,5 @@
 import type { SourceEvent } from '../../event/model.js';
+import type { TaskMandate } from '../task/model.js';
 import { investigationMandate } from '../../authorization/model.js';
 import type { Task, Subscription } from '../task/model.js';
 import type { RouteDecision, TaskCandidateFinder } from './model.js';
@@ -8,7 +9,7 @@ const ended = new Set(['released', 'closed', 'cancelled']);
 
 export function routeEvent(event: SourceEvent, matches: readonly Match[], trustedRepoKey: string | undefined,
   policyVersion: string, ruleRef: string, findCandidates: TaskCandidateFinder['find'],
-  excludedTaskId?: string): RouteDecision {
+  excludedTaskId?: string, autoMandate?: (event: SourceEvent) => TaskMandate | undefined): RouteDecision {
   if (!trustedRepoKey || (event.repoKey && event.repoKey !== trustedRepoKey))
     return { kind: 'needs_human', candidates: [], reason: 'Source has no trusted matching repository' };
   const handle = [...new Map(matches.filter(match => match.subscription.mode === 'handle' && match.task.id !== excludedTaskId)
@@ -38,5 +39,5 @@ export function routeEvent(event: SourceEvent, matches: readonly Match[], truste
   }
   const parentTaskId = excludedTaskId ?? endedHandle;
   return { kind: 'new_task', repoKey: trustedRepoKey, parentTaskId, contextTaskIds,
-    mandate: investigationMandate(event.id, trustedRepoKey, event.title, policyVersion, ruleRef) };
+    mandate: autoMandate?.(event) ?? investigationMandate(event.id, trustedRepoKey, event.title, policyVersion, ruleRef) };
 }

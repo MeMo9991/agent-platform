@@ -19,7 +19,8 @@ export function decideAgentEvent(task: Task, run: Run, event: AgentEvent, hasPen
   if (run.taskId !== task.id || event.runId !== run.id || run.iteration !== task.iteration || run.status !== 'running')
     throw new Error('Agent event does not match the active Task and Run');
   if (event.kind === 'progress') return task.state === 'queued'
-    ? { state: run.stage === 'investigate' ? 'investigating' : 'developing' } : {};
+    ? { state: run.stage === 'investigate' ? 'investigating' : run.stage === 'verify' ? 'verifying'
+      : run.stage === 'review' ? 'reviewing' : 'developing' } : {};
   if (event.kind === 'question') return {};
   if (event.kind !== 'result') return {};
   if (event.status === 'failed' || event.exitCode !== 0) return { state: 'failed' };

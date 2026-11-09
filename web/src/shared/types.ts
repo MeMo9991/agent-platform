@@ -13,7 +13,7 @@ export type RecordItem = { id: string; taskId: string; kind: string; at: string;
   content?: string; summary?: string; request?: { id: string; kind: string; sourceSha: string;
     action?: string; targetBranch?: string; targetSha?: string; changeRef?: string; reviewRecordId?: string;
     policyVersion?: string;
-    proposedMandate?: { goal: string; allowedActions: string[] } }; reason?: string; from?: string;
+    proposedMandate?: { goal: string; allowedActions: string[]; maxAutoRisk?: string } }; reason?: string; from?: string;
   to?: string; questionId?: string; decision?: string; subjectSha?: string;
   baseSha?: string; commitSha?: string; codeChange?: 'none' | 'committed'; developmentRecordId?: string;
   postCheckVerified?: boolean; postCheckError?: string;

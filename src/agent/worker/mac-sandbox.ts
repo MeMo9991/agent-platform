@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import { copyFile, lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -15,7 +15,9 @@ export async function createMacSandboxProfile(input: { workspacePath: string; te
   ].map(path => realpath(resolve(path))));
   if (workspace === home || temporary === home || workspace === temporary ||
       workspace.startsWith(`${qoderConfig}/`) || temporary.startsWith(`${qoderConfig}/`) ||
-      qoderConfig.startsWith(`${workspace}/`) || qoderLink.startsWith(`${workspace}/`))
+      qoderConfig.startsWith(`${workspace}/`) || qoderLink.startsWith(`${workspace}/`) ||
+      (input.mode === 'write' && (qoderLink === qoderConfig || qoderLink.startsWith(`${qoderConfig}/`) ||
+        qoderConfig.startsWith(`${qoderLink}/`))))
     throw new Error('Mac sandbox paths overlap protected runtime directories');
   const quoted = (path: string) => JSON.stringify(path);
   const except = (paths: string[]) => paths.map(path => `(require-not (subpath ${quoted(path)}))`).join(' ');
@@ -25,9 +27,8 @@ export async function createMacSandboxProfile(input: { workspacePath: string; te
       parents.add(parent);
     return `${except(paths)} ${[...parents].map(path => `(require-not (literal ${quoted(path)}))`).join(' ')}`;
   };
-  const homeReads = [qoderConfig, qoderLink, workspace, temporary];
-  const tmpReads = [qoderConfig, qoderLink, workspace, temporary];
-  // shortcut: Qoder's own account state remains accessible; use a dedicated OS account when that credential must be isolated from the Agent.
+  const homeReads = [...(input.mode === 'read' ? [qoderConfig] : []), qoderLink, workspace, temporary];
+  const tmpReads = homeReads;
   const profile = [
     '(version 1)', '(allow default)',
     `(deny file-read-data (require-all (subpath ${quoted(home)}) ${except(homeReads)}))`,
@@ -35,14 +36,15 @@ export async function createMacSandboxProfile(input: { workspacePath: string; te
     `(deny file-read-data (require-all (subpath "/private/tmp") ${except(tmpReads)}))`,
     `(deny file-read-metadata (require-all (subpath "/private/tmp") ${exceptMetadata(tmpReads)}))`,
     `(deny file-write* (require-all ${except([
-      qoderConfig, temporary, ...(input.mode === 'write' ? [workspace] : []),
+      ...(input.mode === 'read' ? [qoderConfig] : []), temporary,
+      ...(input.mode === 'write' ? [workspace] : []),
     ])} (require-not (literal "/dev/null"))))`,
   ].join('\n') + '\n';
   return { profile, digest: createHash('sha256').update(profile).digest('hex') };
 }
 
 export async function createMacQoderRuntime(input: { cloneRoot: string; profileRoot: string;
-  qoderPath: string }): Promise<{ boundary: ExecutionBoundary; launcher: IsolatedProcessLauncher }> {
+  qoderPath: string; writeEnabled?: boolean }): Promise<{ boundary: ExecutionBoundary; launcher: IsolatedProcessLauncher }> {
   if (process.platform !== 'darwin') throw new Error('Qoder sandbox requires macOS');
   const home = await realpath(homedir());
   const cloneRoot = await realpath(input.cloneRoot);
@@ -83,13 +85,22 @@ export async function createMacQoderRuntime(input: { cloneRoot: string; profileR
     try { process.kill(-pid, 0); return false; }
     catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
   };
-  const boundary: ExecutionBoundary = { async attest({ runId, repoKey, workspacePath, mode }) {
-    if (mode !== 'read' || !/^[A-Za-z0-9_-]+$/.test(runId)) return undefined;
+  const boundary: ExecutionBoundary = { async attest({ runId, repoKey, workspacePath, mode, mandate }) {
+    if (!/^[A-Za-z0-9_-]+$/.test(runId) || (mode === 'write' &&
+        (!input.writeEnabled || mandate.repoKey !== repoKey || !mandate.allowedActions.includes('edit') ||
+          !['human_approval', 'auto_pr'].includes(mandate.authority.kind) ||
+          !process.env.QODERCN_PERSONAL_ACCESS_TOKEN))) return undefined;
     if (proofs.has(runId)) throw new Error('Previous Run isolation is still active');
     const workspace = await realpath(workspacePath);
     if (workspace !== resolve(cloneRoot, runId) || !(await lstat(resolve(workspace, '.git'))).isDirectory())
       throw new Error('Qoder workspace is not an independent Run clone');
     const temporary = await mkdtemp('/private/tmp/agent-platform-qoder-');
+    if (mode === 'write') {
+      const config = resolve(temporary, 'qoder-config');
+      await mkdir(config, { mode: 0o700 });
+      await writeFile(resolve(config, 'settings.json'),
+        JSON.stringify({ permissions: { trustDirectories: [workspace] } }), { mode: 0o600, flag: 'wx' });
+    }
     const { profile, digest } = await createMacSandboxProfile({ workspacePath: workspace,
       temporaryPath: temporary, qoderConfigPath: qoderConfig, qoderLinkDirectory: qoderLink,
       homePath: home, mode });
@@ -101,6 +112,30 @@ export async function createMacQoderRuntime(input: { cloneRoot: string; profileR
     await writeFile(profilePath, profile, { mode: 0o600, flag: 'wx' });
     try { await writeFile(checkProfilePath, checkProfile, { mode: 0o600, flag: 'wx' }); }
     catch (error) { await rm(profilePath, { force: true }); await rm(temporary, { recursive: true, force: true }); throw error; }
+    if (mode === 'write') {
+      let outside: string | undefined;
+      const allowed = resolve(workspace, '.git', `boundary-probe-${randomUUID()}`);
+      const probe = (command: string, path: string) => spawnSync('/usr/bin/sandbox-exec',
+        ['-f', profilePath, command, path], { cwd: workspace, stdio: 'ignore',
+          env: { HOME: temporary, TMPDIR: temporary, PATH: '/usr/bin:/bin' } }).status;
+      try {
+        outside = await mkdtemp('/private/tmp/agent-platform-boundary-probe-');
+        const protectedFiles = [resolve(home, '.config/agent-platform/local-api.token'),
+          resolve(qoderConfig, 'settings.json')].filter(existsSync);
+        if (!protectedFiles.length || protectedFiles.some(path => probe('/bin/cat', path) === 0) ||
+            probe('/usr/bin/touch', resolve(outside, 'denied')) === 0 ||
+            probe('/usr/bin/touch', allowed) !== 0)
+          throw new Error('Write isolation probe failed');
+      } catch (error) {
+        await rm(profilePath, { force: true });
+        await rm(checkProfilePath, { force: true });
+        await rm(temporary, { recursive: true, force: true });
+        throw error;
+      } finally {
+        await rm(allowed, { force: true });
+        if (outside) await rm(outside, { recursive: true, force: true });
+      }
+    }
     proofs.set(runId, { repoKey, workspace, temporary, profilePath, checkProfilePath, digest, checkDigest, mode,
       launched: false, agentClosed: false, checking: false });
     return { verified: true, runId, repoKey, workspacePath: workspace,
@@ -201,14 +236,17 @@ export async function createMacQoderRuntime(input: { cloneRoot: string; profileR
     await rm(saved.temporary, { recursive: true, force: true });
   } };
   const launcher: IsolatedProcessLauncher = { verified: true, launch(command, args, cwd, proof) {
-    if (command !== 'qoderclicn' || proof.verified !== true || proof.mode !== 'read')
+    if (command !== 'qoderclicn' || proof.verified !== true)
       throw new Error('Qoder launch does not match verified isolation');
     const saved = matchProof(proof, cwd);
     if (saved.launched) throw new Error('Qoder Run already launched');
     saved.launched = true;
-    const child = spawn('/usr/bin/sandbox-exec', ['-f', saved.profilePath, qoder, ...vpcArgs, ...args], {
+    const child = spawn('/usr/bin/sandbox-exec', ['-f', saved.profilePath, qoder, ...vpcArgs,
+      ...(saved.mode === 'write' ? ['--config-dir', resolve(saved.temporary, 'qoder-config')] : []),
+      ...args], {
       cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { HOME: home, USER: process.env.USER ?? '', LANG: process.env.LANG ?? 'en_US.UTF-8',
+      env: { HOME: saved.mode === 'write' ? saved.temporary : home,
+        USER: process.env.USER ?? '', LANG: process.env.LANG ?? 'en_US.UTF-8',
         PATH: qoderLink + ':/usr/bin:/bin:/usr/sbin:/sbin', TMPDIR: saved.temporary,
         ...(process.env.QODERCN_PERSONAL_ACCESS_TOKEN
           ? { QODERCN_PERSONAL_ACCESS_TOKEN: process.env.QODERCN_PERSONAL_ACCESS_TOKEN } : {}) },

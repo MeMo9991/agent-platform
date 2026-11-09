@@ -7,11 +7,15 @@ export const mandate = z.object({ sourceEventId: id, repoKey: id, goal: id, allo
   maxAutoRisk: z.enum(['low', 'medium', 'high']), policyVersion: id,
   authority: z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('trusted_rule'), ruleRef: id }),
+    z.object({ kind: z.literal('auto_pr'), ruleRef: id }),
     z.object({ kind: z.literal('human_approval'), approvalRef: id }),
   ]),
 }).superRefine((value, context) => {
   if (value.authority.kind === 'trusted_rule' && (value.maxAutoRisk !== 'low' || value.allowedActions.some(item => item !== 'investigate')))
     context.addIssue({ code: 'custom', message: 'Trusted intake rule may only grant low-risk investigation' });
+  if (value.authority.kind === 'auto_pr' && (value.maxAutoRisk !== 'high' ||
+      value.allowedActions.join(',') !== 'investigate,edit,open_pr'))
+    context.addIssue({ code: 'custom', message: 'Automatic PR authority has an invalid action scope' });
 });
 export type TaskMandate = z.infer<typeof mandate>;
 export const taskState = z.enum(['new', 'triaged', 'queued', 'investigating', 'developing', 'verifying', 'reviewing',

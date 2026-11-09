@@ -10,6 +10,7 @@ import type { TaskRecord } from '../agent/task/model.js';
 import type { CodeHost, repositoryConfig } from '../repository-ci/model.js';
 import type { z } from 'zod';
 import { evaluateStage5Action } from './stage5-policy.js';
+import { autoPrDiffAllowed, autoPrPathsAllowed, autoPrRuleRef } from './auto-pr.js';
 import { baseUrl, credential } from '../repository-ci/providers/http.js';
 import { changeRef } from '../repository-ci/model.js';
 import { checksReady } from '../repository-ci/gate.js';
@@ -37,6 +38,18 @@ async function pushBranch(repo: Repository, cwd: string, sourceSha: string, bran
 export function createStage5OpenChange(store: SqliteStore, repositories: Readonly<Record<string, Repository>>,
   hosts: Readonly<Record<string, CodeHost>>, workspace: WorkspaceManager, policyVersion: string,
   push: typeof pushBranch = pushBranch) {
+  function autoApproved(task: NonNullable<ReturnType<SqliteStore['getTask']>>, repo: Repository,
+    review: NonNullable<ReturnType<SqliteStore['latestReview']>>,
+    changed: readonly string[], diff: string, sourceSha: string, targetSha: string): boolean {
+    const event = store.get(task.mandate.sourceEventId);
+    if (task.mandate.authority.kind !== 'auto_pr' ||
+        task.mandate.authority.ruleRef !== autoPrRuleRef(repo, policyVersion) ||
+        event?.metaData.autoPr !== true || review.verdict !== 'pass' || review.findings.length ||
+        !autoPrPathsAllowed(changed, repo) || !autoPrDiffAllowed(diff)) return false;
+    const decision = evaluateStage5Action({ mandate: task.mandate, repository: repo, action: 'open_pr',
+      sourceSha, targetSha, targetBranch: repo.targetBranch, changedPaths: changed, diff, approvalValid: true });
+    return decision.kind === 'allow' && decision.risk === 'medium';
+  }
   async function facts(taskId: string) {
     const task = store.getTask(taskId);
     const repo = task && repositories[task.repoKey];
@@ -83,7 +96,8 @@ export function createStage5OpenChange(store: SqliteStore, repositories: Readonl
     async prepare(taskId: string, expectedVersion: number): Promise<Result> {
       const { task, repo, review, sourceSha, targetSha, changed, diff } = await facts(taskId);
       const approvalValid = store.hasActionApproval({ taskId, action: 'open_pr', sourceSha,
-        targetBranch: repo.targetBranch, targetSha, policyVersion });
+        targetBranch: repo.targetBranch, targetSha, policyVersion }) ||
+        autoApproved(task, repo, review, changed, diff, sourceSha, targetSha);
       const decision = evaluateStage5Action({ mandate: task.mandate, repository: repo, action: 'open_pr',
         sourceSha, targetSha, targetBranch: repo.targetBranch, changedPaths: changed, diff, approvalValid });
       if (decision.kind === 'deny') throw new Error(decision.reason);
@@ -121,9 +135,10 @@ export function createStage5OpenChange(store: SqliteStore, repositories: Readonl
         requestId, sourceSha, targetSha };
     },
     async execute(taskId: string, expectedVersion: number): Promise<{ kind: 'opened' | 'uncertain'; changeId?: string }> {
-      const { task, repo, host, sourceSha, targetSha, changed, diff, sourcePath } = await facts(taskId);
+      const { task, repo, host, review, sourceSha, targetSha, changed, diff, sourcePath } = await facts(taskId);
       const approvalValid = store.hasActionApproval({ taskId, action: 'open_pr', sourceSha,
-        targetBranch: repo.targetBranch, targetSha, policyVersion });
+        targetBranch: repo.targetBranch, targetSha, policyVersion }) ||
+        autoApproved(task, repo, review, changed, diff, sourceSha, targetSha);
       const decision = evaluateStage5Action({ mandate: task.mandate, repository: repo, action: 'open_pr',
         sourceSha, targetSha, targetBranch: repo.targetBranch, changedPaths: changed, diff, approvalValid });
       if (decision.kind !== 'allow' || !host.findChangeByBranch)
@@ -134,8 +149,7 @@ export function createStage5OpenChange(store: SqliteStore, repositories: Readonl
       const intent = store.transaction(() => {
         const version = Number(store.db.prepare('SELECT version FROM task WHERE id=?').get(taskId)?.version);
         if (version !== expectedVersion || store.getTask(taskId)?.state !== 'ready_to_merge' ||
-            !store.hasActionApproval({ taskId, action: 'open_pr', sourceSha,
-              targetBranch: repo.targetBranch, targetSha, policyVersion }))
+            !approvalValid)
           throw new Error('Task or approval changed before external action');
         return store.saveEffectIntent({ id: intentId, taskId, kind: 'effect', action: 'open_pr',
           idempotencyKey: `open-pr:${taskId}:${sourceSha}:${targetSha}`, status: 'pending',
@@ -156,7 +170,16 @@ export function createStage5OpenChange(store: SqliteStore, repositories: Readonl
           observedSourceSha: sourceSha, observedTargetSha: targetSha, merged: false });
         return { kind: 'opened', changeId: existing.id };
       }
-      if (intent.id !== intentId || intent.status !== 'pending') {
+      let recovered = false;
+      if (intent.status === 'uncertain' && host.readBranch) {
+        const branchSha = await host.readBranch(branch);
+        if (branchSha && branchSha !== sourceSha) throw new Error('Task branch differs from approved source SHA');
+        if (await host.readTarget?.(repo.targetBranch) !== targetSha)
+          throw new Error('Target branch changed before effect recovery');
+        store.rearmUncertainEffect(intent.id);
+        recovered = true;
+      }
+      if ((!recovered && intent.id !== intentId) || (intent.status !== 'pending' && !recovered)) {
         if (intent.status === 'pending') store.settleEffect(intent.id, 'uncertain');
         return { kind: 'uncertain' };
       }

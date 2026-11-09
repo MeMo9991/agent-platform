@@ -15,6 +15,7 @@ import { taskCommand } from '../interaction/task-command.js';
 import { readSettings, saveSettings, settingsGroup, type SettingsPaths } from './settings.js';
 
 const submit = z.object({ repoKey: z.string().min(1), body: z.string().trim().min(1).max(20_000),
+  autoPr: z.boolean().default(false),
   idempotencyKey: z.string().min(1).max(200), images: z.array(z.object({ data: z.string(), mimeType: z.string() })).max(2).default([]) }).strict();
 const decision = z.object({ expectedVersion: z.number().int().positive(), value: z.record(z.string(), z.unknown()) }).strict();
 const allowedImageTypes: Record<string, string> = { 'image/png': '89504e470d0a1a0a',
@@ -101,7 +102,7 @@ function safeRecord(record: Record<string, unknown>, evidenceRoot: string, store
     selected.request = { id: request.id, kind: request.kind, sourceSha: request.sourceSha,
       action: request.action, targetBranch: request.targetBranch, targetSha: request.targetSha,
       changeRef: request.changeRef, reviewRecordId: request.reviewRecordId, policyVersion: request.policyVersion,
-      proposedMandate: proposed ? { allowedActions: proposed.allowedActions } : undefined };
+      proposedMandate: proposed ? { allowedActions: proposed.allowedActions, maxAutoRisk: proposed.maxAutoRisk } : undefined };
   }
   if (record.kind === 'check') {
     selected.result = record.result;
@@ -196,7 +197,7 @@ function protectedDirectory(path: string): string {
   return path;
 }
 
-export type DashboardOptions = { actorId: string; repoKeys: readonly string[];
+export type DashboardOptions = { actorId: string; repoKeys: readonly string[]; autoPrRepoKeys?: readonly string[];
   imageDirectory: string; attachmentReaders: Readonly<Record<string, AttachmentReader>>;
   runners?: Readonly<Record<string, AgentRunner | undefined>>; workerCapacity?: number;
   evidenceRoot?: string; takeoverEvidence?: TakeoverEvidencePorts; settingsPaths?: SettingsPaths;
@@ -216,7 +217,8 @@ export async function handleDashboard(request: IncomingMessage, response: Server
   if (!path.startsWith('/api/')) return false;
   try {
     if (request.method === 'GET' && path === '/api/config') {
-      send(response, 200, { actorId: options.actorId, repoKeys: options.repoKeys, roles,
+      send(response, 200, { actorId: options.actorId, repoKeys: options.repoKeys,
+        autoPrRepoKeys: options.autoPrRepoKeys ?? [], roles,
         stage5WritesEnabled: options.stage5WritesEnabled === true }); return true;
     }
     if (path === '/api/settings' && request.method === 'GET') {
@@ -408,12 +410,14 @@ export async function handleDashboard(request: IncomingMessage, response: Server
       if (!roles.includes('submit')) throw new Error('Submission role required');
       const input = submit.parse(await readBody(request));
       if (!options.repoKeys.includes(input.repoKey)) throw new Error('Repository is not authorized');
+      if (input.autoPr && (!options.autoPrRepoKeys?.includes(input.repoKey) || input.images.length))
+        throw new Error('Automatic PR is unavailable for this repository or attachment');
       const sourceId = `manual:${input.repoKey}`;
       const directory = protectedDirectory(resolve(options.imageDirectory));
       const created: string[] = [];
       try {
         const images = input.images.map(image => ({ bytes: imageBytes(image.data, image.mimeType), mimeType: image.mimeType }));
-        const digest = createHash('sha256').update(JSON.stringify([input.repoKey, input.body,
+        const digest = createHash('sha256').update(JSON.stringify([input.repoKey, input.body, input.autoPr,
           images.map(image => [image.mimeType, createHash('sha256').update(image.bytes).digest('hex')])])).digest('hex');
         const attachments = images.map(image => {
           const bytes = image.bytes;
@@ -423,10 +427,10 @@ export async function handleDashboard(request: IncomingMessage, response: Server
           created.push(path);
           return { id, kind: 'image' as const, sourceRef: `manual/${id}`, mimeType: image.mimeType };
         });
-        const result = await createEventIngress(store, { [sourceId]: ['contentDigest'] }).accept({ sourceId,
+        const result = await createEventIngress(store, { [sourceId]: ['contentDigest', 'autoPr'] }).accept({ sourceId,
           externalId: `${options.actorId}:${input.idempotencyKey}`, revision: '1', kind: 'manual_task',
           title: input.body.split('\n')[0]!.slice(0, 200), body: input.body, repoKey: input.repoKey,
-          attachments, metaData: { contentDigest: digest } });
+          attachments, metaData: { contentDigest: digest, ...(input.autoPr ? { autoPr: true } : {}) } });
         if (result.duplicate && store.get(result.eventId)?.metaData.contentDigest !== digest)
           throw new Error('Idempotency key belongs to another submission');
         if (result.duplicate) for (const path of created) rmSync(path, { force: true });

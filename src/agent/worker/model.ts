@@ -38,7 +38,8 @@ export const verificationEvidence = z.object({ subjectSha: z.string().regex(/^[a
   postCheckVerified: z.boolean(), postCheckError: id.optional(), checks: developmentEvidence.shape.checks });
 export const reviewEvidence = z.object({ subjectSha: z.string().regex(/^[a-f0-9]{40}$/),
   verdict: z.enum(['pass', 'block']), findings: z.array(z.object({ file: id, line: z.number().int().positive().optional(),
-    severity: id, evidence: id, impact: id, action: id, verificationMethod: id })) });
+    severity: z.enum(['low', 'medium', 'high', 'unknown']), evidence: id, impact: id,
+    action: id, verificationMethod: id })) });
 export const agentEvent = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('progress'), runId: id, text: z.string(), at: timestamp }),
   z.object({ kind: z.literal('question'), runId: id, questionId: id, prompt: id }),

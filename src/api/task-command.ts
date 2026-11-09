@@ -154,12 +154,38 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
           priority: current.priority, attempt: previous.attempt + 1, agentKind: previous.agentKind,
           commitSha: previous.commitSha, createdAt: now });
       } else {
-        if (!previous || !['investigate', 'develop'].includes(previous.stage) || !previous.agentKind)
+        const retryVerify = previous?.stage === 'verify' && previous.status === 'failed' &&
+          previous.commitSha && /^[a-f0-9]{40}$/.test(previous.commitSha) &&
+          store.db.prepare(`SELECT 1 FROM task_record WHERE task_id=? AND kind='development'
+            AND json_extract(payload_json,'$.commitSha')=? AND json_extract(payload_json,'$.postCheckVerified')=1
+            LIMIT 1`).get(current.id, previous.commitSha);
+        const retryReview = previous?.stage === 'review' && previous.status === 'failed' &&
+          previous.commitSha && /^[a-f0-9]{40}$/.test(previous.commitSha) &&
+          store.db.prepare("SELECT 1 FROM run WHERE task_id=? AND stage='verify' AND status='succeeded' AND commit_sha=? LIMIT 1")
+            .get(current.id, previous.commitSha) &&
+          !store.db.prepare("SELECT 1 FROM task_record WHERE task_id=? AND run_id=? AND kind='review' LIMIT 1")
+            .get(current.id, previous.id);
+        const review = store.latestReview(current.id);
+        const retryUnsupportedReview = current.state === 'blocked' && previous?.stage === 'develop' && previous.status === 'failed' &&
+          previous.iteration === current.iteration && review?.verdict === 'pass' && review.runId &&
+          review.subjectSha === previous.commitSha &&
+          review.findings.some(finding => !['low', 'medium', 'high', 'unknown'].includes(finding.severity)) &&
+          store.db.prepare("SELECT 1 FROM run WHERE id=? AND task_id=? AND stage='review' AND status='succeeded' AND commit_sha=? LIMIT 1")
+            .get(review.runId, current.id, review.subjectSha) &&
+          store.db.prepare("SELECT 1 FROM run WHERE task_id=? AND stage='verify' AND status='succeeded' AND commit_sha=? LIMIT 1")
+            .get(current.id, review.subjectSha) &&
+          !store.db.prepare("SELECT 1 FROM task_record WHERE task_id=? AND run_id=? AND kind='development' LIMIT 1")
+            .get(current.id, previous.id);
+        if (!previous || !(['investigate', 'develop'].includes(previous.stage) || retryVerify || retryReview ||
+            retryUnsupportedReview) || !previous.agentKind)
           throw new Error('No safe Run stage is available for retry');
         store.saveTransition(current.id, 'queued', input.reason, now, randomUUID(), actor);
         const next: Run = { id: randomUUID(), taskId: current.id, iteration: current.iteration,
-          stage: previous.stage, status: 'queued', requestKey: `command:${input.idempotencyKey}`,
-          priority: current.priority, attempt: previous.attempt + 1, agentKind: previous.agentKind, createdAt: now };
+          stage: retryUnsupportedReview ? 'review' : previous.stage, status: 'queued',
+          requestKey: `command:${input.idempotencyKey}`,
+          priority: current.priority, attempt: previous.attempt + 1, agentKind: previous.agentKind,
+          commitSha: retryVerify || retryReview || retryUnsupportedReview ? previous.commitSha : undefined,
+          createdAt: now };
         store.saveRun(next);
       }
     }
