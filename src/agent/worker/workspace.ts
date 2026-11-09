@@ -7,7 +7,8 @@ import type { Run, WorkspaceManager } from './model.js';
 
 const exec = promisify(execFile);
 export function createGitWorkspaceManager(repositories: Readonly<Record<string, { path: string; remote: string }>>,
-  runtimeRoot: string, repoForRun: (run: Run) => string): WorkspaceManager {
+  runtimeRoot: string, repoForRun: (run: Run) => string,
+  sourceForRun?: (run: Run) => string | undefined): WorkspaceManager {
   const clonePath = (run: Run) => {
     if (!/^[A-Za-z0-9_-]+$/.test(run.id)) throw new Error('Run ID is not a safe clone name');
     return resolve(runtimeRoot, 'clones', run.id);
@@ -30,8 +31,10 @@ export function createGitWorkspaceManager(repositories: Readonly<Record<string, 
     const cwd = resolve(repo.path);
     const remote = (await exec('git', ['remote', 'get-url', 'origin'], { cwd })).stdout.trim();
     if (remote !== repo.remote) throw new Error(`Repository origin mismatch for ${repoKey}`);
-    const baseSha = (await exec('git', ['rev-parse', 'HEAD'], { cwd })).stdout.trim();
-    if (!/^[a-f0-9]{40}$/.test(baseSha)) throw new Error('Git HEAD is not a full SHA');
+    const pinned = run.stage === 'verify' || run.stage === 'review' ||
+      (run.stage === 'develop' && !!run.commitSha && !!sourceForRun?.(run));
+    const baseSha = pinned ? run.commitSha : (await exec('git', ['rev-parse', 'HEAD'], { cwd })).stdout.trim();
+    if (!baseSha || !/^[a-f0-9]{40}$/.test(baseSha)) throw new Error('Git HEAD is not a full SHA');
     const path = clonePath(run);
     if (run.workspaceRef) {
       if (resolve(run.workspaceRef) !== path || !run.commitSha || !/^[a-f0-9]{40}$/.test(run.commitSha))
@@ -49,7 +52,18 @@ export function createGitWorkspaceManager(repositories: Readonly<Record<string, 
     await chmod(clonesRoot, 0o700);
     try { await lstat(path); throw new Error('Run clone path already exists'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    await exec('git', ['clone', '--no-hardlinks', '--no-checkout', '--', cwd, path], { cwd });
+    let source = cwd;
+    if (pinned) {
+      const candidate = sourceForRun?.(run);
+      if (!candidate || resolve(candidate) === path || !resolve(candidate).startsWith(`${resolve(runtimeRoot, 'clones')}/`))
+        throw new Error('Pinned source clone is unavailable');
+      source = await realpath(candidate);
+      await verifyClone(source, repo.remote);
+      if ((await exec('git', ['rev-parse', 'HEAD'], { cwd: source })).stdout.trim() !== baseSha ||
+          (await exec('git', ['status', '--porcelain=v1', '--untracked-files=all'], { cwd: source })).stdout.trim())
+        throw new Error('Pinned source clone changed');
+    }
+    await exec('git', ['clone', '--no-hardlinks', '--no-checkout', '--', source, path], { cwd });
     await chmod(path, 0o700);
     await exec('git', ['remote', 'set-url', 'origin', repo.remote], { cwd: path });
     await exec('git', ['checkout', '--detach', baseSha], { cwd: path });

@@ -144,6 +144,19 @@ test('state transitions cannot persist a caller-forged Mandate', () => {
   } finally { store.close(); }
 });
 
+test('a queued develop retry can enter developing without changing its Mandate', () => {
+  const store = new SqliteStore(':memory:');
+  const actor = { kind: 'system' as const, id: 'worker' };
+  try {
+    store.saveTask(task);
+    store.saveTransition(task.id, 'triaged', 'accepted', now, 'retry-transition-1', actor);
+    store.saveTransition(task.id, 'queued', 'queued retry', now, 'retry-transition-2', actor);
+    store.saveTransition(task.id, 'developing', 'develop Run started', now, 'retry-transition-3', actor);
+    assert.equal(store.getTask(task.id)?.state, 'developing');
+    assert.deepEqual(store.getTask(task.id)?.mandate, task.mandate);
+  } finally { store.close(); }
+});
+
 test('task and mandate cannot name different repositories', () => {
   const store = new SqliteStore(':memory:');
   try {
@@ -177,6 +190,8 @@ test('agent and human messages remain typed and unknown usage stays unknown', ()
   assert.equal(routeReviewDecision.safeParse({ choice: 'ignored', eventId: 'e', actor: { kind: 'agent', id: 'bot' }, at: now, idempotencyKey: 'a', reason: 'x' }).success, false);
   assert.equal(approvalDecision.safeParse({ requestId: 'a', actor: { kind: 'agent', id: 'bot' }, decision: 'approve', at: now, idempotencyKey: 'k' }).success, false);
   assert.equal(approvalRequest.safeParse({ kind: 'action', id: 'a', taskId: 't', action: 'merge', sourceSha: 'sha', policyVersion: 'v1' }).success, false);
+  assert.equal(approvalRequest.safeParse({ kind: 'action', id: 'a', taskId: 't', action: 'open_pr', sourceSha: 'sha', policyVersion: 'v1' }).success, false);
+  assert.equal(approvalRequest.safeParse({ kind: 'action', id: 'a', taskId: 't', action: 'open_pr', sourceSha: 'sha', reviewRecordId: 'review', targetBranch: 'main', targetSha: 'base', policyVersion: 'v1' }).success, true);
   assert.equal(approvalRequest.safeParse({ kind: 'action', id: 'a', taskId: 't', action: 'release', sourceSha: 'sha', environment: 'prod', releaseVersion: 'v1', policyVersion: 'p1' }).success, false);
   assert.equal(approvalRequest.safeParse({ kind: 'action', id: 'a', taskId: 't', action: 'release', sourceSha: 'sha', environment: 'prod', releaseVersion: 'v1', releaseTargetDigest: 'digest', policyVersion: 'p1' }).success, true);
   assert.equal(routeDecision.safeParse({ kind: 'needs_human', candidates: [], reason: 'similar only' }).success, true);

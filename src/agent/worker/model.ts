@@ -34,19 +34,26 @@ export const developmentEvidence = z.object({ baseSha: z.string().regex(/^[a-f0-
   checks: z.array(z.object({ command: id, args: z.array(z.string()), timeoutMs: z.number().int().positive(),
     startedAt: timestamp, endedAt: timestamp, result: z.enum(['passed', 'failed', 'timeout', 'unavailable']),
     exitCode: z.number().int().nullable(), logRef: id, terminationConfirmed: z.boolean() })) });
+export const verificationEvidence = z.object({ subjectSha: z.string().regex(/^[a-f0-9]{40}$/),
+  postCheckVerified: z.boolean(), postCheckError: id.optional(), checks: developmentEvidence.shape.checks });
+export const reviewEvidence = z.object({ subjectSha: z.string().regex(/^[a-f0-9]{40}$/),
+  verdict: z.enum(['pass', 'block']), findings: z.array(z.object({ file: id, line: z.number().int().positive().optional(),
+    severity: z.enum(['low', 'medium', 'high', 'unknown']), evidence: id, impact: id,
+    action: id, verificationMethod: id })) });
 export const agentEvent = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('progress'), runId: id, text: z.string(), at: timestamp }),
   z.object({ kind: z.literal('question'), runId: id, questionId: id, prompt: id }),
   z.object({ kind: z.literal('input_handled'), runId: id, eventId: id }),
   z.object({ kind: z.literal('handback'), runId: id, eventId: id, reason: id }),
   z.object({ kind: z.literal('result'), runId: id, status: z.enum(['succeeded', 'failed']), exitCode: z.number().int().nullable(),
-    resultRef: id.optional(), development: developmentEvidence.optional() }),
+    resultRef: id.optional(), development: developmentEvidence.optional(), verification: verificationEvidence.optional(),
+    review: reviewEvidence.optional() }),
   z.object({ kind: z.literal('usage'), runId: id, usage: agentUsage }),
 ]);
 export const agentSnapshot = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('running'), runId: id }),
   z.object({ kind: z.literal('finished'), runId: id, exitCode: z.number().int(), resultRef: id.optional(),
-    development: developmentEvidence.optional() }),
+    development: developmentEvidence.optional(), verification: verificationEvidence.optional(), review: reviewEvidence.optional() }),
   z.object({ kind: z.literal('unknown'), runId: id }),
 ]);
 export const runRequest = z.object({ taskId: id, runId: id, stage: runStage, mandate, repoKey: id,

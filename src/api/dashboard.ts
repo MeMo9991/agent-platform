@@ -9,11 +9,13 @@ import type { AttachmentReader } from '../event/model.js';
 import { createEventIngress } from '../event/ingress.js';
 import { answer, approvalDecision, routeReviewDecision } from '../interaction/model.js';
 import type { AgentRunner } from '../agent/worker/model.js';
+import { isBlockingReview } from '../agent/task/workflow.js';
 import { completeTakeover, executeTaskCommand, type TakeoverEvidencePorts } from './task-command.js';
 import { taskCommand } from '../interaction/task-command.js';
 import { readSettings, saveSettings, settingsGroup, type SettingsPaths } from './settings.js';
 
 const submit = z.object({ repoKey: z.string().min(1), body: z.string().trim().min(1).max(20_000),
+  autoPr: z.boolean().default(false),
   idempotencyKey: z.string().min(1).max(200), images: z.array(z.object({ data: z.string(), mimeType: z.string() })).max(2).default([]) }).strict();
 const decision = z.object({ expectedVersion: z.number().int().positive(), value: z.record(z.string(), z.unknown()) }).strict();
 const allowedImageTypes: Record<string, string> = { 'image/png': '89504e470d0a1a0a',
@@ -55,7 +57,7 @@ function safeText(value: string): string {
     .replace(/(^|[\s"'`(=:])\/(?!\/)[^\s"'`<>)]{2,}/gm, '$1[本机路径]')
     .replace(/\b(authorization|api[_-]?key|token|password)\s*[:=][^\r\n]*/gi, '$1=[已隐藏]');
 }
-function reviewedText(store: SqliteStore, targetKind: 'question' | 'result', targetId: string): string | undefined {
+function reviewedText(store: SqliteStore, targetKind: 'question' | 'result' | 'review', targetId: string): string | undefined {
   const row = store.db.prepare(`SELECT payload_json FROM task_record WHERE kind='content_review'
     AND json_extract(payload_json,'$.targetKind')=? AND json_extract(payload_json,'$.targetId')=?
     ORDER BY at DESC,id DESC LIMIT 1`).get(targetKind, targetId);
@@ -87,21 +89,54 @@ function safeRecord(record: Record<string, unknown>, evidenceRoot: string, store
   const selected: Record<string, unknown> = {};
   for (const key of ['id', 'taskId', 'runId', 'eventId', 'kind', 'at', 'status', 'content',
     'from', 'to', 'decision', 'subjectSha', 'questionId', 'policyVersion', 'reviewedSha',
-    'baseSha', 'commitSha', 'developmentRecordId', 'codeChange', 'postCheckVerified', 'exitCode', 'terminationConfirmed',
-    'timeoutMs', 'startedAt', 'endedAt'])
-    if (record[key] !== undefined) selected[key] = key === 'content' && typeof record[key] === 'string'
-      ? safeText(record[key] as string) : record[key];
+    'baseSha', 'commitSha', 'developmentRecordId', 'codeChange', 'postCheckVerified', 'postCheckError',
+    'command', 'args', 'exitCode', 'terminationConfirmed', 'timeoutMs', 'startedAt', 'endedAt',
+    'reviewRecordId', 'findingIndex', 'disposition', 'reason', 'targetSha', 'changeId', 'ready'])
+    if (record[key] !== undefined) selected[key] = key === 'args' && Array.isArray(record[key])
+      ? (record[key] as unknown[]).map(value => typeof value === 'string' ? safeText(value) : '')
+      : ['content', 'command', 'postCheckError', 'reason'].includes(key) && typeof record[key] === 'string'
+        ? safeText(record[key] as string) : record[key];
   if (record.kind === 'approval_request' && record.request && typeof record.request === 'object') {
     const request = record.request as Record<string, unknown>;
     const proposed = request.proposedMandate as Record<string, unknown> | undefined;
     selected.request = { id: request.id, kind: request.kind, sourceSha: request.sourceSha,
-      proposedMandate: proposed ? { allowedActions: proposed.allowedActions } : undefined };
+      action: request.action, targetBranch: request.targetBranch, targetSha: request.targetSha,
+      changeRef: request.changeRef, reviewRecordId: request.reviewRecordId, policyVersion: request.policyVersion,
+      proposedMandate: proposed ? { allowedActions: proposed.allowedActions, maxAutoRisk: proposed.maxAutoRisk } : undefined };
   }
   if (record.kind === 'check') {
     selected.result = record.result;
     selected.log = evidenceFile(record.logRef, evidenceRoot, record.id, ['check-logs', 'sandbox-profiles']);
   }
   if (record.kind === 'development') selected.diff = evidenceFile(record.diffRef, evidenceRoot, record.id, ['evidence']);
+  if (record.kind === 'effect') {
+    selected.action = record.action;
+    const receipt = record.receipt as Record<string, unknown> | undefined;
+    if (receipt) selected.receipt = { changeId: receipt.changeId, merged: receipt.merged,
+      mergedSha: receipt.mergedSha, observedSourceSha: receipt.observedSourceSha,
+      observedTargetSha: receipt.observedTargetSha };
+  }
+  if (record.kind === 'ci') {
+    selected.state = record.state;
+    selected.gate = record.gate;
+    selected.requiredChecks = record.requiredChecks;
+    selected.checks = Array.isArray(record.checks) ? record.checks.map(value => {
+      const check = value as Record<string, unknown>;
+      return { name: check.name, status: check.status, conclusion: check.conclusion, commitSha: check.commitSha };
+    }) : [];
+  }
+  if (record.kind === 'review') {
+    selected.verdict = !Array.isArray(record.findings) || isBlockingReview(record as {
+      verdict: 'pass' | 'block'; findings: { severity: string }[] })
+      ? 'block' : record.verdict;
+    selected.findingCount = Array.isArray(record.findings) ? record.findings.length : 0;
+    selected.summary = reviewedText(store, 'review', String(record.id));
+  }
+  if (record.kind === 'review_finding_publication') {
+    for (const key of ['file', 'line', 'severity', 'evidence', 'impact', 'action', 'verificationMethod'])
+      if (record[key] !== undefined) selected[key] = typeof record[key] === 'string' ? safeText(record[key] as string) : record[key];
+    selected.reviewer = (record.actor as { id?: string } | undefined)?.id;
+  }
   if (typeof record.summary === 'string') selected.summary = record.kind === 'human_result'
     ? safeText(record.summary) : 'Agent 记录待审查';
   if (record.kind === 'question') selected.prompt = reviewedText(store, 'question', String(record.id));
@@ -162,10 +197,18 @@ function protectedDirectory(path: string): string {
   return path;
 }
 
-export type DashboardOptions = { actorId: string; repoKeys: readonly string[];
+export type DashboardOptions = { actorId: string; repoKeys: readonly string[]; autoPrRepoKeys?: readonly string[];
   imageDirectory: string; attachmentReaders: Readonly<Record<string, AttachmentReader>>;
   runners?: Readonly<Record<string, AgentRunner | undefined>>; workerCapacity?: number;
-  evidenceRoot?: string; takeoverEvidence?: TakeoverEvidencePorts; settingsPaths?: SettingsPaths };
+  evidenceRoot?: string; takeoverEvidence?: TakeoverEvidencePorts; settingsPaths?: SettingsPaths;
+  stage5OpenChange?: { prepare(taskId: string, expectedVersion: number): Promise<{
+    kind: 'scope_request' | 'action_request' | 'ready'; requestId?: string;
+    sourceSha: string; targetSha: string }>;
+    execute(taskId: string, expectedVersion: number): Promise<unknown>;
+    status(taskId: string): Promise<unknown>;
+    prepareMerge(taskId: string, expectedVersion: number): Promise<unknown>;
+    observeManualMerge(taskId: string): Promise<'pending' | 'merged'> };
+  stage5WritesEnabled?: boolean };
 
 export async function handleDashboard(request: IncomingMessage, response: ServerResponse, store: SqliteStore,
   coordinator: KernelCoordinator, options: DashboardOptions, roles: readonly string[]): Promise<boolean> {
@@ -174,7 +217,9 @@ export async function handleDashboard(request: IncomingMessage, response: Server
   if (!path.startsWith('/api/')) return false;
   try {
     if (request.method === 'GET' && path === '/api/config') {
-      send(response, 200, { actorId: options.actorId, repoKeys: options.repoKeys, roles }); return true;
+      send(response, 200, { actorId: options.actorId, repoKeys: options.repoKeys,
+        autoPrRepoKeys: options.autoPrRepoKeys ?? [], roles,
+        stage5WritesEnabled: options.stage5WritesEnabled === true }); return true;
     }
     if (path === '/api/settings' && request.method === 'GET') {
       if (!roles.includes('configure') || !options.settingsPaths) throw new Error('Configure role required');
@@ -259,7 +304,7 @@ export async function handleDashboard(request: IncomingMessage, response: Server
     const reviewMatch = /^\/api\/tasks\/([^/]+)\/content-reviews$/.exec(path);
     if (request.method === 'POST' && reviewMatch) {
       const taskId = decodeURIComponent(reviewMatch[1]!);
-      const input = z.object({ expectedVersion: z.number().int().positive(), targetKind: z.enum(['question', 'result']),
+      const input = z.object({ expectedVersion: z.number().int().positive(), targetKind: z.enum(['question', 'result', 'review']),
         targetId: z.string().min(1), text: z.string().trim().min(1).max(8192),
         idempotencyKey: z.string().min(1) }).strict().parse(await readBody(request, 16_384));
       if (!roles.includes(input.targetKind === 'question' ? 'answer' : 'command')) throw new Error('Role not permitted');
@@ -269,9 +314,13 @@ export async function handleDashboard(request: IncomingMessage, response: Server
           const target = store.getRecord(input.targetId);
           if (!target || target.taskId !== taskId || target.kind !== 'question' || target.status !== 'open')
             throw new Error('Review target is unavailable');
-        } else {
+        } else if (input.targetKind === 'result') {
           const target = store.getRun(input.targetId);
           if (!target || target.taskId !== taskId || !target.resultRef) throw new Error('Review target is unavailable');
+        } else {
+          const target = store.getRecord(input.targetId);
+          if (!target || target.taskId !== taskId || target.kind !== 'review')
+            throw new Error('Review target is unavailable');
         }
         const existing = store.db.prepare(`SELECT payload_json FROM task_record WHERE kind='content_review'
           AND task_id=? AND json_extract(payload_json,'$.targetKind')=?
@@ -285,6 +334,45 @@ export async function handleDashboard(request: IncomingMessage, response: Server
           targetId: input.targetId, text: input.text, status: 'published',
           actor: { kind: 'human', id: options.actorId }, idempotencyKey: input.idempotencyKey,
           at: new Date().toISOString() });
+        return false;
+      });
+      send(response, 200, { ok: true, duplicate }); return true;
+    }
+    const findingMatch = /^\/api\/tasks\/([^/]+)\/review-findings$/.exec(path);
+    if (request.method === 'POST' && findingMatch) {
+      if (!roles.includes('command')) throw new Error('Command role required');
+      const taskId = decodeURIComponent(findingMatch[1]!);
+      const input = z.object({ expectedVersion: z.number().int().positive(), reviewRecordId: z.string().min(1),
+        findingIndex: z.number().int().nonnegative(), subjectSha: z.string().regex(/^[a-f0-9]{40}$/),
+        file: z.string().trim().min(1).max(500), line: z.number().int().positive().optional(),
+        severity: z.string().trim().min(1).max(40), evidence: z.string().trim().min(1).max(4000),
+        impact: z.string().trim().min(1).max(4000), action: z.string().trim().max(2000).optional(),
+        verificationMethod: z.string().trim().max(2000).optional(),
+        idempotencyKey: z.string().min(1) }).strict().parse(await readBody(request, 16_384));
+      const duplicate = store.transaction(() => {
+        checkVersion(store, taskId, input.expectedVersion);
+        const review = store.latestReview(taskId);
+        if (store.getTask(taskId)?.state !== 'waiting_human' || !review || review.id !== input.reviewRecordId ||
+            review.subjectSha !== input.subjectSha || input.findingIndex >= review.findings.length)
+          throw new Error('Review finding is stale or unavailable');
+        const sameKey = store.db.prepare("SELECT payload_json FROM task_record WHERE kind='review_finding_publication' AND idempotency_key=? LIMIT 1")
+          .get(input.idempotencyKey);
+        const existing = store.db.prepare(`SELECT payload_json FROM task_record WHERE task_id=?
+          AND kind='review_finding_publication' AND json_extract(payload_json,'$.reviewRecordId')=?
+          AND json_extract(payload_json,'$.findingIndex')=? LIMIT 1`)
+          .get(taskId, input.reviewRecordId, input.findingIndex);
+        if (sameKey && (!existing || String(sameKey.payload_json) !== String(existing.payload_json)))
+          throw new Error('Review publication idempotency key conflicts');
+        if (existing) {
+          const prior = JSON.parse(String(existing.payload_json)) as Record<string, unknown>;
+          const { expectedVersion, ...published } = input;
+          if (prior.idempotencyKey === input.idempotencyKey &&
+              (prior.actor as { id: string }).id === options.actorId &&
+              Object.entries(published).every(([key, value]) => prior[key] === value)) return true;
+          throw new Error('Review finding already has published content');
+        }
+        store.saveRecord({ ...input, id: randomUUID(), taskId, kind: 'review_finding_publication',
+          status: 'published', actor: { kind: 'human', id: options.actorId }, at: new Date().toISOString() });
         return false;
       });
       send(response, 200, { ok: true, duplicate }); return true;
@@ -322,12 +410,14 @@ export async function handleDashboard(request: IncomingMessage, response: Server
       if (!roles.includes('submit')) throw new Error('Submission role required');
       const input = submit.parse(await readBody(request));
       if (!options.repoKeys.includes(input.repoKey)) throw new Error('Repository is not authorized');
+      if (input.autoPr && (!options.autoPrRepoKeys?.includes(input.repoKey) || input.images.length))
+        throw new Error('Automatic PR is unavailable for this repository or attachment');
       const sourceId = `manual:${input.repoKey}`;
       const directory = protectedDirectory(resolve(options.imageDirectory));
       const created: string[] = [];
       try {
         const images = input.images.map(image => ({ bytes: imageBytes(image.data, image.mimeType), mimeType: image.mimeType }));
-        const digest = createHash('sha256').update(JSON.stringify([input.repoKey, input.body,
+        const digest = createHash('sha256').update(JSON.stringify([input.repoKey, input.body, input.autoPr,
           images.map(image => [image.mimeType, createHash('sha256').update(image.bytes).digest('hex')])])).digest('hex');
         const attachments = images.map(image => {
           const bytes = image.bytes;
@@ -337,10 +427,10 @@ export async function handleDashboard(request: IncomingMessage, response: Server
           created.push(path);
           return { id, kind: 'image' as const, sourceRef: `manual/${id}`, mimeType: image.mimeType };
         });
-        const result = await createEventIngress(store, { [sourceId]: ['contentDigest'] }).accept({ sourceId,
+        const result = await createEventIngress(store, { [sourceId]: ['contentDigest', 'autoPr'] }).accept({ sourceId,
           externalId: `${options.actorId}:${input.idempotencyKey}`, revision: '1', kind: 'manual_task',
           title: input.body.split('\n')[0]!.slice(0, 200), body: input.body, repoKey: input.repoKey,
-          attachments, metaData: { contentDigest: digest } });
+          attachments, metaData: { contentDigest: digest, ...(input.autoPr ? { autoPr: true } : {}) } });
         if (result.duplicate && store.get(result.eventId)?.metaData.contentDigest !== digest)
           throw new Error('Idempotency key belongs to another submission');
         if (result.duplicate) for (const path of created) rmSync(path, { force: true });
@@ -375,6 +465,76 @@ export async function handleDashboard(request: IncomingMessage, response: Server
         else await coordinator.onSignal({ kind: 'human_response', taskId,
           response: { kind: 'approval_decision', value: approvalDecision.parse({ ...input.value, actor, at: new Date().toISOString() }) } });
       send(response, 200, { ok: true, task: safeTask(store, taskId) }); return true;
+    }
+    const resolutionMatch = /^\/api\/tasks\/([^/]+)\/review-resolutions$/.exec(path);
+    if (request.method === 'POST' && resolutionMatch) {
+      if (!roles.includes('approve')) throw new Error('Approve role required');
+      const taskId = decodeURIComponent(resolutionMatch[1]!);
+      const input = z.object({ expectedVersion: z.number().int().positive(), reviewRecordId: z.string().min(1),
+        findingIndex: z.number().int().nonnegative(), subjectSha: z.string().regex(/^[a-f0-9]{40}$/),
+        disposition: z.enum(['accept_risk', 'false_positive']), reason: z.string().trim().min(1).max(2000),
+        idempotencyKey: z.string().min(1) }).strict().parse(await readBody(request, 65_536));
+      const prior = store.db.prepare("SELECT payload_json FROM task_record WHERE kind='review_resolution' AND idempotency_key=?")
+        .get(input.idempotencyKey);
+      if (!prior) checkVersion(store, taskId, input.expectedVersion);
+      const fullyResolved = store.transaction(() => {
+        const complete = store.saveReviewResolution({ ...input, id: randomUUID(), taskId,
+          kind: 'review_resolution', actor: { kind: 'human', id: options.actorId },
+          at: new Date().toISOString() });
+        if (complete && store.getTask(taskId)?.state === 'waiting_human')
+          store.saveTransition(taskId, 'ready_to_merge', 'Blocking review findings resolved',
+            new Date().toISOString(), randomUUID(), { kind: 'human', id: options.actorId });
+        return complete;
+      });
+      send(response, 200, { ok: true, fullyResolved, task: safeTask(store, taskId) }); return true;
+    }
+    const openChangeMatch = /^\/api\/tasks\/([^/]+)\/open-change\/prepare$/.exec(path);
+    if (request.method === 'POST' && openChangeMatch) {
+      if (!roles.includes('command') || !options.stage5OpenChange)
+        throw new Error('Code-host action is unavailable');
+      const taskId = decodeURIComponent(openChangeMatch[1]!);
+      const input = z.object({ expectedVersion: z.number().int().positive() }).strict()
+        .parse(await readBody(request, 65_536));
+      const result = await options.stage5OpenChange.prepare(taskId, input.expectedVersion);
+      send(response, 200, { ...result, task: safeTask(store, taskId) }); return true;
+    }
+    const openExecuteMatch = /^\/api\/tasks\/([^/]+)\/open-change\/execute$/.exec(path);
+    if (request.method === 'POST' && openExecuteMatch) {
+      if (!roles.includes('command') || !options.stage5WritesEnabled || !options.stage5OpenChange)
+        throw new Error('External code-host writes are not enabled');
+      const taskId = decodeURIComponent(openExecuteMatch[1]!);
+      const input = z.object({ expectedVersion: z.number().int().positive() }).strict()
+        .parse(await readBody(request, 65_536));
+      const result = await options.stage5OpenChange.execute(taskId, input.expectedVersion);
+      send(response, 200, { ...result as object, task: safeTask(store, taskId) }); return true;
+    }
+    const hostStatusMatch = /^\/api\/tasks\/([^/]+)\/code-host\/status$/.exec(path);
+    if (request.method === 'GET' && hostStatusMatch) {
+      if (!options.stage5OpenChange) throw new Error('Code-host status is unavailable');
+      const taskId = decodeURIComponent(hostStatusMatch[1]!);
+      const result = await options.stage5OpenChange.status(taskId);
+      send(response, 200, { ...result as object, task: safeTask(store, taskId) }); return true;
+    }
+    const mergePrepareMatch = /^\/api\/tasks\/([^/]+)\/merge\/prepare$/.exec(path);
+    if (request.method === 'POST' && mergePrepareMatch) {
+      if (!roles.includes('command') || !options.stage5OpenChange)
+        throw new Error('Merge preflight is unavailable');
+      const taskId = decodeURIComponent(mergePrepareMatch[1]!);
+      const input = z.object({ expectedVersion: z.number().int().positive() }).strict()
+        .parse(await readBody(request, 65_536));
+      const result = await options.stage5OpenChange.prepareMerge(taskId, input.expectedVersion);
+      send(response, 200, { ...result as object, task: safeTask(store, taskId) }); return true;
+    }
+    const mergeReceiptMatch = /^\/api\/tasks\/([^/]+)\/merge\/observe$/.exec(path);
+    if (request.method === 'POST' && mergeReceiptMatch) {
+      if (!roles.includes('command') || !options.stage5OpenChange)
+        throw new Error('Merge receipt observation is unavailable');
+      const taskId = decodeURIComponent(mergeReceiptMatch[1]!);
+      const input = z.object({ expectedVersion: z.number().int().positive() }).strict()
+        .parse(await readBody(request, 65_536));
+      checkVersion(store, taskId, input.expectedVersion);
+      const state = await options.stage5OpenChange.observeManualMerge(taskId);
+      send(response, 200, { state, task: safeTask(store, taskId) }); return true;
     }
     const commandMatch = /^\/api\/tasks\/([^/]+)\/commands$/.exec(path);
     if (request.method === 'POST' && commandMatch) {
