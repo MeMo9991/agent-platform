@@ -14,7 +14,6 @@ const categories: { id: string; title: string; groups: { id: Group; title: strin
   { id: 'sources', title: '来源与调度', groups: [
     { id: 'sources', title: '事件来源', hint: '来源 ID、类型、关联配置及启用状态。' },
     { id: 'schedules', title: '轮询任务', hint: '轮询间隔、启动执行及 DevOps 参数。parameters 键：sourceId（必填）、businessProjectId（必填）、pageSize（可选）、repoKey（可选）。' }] },
-    { id: 'schedules', title: '轮询任务', hint: '轮询间隔、启动执行及 DevOps 参数。' }] },
   { id: 'credentials', title: '外部认证', groups: [
     { id: 'devopsCredentials', title: 'DevOps 凭据', hint: 'DevOps API 的 Authorization 和 Cookie。保存后立即生效，无需重启。' }] },
   { id: 'agents', title: 'Agent 与预算', groups: [
