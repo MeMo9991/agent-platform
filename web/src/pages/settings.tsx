@@ -13,7 +13,7 @@ const categories: { id: string; title: string; groups: { id: Group; title: strin
     { id: 'repositories', title: '代码仓库', hint: '仓库、目标分支、必需检查和本地检查命令。绝对本机路径不回显；不填写会保留原值，填写 null 可清除。凭据引用只读，新仓库先使用未配置状态。' }] },
   { id: 'sources', title: '来源与调度', groups: [
     { id: 'sources', title: '事件来源', hint: '来源 ID、类型、关联配置及启用状态。' },
-    { id: 'schedules', title: '轮询任务', hint: '轮询间隔、启动执行及 DevOps 参数。' }] },
+    { id: 'schedules', title: '轮询任务', hint: '轮询间隔、启动执行及 DevOps 参数。parameters 键：sourceId（必填）、businessProjectId（必填）、pageSize（可选）、repoKey（可选）。' }] },
   { id: 'agents', title: 'Agent 与预算', groups: [
     { id: 'agents', title: 'Agent', hint: '当前阶段仅支持 Qoder。' },
     { id: 'budget', title: '运行预算', hint: '运行时长、并发上限及人工恢复保留名额。' },
