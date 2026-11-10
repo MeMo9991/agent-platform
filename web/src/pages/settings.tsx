@@ -5,15 +5,16 @@ import { Textarea } from '@/components/base/textarea/textarea';
 import { Card } from '../components/ui';
 import { cx } from '@/utils/cx';
 
-type Group = 'repositories' | 'sources' | 'schedules' | 'agents' | 'budget' | 'policyRef' | 'releasePipelines' | 'port' | 'devopsCredentials';
+type Group = 'repositories' | 'projectGroups' | 'sources' | 'schedules' | 'agents' | 'budget' | 'policyRef' | 'releasePipelines' | 'port' | 'devopsCredentials';
 type Settings = { revision: string; restartRequired: boolean; groups: Record<Group, unknown>;
   protected: { actorId?: string; roles?: string[]; credentialFileConfigured: boolean; devopsCredentialsConfigured: boolean } };
 const categories: { id: string; title: string; groups: { id: Group; title: string; hint: string }[] }[] = [
   { id: 'repositories', title: '仓库与检查', groups: [
-    { id: 'repositories', title: '代码仓库', hint: '仓库、目标分支、必需检查和本地检查命令。绝对本机路径不回显；不填写会保留原值，填写 null 可清除。凭据引用只读，新仓库先使用未配置状态。' }] },
+    { id: 'repositories', title: '代码仓库', hint: '每个 Git 仓库独立配置 repoKey、远程地址和本地路径。绝对本机路径不回显；不填写会保留原值，填写 null 可清除。凭据引用只读，新仓库先使用未配置状态。' },
+    { id: 'projectGroups', title: '项目组', hint: 'projectKey、允许的 repoKeys、defaultRepoKey 和 searchRoot。绝对搜索路径不回显；未配置仓库时事件等待人工处理。' }] },
   { id: 'sources', title: '来源与调度', groups: [
-    { id: 'sources', title: '事件来源', hint: '来源 ID、类型、关联配置及启用状态。' },
-    { id: 'schedules', title: '轮询任务', hint: '轮询间隔、启动执行及 DevOps 参数。parameters 键：sourceId（必填）、businessProjectId（必填）、pageSize（可选）、repoKey（可选）。' }] },
+    { id: 'sources', title: '事件来源', hint: '来源 ID、项目组、启用状态及 DevOps 的 businessProjectId、pageSize；未确认仓库时事件等待人工路由。' },
+    { id: 'schedules', title: '轮询任务', hint: '轮询间隔、启动执行及启停。parameters 只填写 sourceId。' }] },
   { id: 'credentials', title: '外部认证', groups: [
     { id: 'devopsCredentials', title: 'DevOps 凭据', hint: 'DevOps API 的 Authorization 和 Cookie。保存后立即生效，无需重启。' }] },
   { id: 'agents', title: 'Agent 与预算', groups: [

@@ -3,14 +3,15 @@ import { createTaskCandidateFinder } from '../src/agent/router/candidate-finder.
 import { createEventLoop as createEventLoopCore } from '../src/agent/kernel/event-loop.js';
 import { createKernelCoordinator as createKernelCoordinatorCore } from '../src/agent/kernel/coordinator.js';
 
-export function createEventLoop(store: SqliteStore, trustedRepos: Readonly<Record<string, string>>,
+export function createEventLoop(store: SqliteStore, trustedRepos: Readonly<Record<string, string | readonly string[]>>,
   policyVersion: string, ruleRef: string, agentKind: string, leaseMs?: number) {
   return createEventLoopCore(store, trustedRepos, policyVersion, ruleRef, agentKind,
     createTaskCandidateFinder(store), leaseMs);
 }
 
-export function createKernelCoordinator(store: SqliteStore, trustedRepos: Readonly<Record<string, string>>,
-  policyVersion: string, ruleRef: string, agentKind: string, allowedRepos: readonly string[]) {
+export function createKernelCoordinator(store: SqliteStore, trustedRepos: Readonly<Record<string, string | readonly string[]>>,
+  policyVersion: string, ruleRef: string, agentKind: string, allowedRepos: readonly string[],
+  sourceRepoKeys: Readonly<Record<string, readonly string[]>> = {}) {
   return createKernelCoordinatorCore(store, trustedRepos, policyVersion, ruleRef, agentKind,
-    allowedRepos, createTaskCandidateFinder(store));
+    allowedRepos, createTaskCandidateFinder(store), undefined, sourceRepoKeys);
 }

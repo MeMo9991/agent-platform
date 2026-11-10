@@ -16,7 +16,11 @@ npm run selfcheck
 
 事件来源配置必须为每个 `sourceId` 指定可保留的 `metaData` 字段；入口和仓储都拒绝未列入的字段。默认 Mandate 仅由受信接单规则生成低风险调查授权；扩大授权必须来自平台核验过的人工审批记录，或经显式启用的低风险自动 PR 规则。交互 API 在每次请求中校验 Bearer 凭据，并由服务端指定人工身份；审批角色、请求状态、Task iteration、策略版本和代码 SHA 在写入时校验。外部动作仍由后续阶段的门禁在执行前重检。
 
-阶段 2 的任务由 `config/schedules.json` 配置间隔、启停和参数；`config/platform.json` 注册受信来源。启动时先校验任务参数、来源身份与启停状态，再注册来源并启动定时器；同一来源不能配置多个扫描任务。SQLite 写入也会拒绝未注册或已禁用的来源。修改配置后需重启。
+阶段 2 的任务由 `config/schedules.json` 配置间隔、启停和 `sourceId`；`config/platform.json` 注册受信来源、项目组和各 Git 仓库。DevOps 的 `businessProjectId`、`pageSize` 放在来源配置中。启动时先校验任务、来源和项目组，再注册来源并启动定时器；同一来源不能配置多个扫描任务。SQLite 写入也会拒绝未注册或已禁用的来源。修改配置后需重启。
+
+微服务项目组用 `repoKeys` 列出允许的仓库，`searchRoot` 指定私有本地目录，`defaultRepoKey` 指定无明确代码线索时的主责仓库。每个仓库仍单独配置 GitLab/GitHub 项目及 `localPath`；只有路径位于 `searchRoot` 内且 Git `origin` 与受信配置一致时才可自动选择。来源文本明确包含唯一仓库键，或两个代码标识命中同一仓库的已跟踪文件名时选该仓库；否则选已就绪的默认仓库。自动选择只创建调查范围，不授予 DevOps 事件自动改码或提 PR 权限。既有事件和 Task 不会因配置修改重新归属。
+
+仓库内的 `config/platform.json` 保留一个空的项目组示例。实际本机路径应放在 Git 忽略的 `.runtime/` 配置文件中，通过 `AGENT_PLATFORM_CONFIG` 指向该文件；配置页不会回显绝对 `searchRoot` 和 `localPath`。未配置可用仓库的来源事件进入人工复核。
 
 服务入口是 `npm start`（先运行 `npm run build`）。启动前需设置 `AGENT_PLATFORM_AUTH_PROVIDER` 为受信 JavaScript 模块路径，该模块导出异步 `authorizationHeaders()`，返回当前请求所需的请求头；仓库尚未实现凭据获取与刷新。可用 `AGENT_PLATFORM_CONFIG`、`AGENT_PLATFORM_SCHEDULES`、`AGENT_PLATFORM_DATABASE` 覆盖三个默认路径。默认数据库位于 `.runtime/state/agent-platform.sqlite3`；自定义数据库所在目录必须归当前服务账号所有，且权限不能开放给其他账号。旧位置的数据库不会自动迁移，已有数据应在停服后备份并迁入私有目录。默认缺陷任务启动即扫描，此后每 300 秒扫描一次；停止时等待当前扫描完成并关闭数据库。每轮从第一页重扫，页码在并发增删时可能移动。真实接口演练待鉴权方案提供后进行。
 
@@ -59,6 +63,6 @@ fi
 
 交互 API 默认只监听 `127.0.0.1:8765`，凭据首次启动时随机生成于 `~/.config/agent-platform/local-api.token`，文件要求仅当前用户可读。`GET /inbox` 查看待人事件、问题和任务；`GET /tasks/:id`、`GET /events/:id` 查看详情；`POST /routes`、`POST /answers`、`POST /approvals` 提交对应决定。`POST /tasks/reopen` 需 `reopen` 角色，提交旧 Task ID、关联调查 Task ID、调查 Run 与成功报告 ID、复现判定、受审 SHA、预期 iteration/更新时间、幂等键和理由；成功后旧 Task 进入新一轮只读调查，关联调查 Task 记移交并停止派活。所有请求均需 `Authorization: Bearer <凭据>`；请求体不能指定 actor 或角色。上述设置可在 `config/platform.json` 的 `interaction` 中配置。
 
-默认 DevOps 来源未配置可信仓库映射，事件会进入人工复核。当前配置已启用 Qoder；四份阶段 Skill 已在 Git HEAD 中。每个 Run 使用独立的临时 Git 克隆，代码与 `.git` 都在该 Run 的目录内；复用与验证时核对克隆身份、origin 和提交。SkillLoader 只读取指定 Git 提交中的非空 Skill。本机 Qoder 1.1.83 曾验证最小 JSON 调用、指定提交 Skill 注入、图片附件，以及在生成的只读沙箱配置下由 `AgentRunner` 完成一次直接调查；原生 `--resume` 仅在旧克隆内成功，跨独立克隆找不到旧 Session。Runner 从流式输出保存原生 Session ID，只有首条助手输出或成功的最终结果才确认初始输入；初始化事件不能充当接收回执，提前退出则暂停待人核对。真实只读隔离边界已接入启动组装；浏览器登录凭据曾在服务端 `auth.getUserInfo` 返回 401；随后 QoderCN PAT 在终端直连时成功，但隔离 Run 因屏蔽用户设置中的 VPC 实例名，错误地向公共认证主机交换令牌并返回 400。现已在启动时只提取并校验 `vpcInstanceName`，通过显式 `--settings` 传给隔离 CLI，仍不加载用户插件和 Hook；2026-11-08 重启后的真实只读 investigate Run 已成功：PAT 交换与用户信息请求均在企业 VPC 主机返回 200，结果含仓库名，进程终止已确认，固定 SHA 工作区干净。阶段五 verify/review 及外部写演练仍须按结构化记录核验。可靠用量、生产写入隔离及完整 develop 结果仍未验证。本机暂不要求专用 OS 账号。具体阶段三证据见 `阶段三-Qoder验证记录.md`。
+默认 DevOps 项目组未配置可用仓库，事件会进入人工复核。当前配置已启用 Qoder；四份阶段 Skill 已在 Git HEAD 中。每个 Run 使用独立的临时 Git 克隆，代码与 `.git` 都在该 Run 的目录内；复用与验证时核对克隆身份、origin 和提交。SkillLoader 只读取指定 Git 提交中的非空 Skill。本机 Qoder 1.1.83 曾验证最小 JSON 调用、指定提交 Skill 注入、图片附件，以及在生成的只读沙箱配置下由 `AgentRunner` 完成一次直接调查；原生 `--resume` 仅在旧克隆内成功，跨独立克隆找不到旧 Session。Runner 从流式输出保存原生 Session ID，只有首条助手输出或成功的最终结果才确认初始输入；初始化事件不能充当接收回执，提前退出则暂停待人核对。真实只读隔离边界已接入启动组装；浏览器登录凭据曾在服务端 `auth.getUserInfo` 返回 401；随后 QoderCN PAT 在终端直连时成功，但隔离 Run 因屏蔽用户设置中的 VPC 实例名，错误地向公共认证主机交换令牌并返回 400。现已在启动时只提取并校验 `vpcInstanceName`，通过显式 `--settings` 传给隔离 CLI，仍不加载用户插件和 Hook；2026-11-08 重启后的真实只读 investigate Run 已成功：PAT 交换与用户信息请求均在企业 VPC 主机返回 200，结果含仓库名，进程终止已确认，固定 SHA 工作区干净。阶段五 verify/review 及外部写演练仍须按结构化记录核验。可靠用量、生产写入隔离及完整 develop 结果仍未验证。本机暂不要求专用 OS 账号。具体阶段三证据见 `阶段三-Qoder验证记录.md`。
 
 仓库配置的 `localChecks` 使用 `command`、`args[]`、`timeoutMs` 定义受信命令；默认仓库执行 `npm run typecheck` 和 Node 自动发现测试。后者仅在隔离 Run 中排除 6 项依赖宿主机临时目录、全局 Git 身份或会在只读克隆中构建的测试，宿主机仍执行完整 `npm test`。开发 Run 结束后，WorkerManager 先核对独立克隆归属、基线祖先关系、干净工作区、HEAD 和非空 diff，再将这些命令交给同一 Run 的已验证隔离边界执行，最后复核 HEAD 与工作区状态。检查修改代码、超时、无法运行或进程终止未确认都会阻断 verify。每条检查保存实际参数、起止时间、结果、退出码、日志引用和终止确认状态。临时仓库中的真实 Qoder 和沙箱检查已有分项探针，但尚未形成经 WorkerManager 的完整执行链。

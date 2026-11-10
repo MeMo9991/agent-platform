@@ -16,6 +16,7 @@ test('settings save validates groups, preserves trust roots and hides local path
   platform.repositories[0].localPath = '/private/secret/repository';
   platform.repositories[0].credentialsRef = '/private/secret/repo-token';
   platform.interaction.credentialFile = '/private/secret/token';
+  platform.projectGroups[0].searchRoot = '/private/secret/projects';
   writeFileSync(paths.platform, JSON.stringify(platform));
   writeFileSync(paths.schedules, readFileSync('config/schedules.json'));
   try {
@@ -24,6 +25,7 @@ test('settings save validates groups, preserves trust roots and hides local path
     assert.equal(before.groups.repositories[0].localPath, undefined);
     assert.equal(before.groups.repositories[0].localPathConfigured, true);
     assert.equal(before.groups.repositories[0].credentialsRefConfigured, true);
+    assert.equal(before.groups.projectGroups[0].searchRootConfigured, true);
     assert.equal(before.protected.credentialFileConfigured, true);
     const changed = structuredClone(before.groups.repositories);
     changed[0].targetBranch = 'develop';
@@ -35,8 +37,14 @@ test('settings save validates groups, preserves trust roots and hides local path
     assert.equal(persisted.repositories[0].credentialsRef, '/private/secret/repo-token');
     assert.equal(persisted.repositories[0].targetBranch, 'develop');
     assert.deepEqual(persisted.interaction, platform.interaction);
+    const groups = structuredClone(before.groups.projectGroups);
+    groups[0].repoKeys = ['agent-platform'];
+    const grouped = saveSettings(paths, 'projectGroups', saved.revision, groups);
+    const groupedFile = JSON.parse(readFileSync(paths.platform, 'utf8')) as Record<string, any>;
+    assert.equal(groupedFile.projectGroups[0].searchRoot, '/private/secret/projects');
+    assert.deepEqual(groupedFile.projectGroups[0].repoKeys, ['agent-platform']);
     assert.throws(() => saveSettings(paths, 'budget', before.revision, before.groups.budget), /version changed/);
-    assert.throws(() => saveSettings(paths, 'port', saved.revision, 70000));
+    assert.throws(() => saveSettings(paths, 'port', grouped.revision, 70000));
     assert.equal((JSON.parse(readFileSync(paths.platform, 'utf8')) as Record<string, any>).interaction.port, platform.interaction.port);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

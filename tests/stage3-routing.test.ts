@@ -95,6 +95,27 @@ test('unmapped source waits for human and conflicting handles never create a Tas
   } finally { store.close(); }
 });
 
+test('project source routes only its selected repository and limits human choices to the project', () => {
+  const store = new SqliteStore(':memory:', { [sourceId]: [] });
+  try {
+    store.registerSource(sourceId, 'fixture', 'fixture', true);
+    const mapped = store.accept(event);
+    const loop = createEventLoop(store, { [sourceId]: ['agent-platform'] }, 'p1', 'fixture-rule', 'qoder');
+    assert.equal(loop.processOne(), true);
+    assert.equal(store.get(mapped.eventId)?.status, 'done');
+    const unknown = store.accept({ ...event, externalId: 'bug-2', objectKey: 'issue-2', repoKey: undefined });
+    assert.equal(loop.processOne(), true);
+    assert.equal(store.get(unknown.eventId)?.status, 'needs_human');
+    const coordinator = createKernelCoordinator(store, {}, 'p1', 'fixture', 'qoder',
+      ['agent-platform', 'other-repo'], { [sourceId]: ['agent-platform'] });
+    const decision = { choice: 'new_task' as const, eventId: unknown.eventId, repoKey: 'other-repo',
+      actor: { kind: 'human' as const, id: 'owner' }, at: new Date().toISOString(),
+      idempotencyKey: 'project-route', reason: 'Review repository ownership' };
+    assert.throws(() => coordinator.resolveHumanRoute(decision), /Repository is not permitted/);
+    assert.ok(coordinator.resolveHumanRoute({ ...decision, repoKey: 'agent-platform' }));
+  } finally { store.close(); }
+});
+
 test('similar Chinese Bug text becomes an auditable candidate before another Task is created', () => {
   const store = new SqliteStore(':memory:', { [sourceId]: [] });
   try {

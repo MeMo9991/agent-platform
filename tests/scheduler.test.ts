@@ -11,6 +11,7 @@ test('schedule file loads task parameters and rejects duplicate identities', () 
   const config = loadScheduleConfig('config/schedules.json');
   assert.deepEqual(config.tasks.map(task => [task.id, task.kind, task.intervalSeconds]),
     [['devops-assigned-defects', 'devops-defect-poll', 300]]);
+  assert.deepEqual(config.tasks[0]?.parameters, { sourceId: 'devops-assigned' });
   assert.throws(() => scheduleConfig.parse({ tasks: [config.tasks[0], config.tasks[0]] }), /Duplicate scheduled task ID/);
   assert.throws(() => startSchedules(config, {}, () => {}), /No handler/);
 });
@@ -25,8 +26,10 @@ test('startup rejects duplicate source scans, invalid DevOps parameters and disa
     writeFileSync(paths.schedules, JSON.stringify({ tasks: [schedule.tasks[0],
       { ...schedule.tasks[0], id: 'second-scan' }] }));
     assert.throws(() => startConfiguredSchedules(paths, async () => ({}), () => {}), /Duplicate scheduled scan for source/);
-    writeFileSync(paths.schedules, JSON.stringify({ tasks: [{ ...schedule.tasks[0], parameters: { sourceId: 'devops-assigned' } }] }));
+    platform.sources[0].devops.businessProjectId = 0;
+    writeFileSync(paths.platform, JSON.stringify(platform));
     assert.throws(() => startConfiguredSchedules(paths, async () => ({}), () => {}), /businessProjectId/);
+    platform.sources[0].devops.businessProjectId = 4655971863;
     writeFileSync(paths.schedules, JSON.stringify(schedule));
     platform.sources[0].enabled = false;
     writeFileSync(paths.platform, JSON.stringify(platform));

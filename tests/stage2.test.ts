@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SqliteStore } from '../src/storage/sqlite/store.js';
@@ -109,6 +110,16 @@ test('configured DevOps task starts and reads list and detail through the regist
   const scheduled = loadScheduleConfig('config/schedules.json').tasks[0]!;
   assert.equal(scheduled.intervalSeconds, 300);
   const directory = mkdtempSync(join(tmpdir(), 'agent-platform-runtime-'));
+  const repoPath = join(directory, 'repo');
+  mkdirSync(repoPath);
+  execFileSync('git', ['init', '-q', repoPath]);
+  execFileSync('git', ['-C', repoPath, 'remote', 'add', 'origin', 'https://github.com/MeMo9991/agent-platform.git']);
+  const platform = JSON.parse(readFileSync('config/platform.json', 'utf8'));
+  platform.repositories[0].localPath = repoPath;
+  platform.projectGroups[0] = { projectKey: 'devops-project-4655971863', repoKeys: ['agent-platform'],
+    defaultRepoKey: 'agent-platform', searchRoot: directory };
+  const platformPath = join(directory, 'platform.json');
+  writeFileSync(platformPath, JSON.stringify(platform));
   const paths: string[] = [];
   const request: typeof fetch = async (input, init) => {
     const path = String(input).split('/').at(-1)!;
@@ -118,13 +129,14 @@ test('configured DevOps task starts and reads list and detail through the regist
       data: { pageNum: 1, pageSize: 10, total: 1, list: [item(11406133)] } } : detail(11406133));
   };
   try {
-    const runtime = startConfiguredSchedules({ platform: 'config/platform.json', schedules: 'config/schedules.json',
+    const runtime = startConfiguredSchedules({ platform: platformPath, schedules: 'config/schedules.json',
       database: join(directory, 'events.sqlite3') }, async () => ({ Authorization: 'Bearer test-only' }),
     error => { throw error; }, request);
     await runtime.stop();
     assert.deepEqual(paths, ['list', 'query']);
     const reopened = new SqliteStore(join(directory, 'events.sqlite3'), { [config.sourceId]: defectMetadataFields });
-    assert.deepEqual(reopened.listPending(10).map(event => event.externalId), ['11406133']);
+    assert.deepEqual(reopened.listPending(10).map(event => [event.externalId, event.repoKey,
+      event.metaData.repositorySelection]), [['11406133', 'agent-platform', 'default']]);
     reopened.close();
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
