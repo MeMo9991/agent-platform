@@ -13,7 +13,7 @@ const categories: { id: string; title: string; groups: { id: Group; title: strin
     { id: 'repositories', title: '代码仓库', hint: '仓库、目标分支、必需检查和本地检查命令。绝对本机路径不回显；不填写会保留原值，填写 null 可清除。凭据引用只读，新仓库先使用未配置状态。' }] },
   { id: 'sources', title: '来源与调度', groups: [
     { id: 'sources', title: '事件来源', hint: '来源 ID、类型、关联配置及启用状态。' },
-    { id: 'schedules', title: '轮询任务', hint: '轮询间隔、启动执行及 DevOps 参数。' }] },
+    { id: 'schedules', title: '轮询任务', hint: '任务键：id、kind（devops-defect-poll）、enabled、intervalSeconds、runOnStart、parameters。parameters 必填 sourceId（对应事件来源 ID）、businessProjectId（正整数）；可选 pageSize（默认 10）、repoKey（对应仓库键）。' }] },
   { id: 'credentials', title: '外部认证', groups: [
     { id: 'devopsCredentials', title: 'DevOps 凭据', hint: 'DevOps API 的 Authorization 和 Cookie。保存后立即生效，无需重启。' }] },
   { id: 'agents', title: 'Agent 与预算', groups: [

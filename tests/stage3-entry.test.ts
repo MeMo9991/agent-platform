@@ -57,7 +57,7 @@ test('formal entry rejects a second process before database recovery and release
         perAgentConcurrentRuns: 2, reservedHumanResume: 1 }, policyRef: 'test-policy' }));
     writeFileSync(schedules, JSON.stringify({ tasks: [] }));
     writeFileSync(provider, 'export async function authorizationHeaders() { return {}; }\n');
-    execFileSync('npm', ['run', 'build'], { cwd: root });
+    execFileSync('npm', ['run', 'build'], { cwd: root, stdio: 'inherit' });
     const env = { ...process.env, AGENT_PLATFORM_CONFIG: config, AGENT_PLATFORM_SCHEDULES: schedules,
       AGENT_PLATFORM_DATABASE: database, AGENT_PLATFORM_AUTH_PROVIDER: provider };
     const launch = (auth = provider) => spawn(process.execPath, ['dist/bootstrap/main.js'], {
