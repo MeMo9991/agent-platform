@@ -15,7 +15,6 @@ import { taskCommand } from '../interaction/task-command.js';
 import { readSettings, saveSettings, settingsGroup, type SettingsPaths } from './settings.js';
 
 const submit = z.object({ repoKey: z.string().min(1), body: z.string().trim().min(1).max(20_000),
-  autoPr: z.boolean().default(false),
   idempotencyKey: z.string().min(1).max(200), images: z.array(z.object({ data: z.string(), mimeType: z.string() })).max(2).default([]) }).strict();
 const decision = z.object({ expectedVersion: z.number().int().positive(), value: z.record(z.string(), z.unknown()) }).strict();
 const allowedImageTypes: Record<string, string> = { 'image/png': '89504e470d0a1a0a',
@@ -57,7 +56,7 @@ function safeText(value: string): string {
     .replace(/(^|[\s"'`(=:])\/(?!\/)[^\s"'`<>)]{2,}/gm, '$1[本机路径]')
     .replace(/\b(authorization|api[_-]?key|token|password)\s*[:=][^\r\n]*/gi, '$1=[已隐藏]');
 }
-function reviewedText(store: SqliteStore, targetKind: 'question' | 'result' | 'review', targetId: string): string | undefined {
+function reviewedText(store: SqliteStore, targetKind: 'question' | 'review', targetId: string): string | undefined {
   const row = store.db.prepare(`SELECT payload_json FROM task_record WHERE kind='content_review'
     AND json_extract(payload_json,'$.targetKind')=? AND json_extract(payload_json,'$.targetId')=?
     ORDER BY at DESC,id DESC LIMIT 1`).get(targetKind, targetId);
@@ -80,10 +79,9 @@ function evidenceFile(path: unknown, root: string, recordId: unknown, allowed: r
       sha256: createHash('sha256').update(bytes).digest('hex') };
   } catch { return { ...reference, available: false }; }
 }
-function safeRun(run: Record<string, unknown>, store: SqliteStore) {
+function safeRun(run: Record<string, unknown>) {
   const { workspaceRef, resultRef, execution, ...publicRun } = run;
-  return { ...publicRun, hasResult: Boolean(resultRef),
-    conclusion: resultRef ? reviewedText(store, 'result', String(run.id)) : undefined };
+  return publicRun;
 }
 function safeRecord(record: Record<string, unknown>, evidenceRoot: string, store: SqliteStore) {
   const selected: Record<string, unknown> = {};
@@ -143,7 +141,7 @@ function safeRecord(record: Record<string, unknown>, evidenceRoot: string, store
   if (record.kind === 'content_review') {
     selected.targetKind = record.targetKind;
     selected.targetId = record.targetId;
-    selected.summary = record.text;
+    if (record.targetKind !== 'result') selected.summary = record.text;
     selected.reviewer = (record.actor as { id?: string } | undefined)?.id;
   }
   return selected;
@@ -197,7 +195,7 @@ function protectedDirectory(path: string): string {
   return path;
 }
 
-export type DashboardOptions = { actorId: string; repoKeys: readonly string[]; autoPrRepoKeys?: readonly string[];
+export type DashboardOptions = { actorId: string; repoKeys: readonly string[];
   imageDirectory: string; attachmentReaders: Readonly<Record<string, AttachmentReader>>;
   runners?: Readonly<Record<string, AgentRunner | undefined>>; workerCapacity?: number;
   evidenceRoot?: string; takeoverEvidence?: TakeoverEvidencePorts; settingsPaths?: SettingsPaths;
@@ -218,7 +216,7 @@ export async function handleDashboard(request: IncomingMessage, response: Server
   try {
     if (request.method === 'GET' && path === '/api/config') {
       send(response, 200, { actorId: options.actorId, repoKeys: options.repoKeys,
-        autoPrRepoKeys: options.autoPrRepoKeys ?? [], roles,
+        roles,
         stage5WritesEnabled: options.stage5WritesEnabled === true }); return true;
     }
     if (path === '/api/settings' && request.method === 'GET') {
@@ -289,7 +287,7 @@ export async function handleDashboard(request: IncomingMessage, response: Server
       if (!task) { send(response, 404, { error: 'Task not found' }); return true; }
       const rawRuns = store.db.prepare('SELECT payload_json FROM run WHERE task_id=? ORDER BY created_at,id').all(id)
         .map(row => JSON.parse(String(row.payload_json)) as Record<string, unknown>);
-      const runs = rawRuns.map(run => safeRun(run, store));
+      const runs = rawRuns.map(safeRun);
       const records = store.db.prepare('SELECT payload_json FROM task_record WHERE task_id=? ORDER BY at,id').all(id)
         .map(row => safeRecord(JSON.parse(String(row.payload_json)), options.evidenceRoot ?? '', store));
       const events = store.db.prepare('SELECT DISTINCT event_id FROM task_record WHERE task_id=? AND event_id IS NOT NULL UNION SELECT origin_event_id FROM task WHERE id=? AND origin_event_id IS NOT NULL')
@@ -304,7 +302,7 @@ export async function handleDashboard(request: IncomingMessage, response: Server
     const reviewMatch = /^\/api\/tasks\/([^/]+)\/content-reviews$/.exec(path);
     if (request.method === 'POST' && reviewMatch) {
       const taskId = decodeURIComponent(reviewMatch[1]!);
-      const input = z.object({ expectedVersion: z.number().int().positive(), targetKind: z.enum(['question', 'result', 'review']),
+      const input = z.object({ expectedVersion: z.number().int().positive(), targetKind: z.enum(['question', 'review']),
         targetId: z.string().min(1), text: z.string().trim().min(1).max(8192),
         idempotencyKey: z.string().min(1) }).strict().parse(await readBody(request, 16_384));
       if (!roles.includes(input.targetKind === 'question' ? 'answer' : 'command')) throw new Error('Role not permitted');
@@ -314,9 +312,6 @@ export async function handleDashboard(request: IncomingMessage, response: Server
           const target = store.getRecord(input.targetId);
           if (!target || target.taskId !== taskId || target.kind !== 'question' || target.status !== 'open')
             throw new Error('Review target is unavailable');
-        } else if (input.targetKind === 'result') {
-          const target = store.getRun(input.targetId);
-          if (!target || target.taskId !== taskId || !target.resultRef) throw new Error('Review target is unavailable');
         } else {
           const target = store.getRecord(input.targetId);
           if (!target || target.taskId !== taskId || target.kind !== 'review')
@@ -410,14 +405,12 @@ export async function handleDashboard(request: IncomingMessage, response: Server
       if (!roles.includes('submit')) throw new Error('Submission role required');
       const input = submit.parse(await readBody(request));
       if (!options.repoKeys.includes(input.repoKey)) throw new Error('Repository is not authorized');
-      if (input.autoPr && (!options.autoPrRepoKeys?.includes(input.repoKey) || input.images.length))
-        throw new Error('Automatic PR is unavailable for this repository or attachment');
       const sourceId = `manual:${input.repoKey}`;
       const directory = protectedDirectory(resolve(options.imageDirectory));
       const created: string[] = [];
       try {
         const images = input.images.map(image => ({ bytes: imageBytes(image.data, image.mimeType), mimeType: image.mimeType }));
-        const digest = createHash('sha256').update(JSON.stringify([input.repoKey, input.body, input.autoPr,
+        const digest = createHash('sha256').update(JSON.stringify([input.repoKey, input.body,
           images.map(image => [image.mimeType, createHash('sha256').update(image.bytes).digest('hex')])])).digest('hex');
         const attachments = images.map(image => {
           const bytes = image.bytes;
@@ -427,10 +420,10 @@ export async function handleDashboard(request: IncomingMessage, response: Server
           created.push(path);
           return { id, kind: 'image' as const, sourceRef: `manual/${id}`, mimeType: image.mimeType };
         });
-        const result = await createEventIngress(store, { [sourceId]: ['contentDigest', 'autoPr'] }).accept({ sourceId,
+        const result = await createEventIngress(store, { [sourceId]: ['contentDigest'] }).accept({ sourceId,
           externalId: `${options.actorId}:${input.idempotencyKey}`, revision: '1', kind: 'manual_task',
           title: input.body.split('\n')[0]!.slice(0, 200), body: input.body, repoKey: input.repoKey,
-          attachments, metaData: { contentDigest: digest, ...(input.autoPr ? { autoPr: true } : {}) } });
+          attachments, metaData: { contentDigest: digest } });
         if (result.duplicate && store.get(result.eventId)?.metaData.contentDigest !== digest)
           throw new Error('Idempotency key belongs to another submission');
         if (result.duplicate) for (const path of created) rmSync(path, { force: true });

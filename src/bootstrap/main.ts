@@ -139,7 +139,6 @@ try {
     ...platform.interaction,
     dashboard: { actorId: platform.interaction.actorId,
       repoKeys: platform.repositories.map(repo => repo.repoKey),
-      autoPrRepoKeys: platform.repositories.filter(repo => autoPrRuleRef(repo, platform.policyRef)).map(repo => repo.repoKey),
       imageDirectory, attachmentReaders, runners,
       evidenceRoot: resolve(root, '.runtime'),
       stage5OpenChange,

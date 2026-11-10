@@ -18,12 +18,14 @@ const repo = { repoKey: 'agent-platform', provider: 'github' as const, hostUrl: 
   autoPr: { enabled: true, allowedPrefixes: ['src/', 'tests/', 'web/src/'] as Array<'src/' | 'tests/' | 'web/src/'> } };
 const event = { id: 'event', sourceId: 'manual:agent-platform', externalId: '1', revision: '1',
   kind: 'manual_task', title: '修改 src/feature.ts', body: '修改 src/feature.ts',
-  repoKey: 'agent-platform', attachments: [], metaData: { autoPr: true },
+  repoKey: 'agent-platform', attachments: [], metaData: {},
   status: 'pending' as const, receivedAt: new Date().toISOString() };
 
-test('automatic PR authority requires explicit opt-in and the first trusted scope', () => {
+test('automatic development requires explicit code-change intent and the first trusted scope', () => {
   assert.equal(autoPrMandate(event, repo, 'v1')?.allowedActions.join(','), 'investigate,edit,open_pr');
-  assert.equal(autoPrMandate({ ...event, metaData: {} }, repo, 'v1'), undefined);
+  assert.equal(autoPrMandate({ ...event, body: '请调查 src/feature.ts' }, repo, 'v1'), undefined);
+  assert.equal(autoPrMandate({ ...event, body: '请调查为什么新增功能失败' }, repo, 'v1'), undefined);
+  assert.equal(autoPrMandate({ ...event, body: '不要修改现有文件' }, repo, 'v1'), undefined);
   assert.equal(autoPrMandate({ ...event, body: '只读，修改 src/feature.ts' }, repo, 'v1'), undefined);
   assert.equal(autoPrMandate({ ...event, body: '仅新增 src/feature.ts，不要修改任何现有文件' }, repo, 'v1')?.authority.kind, 'auto_pr');
   assert.equal(autoPrMandate({ ...event, sourceId: 'external' }, repo, 'v1'), undefined);
@@ -37,13 +39,13 @@ test('automatic PR authority requires explicit opt-in and the first trusted scop
   assert.equal(autoPrDiffAllowed('+export const feature = 2;\n'), true);
 });
 
-test('trusted manual event routes to an automatic PR Task without changing default intake', () => {
-  for (const optedIn of [true, false]) {
-    const store = new SqliteStore(':memory:', { [event.sourceId]: ['autoPr'] });
+test('trusted manual code-change event routes to development while investigation stays read-only', () => {
+  for (const codeChange of [true, false]) {
+    const store = new SqliteStore(':memory:', { [event.sourceId]: [] });
     try {
       store.registerSource(event.sourceId, 'manual', 'fixture', true);
       const { id: _id, status: _status, receivedAt: _receivedAt, ...incoming } = event;
-      store.accept({ ...incoming, metaData: { autoPr: optedIn } });
+      store.accept({ ...incoming, body: codeChange ? incoming.body : '请调查 src/feature.ts' });
       const loop = createEventLoop(store, { [event.sourceId]: repo.repoKey }, 'v1', 'intake', 'qoder',
         { find: () => ({ candidates: [], complete: true }) }, 60_000,
         source => autoPrMandate(source, repo, 'v1'));
@@ -51,13 +53,13 @@ test('trusted manual event routes to an automatic PR Task without changing defau
       const row = store.db.prepare('SELECT id FROM task').get();
       assert.ok(row);
       assert.equal(store.getTask(String(row.id))?.mandate.authority.kind,
-        optedIn ? 'auto_pr' : 'trusted_rule');
+        codeChange ? 'auto_pr' : 'trusted_rule');
     } finally { store.close(); }
   }
 });
 
-test('human routing a similar opt-in event to a new Task preserves its automatic scope', () => {
-  const store = new SqliteStore(':memory:', { [event.sourceId]: ['autoPr'] });
+test('human routing a similar code-change event to a new Task preserves its development scope', () => {
+  const store = new SqliteStore(':memory:', { [event.sourceId]: [] });
   try {
     store.registerSource(event.sourceId, 'manual', 'fixture', true);
     const { id: _id, status: _status, receivedAt: _receivedAt, ...incoming } = event;
@@ -74,9 +76,9 @@ test('human routing a similar opt-in event to a new Task preserves its automatic
   } finally { store.close(); }
 });
 
-test('submission API accepts the opt-in only for an enabled repository without attachments', async () => {
+test('submission API accepts code-change text without a selector and rejects a forged selector', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'auto-pr-api-'));
-  const store = new SqliteStore(':memory:', { [event.sourceId]: ['contentDigest', 'autoPr'] });
+  const store = new SqliteStore(':memory:', { [event.sourceId]: ['contentDigest'] });
   store.registerSource(event.sourceId, 'manual', 'fixture', true);
   const coordinator = createKernelCoordinator(store, { [event.sourceId]: repo.repoKey }, 'v1', 'intake',
     'qoder', [repo.repoKey], { find: () => ({ candidates: [], complete: true }) },
@@ -85,7 +87,7 @@ test('submission API accepts the opt-in only for an enabled repository without a
   try {
     server = await startLocalApi(store, coordinator, { credentialFile: join(directory, 'token'),
       actorId: 'owner', roles: ['submit'], dashboard: { actorId: 'owner', repoKeys: [repo.repoKey],
-        autoPrRepoKeys: [repo.repoKey], imageDirectory: join(directory, 'images'), attachmentReaders: {} } });
+        imageDirectory: join(directory, 'images'), attachmentReaders: {} } });
     const token = readFileSync(join(directory, 'token'), 'utf8');
     const submit = async (body: object) => {
       const response = await fetch(`http://127.0.0.1:${server!.port}/api/events`, {
@@ -93,17 +95,17 @@ test('submission API accepts the opt-in only for an enabled repository without a
         body: JSON.stringify({ repoKey: repo.repoKey, body: event.body, idempotencyKey: crypto.randomUUID(), ...body }) });
       return response.status;
     };
-    assert.equal(await submit({ autoPr: true, images: [{ data: 'x', mimeType: 'image/png' }] }), 409);
-    assert.equal(await submit({ autoPr: true }), 202);
+    assert.equal(await submit({ autoPr: true }), 400);
+    assert.equal(await submit({}), 202);
     coordinator.processPending();
     const row = store.db.prepare('SELECT id FROM task').get();
     assert.equal(store.getTask(String(row?.id))?.mandate.authority.kind, 'auto_pr');
   } finally { await server?.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('verified ordinary diff opens PR without action approval while merge still needs scope', async () => {
+test('verified ordinary diff waits for PR approval before any push and merge still needs scope', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'auto-pr-'));
-  const store = new SqliteStore(':memory:', { [event.sourceId]: ['autoPr'] });
+  const store = new SqliteStore(':memory:', { [event.sourceId]: [] });
   const git = (...args: string[]) => execFileSync('git', args, { cwd: directory, encoding: 'utf8' }).trim();
   const at = new Date().toISOString();
   const targetSha = 'b'.repeat(40);
@@ -145,13 +147,23 @@ test('verified ordinary diff opens PR without action approval while merge still 
     const service = createStage5OpenChange(store, { [repo.repoKey]: repo }, { [repo.repoKey]: host },
       { async prepare() { throw new Error('unexpected'); }, async verifyAfterChecks() {} },
       'v1', async () => { pushes++; });
-    const version = Number(store.db.prepare('SELECT version FROM task WHERE id=?').get('task')?.version);
+    const version = () => Number(store.db.prepare('SELECT version FROM task WHERE id=?').get('task')?.version);
     assert.equal(store.hasActionApproval({ taskId: 'task', action: 'open_pr', sourceSha,
       targetBranch: 'main', targetSha, policyVersion: 'v1' }), false);
-    assert.equal((await service.prepare('task', version)).kind, 'ready');
-    assert.deepEqual(await service.execute('task', version), { kind: 'opened', changeId: '2' });
+    const request = await service.prepare('task', version());
+    assert.equal(request.kind, 'action_request');
+    assert.equal(store.getTask('task')?.state, 'waiting_human');
+    await assert.rejects(service.execute('task', version()));
+    assert.equal(pushes, 0);
+    const coordinator = createKernelCoordinator(store, {}, 'v1', 'intake', 'qoder', [repo.repoKey],
+      { find: () => ({ candidates: [], complete: true }) });
+    await coordinator.onSignal({ kind: 'human_response', response: { kind: 'approval_decision',
+      value: { requestId: request.requestId!, decision: 'approve', actor: { kind: 'human', id: 'owner' },
+        at, idempotencyKey: 'approve-open-pr' } } });
+    assert.equal((await service.prepare('task', version())).kind, 'ready');
+    assert.deepEqual(await service.execute('task', version()), { kind: 'opened', changeId: '2' });
     assert.equal(pushes, 1);
-    assert.equal((await service.prepareMerge('task', version)).kind, 'scope_request');
+    assert.equal((await service.prepareMerge('task', version())).kind, 'scope_request');
     assert.equal(autoPrRuleRef({ ...repo, autoPr: { ...repo.autoPr, enabled: false } }, 'v1'), undefined);
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });

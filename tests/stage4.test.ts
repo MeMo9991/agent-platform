@@ -66,11 +66,13 @@ test('stage four accepts one image task, routes it, versions commands and splits
       idempotencyKey: 'pause-old', reason: 'review' })).status, 409);
     const version = Number(detail.body.task.version);
     const paused = await request(`/api/tasks/${taskId}/commands`, { kind: 'pause', expectedVersion: version,
-      idempotencyKey: 'pause-1', reason: 'review' });
+      idempotencyKey: 'pause-1', reason: '' });
     assert.equal(paused.status, 200, JSON.stringify(paused.body));
     assert.equal(store.getTask(taskId)?.state, 'paused');
     assert.equal((await request(`/api/tasks/${taskId}/commands`, { kind: 'pause', expectedVersion: version,
-      idempotencyKey: 'pause-1', reason: 'review' })).status, 200);
+      idempotencyKey: 'pause-1' })).status, 200);
+    assert.equal(store.db.prepare('SELECT reason FROM dashboard_command WHERE idempotency_key=?').get('pause-1')?.reason,
+      '操作人未填写原因');
     const split = await request(`/api/tasks/${taskId}/split`, { expectedVersion: paused.body.version,
       description: '独立的新增问题，需要单独调查', idempotencyKey: 'split-1' });
     assert.equal(split.status, 202, JSON.stringify(split.body));
@@ -103,7 +105,7 @@ test('an answer-only credential cannot submit or command through the dashboard',
     assert.equal((await fetch(`${base}/api/tasks/any`, { method: 'DELETE', headers })).status, 403);
     assert.equal((await fetch(`${base}/api/tasks/any/content-reviews`, { method: 'POST', headers,
       body: JSON.stringify({ expectedVersion: 1, targetKind: 'result', targetId: 'run',
-        text: '未经授权的结论', idempotencyKey: 'review-one' }) })).status, 409);
+        text: '未经授权的结论', idempotencyKey: 'review-one' }) })).status, 400);
     assert.equal((await fetch(`${base}/api/tasks/any/review-findings`, { method: 'POST', headers,
       body: JSON.stringify({}) })).status, 409);
     assert.equal(store.db.prepare('SELECT count(*) AS n FROM source_event').get()?.n, 0);
@@ -203,6 +205,9 @@ test('task detail withholds unreviewed Agent text and returns path-free developm
       state: 'queued', iteration: 1, priority: 0, createdAt: at, updatedAt: at });
     store.saveRun({ id: 'run', taskId: 'task', iteration: 1, stage: 'develop', status: 'failed',
       priority: 0, attempt: 1, agentKind: 'qoder', sessionId: 'session', resultRef: log, createdAt: at });
+    store.saveRecord({ id: 'old-result-publication', taskId: 'task', kind: 'content_review',
+      targetKind: 'result', targetId: 'run', text: '历史 Run 结论', status: 'published',
+      actor: { kind: 'human', id: 'owner' }, idempotencyKey: 'old-result', at });
     store.saveRecord({ id: 'report', taskId: 'task', runId: 'run', kind: 'agent_report',
       status: 'succeeded', summary: log, at });
     store.saveRecord({ id: 'secret-progress', taskId: 'task', runId: 'run', kind: 'agent_report',
@@ -231,7 +236,8 @@ test('task detail withholds unreviewed Agent text and returns path-free developm
     assert.equal(response.status, 200);
     const detail = await response.json() as Record<string, any>;
     assert.equal(detail.runs[0].conclusion, undefined);
-    assert.equal(detail.runs[0].hasResult, true);
+    assert.equal(detail.runs[0].hasResult, undefined);
+    assert.doesNotMatch(JSON.stringify(detail), /历史 Run 结论/);
     assert.equal(detail.records.find((item: any) => item.id === 'secret-progress').summary, 'Agent 记录待审查');
     assert.equal(detail.records.find((item: any) => item.id === 'secret-question').prompt, undefined);
     assert.doesNotMatch(JSON.stringify(detail), /\/Users\/test|demo-secret|super-secret|progress-secret|question-secret|error-secret|check-secret|sensitive-review-value/);
@@ -255,25 +261,24 @@ test('task detail withholds unreviewed Agent text and returns path-free developm
     }
     const headers = { authorization: `Bearer ${readFileSync(join(directory, 'token'), 'utf8')}`,
       'content-type': 'application/json' };
-    const review = async (targetKind: 'question' | 'result', targetId: string, text: string) => {
+    const review = async (targetKind: 'question', targetId: string, text: string) => {
       const response = await fetch(`http://127.0.0.1:${server!.port}/api/tasks/task/content-reviews`,
         { method: 'POST', headers, body: JSON.stringify({ expectedVersion: detail.task.version,
           targetKind, targetId, text, idempotencyKey: `review-${targetId}` }) });
       assert.equal(response.status, 200, await response.text());
     };
     await review('question', 'secret-question', '请确认复现步骤与预期行为');
-    await review('result', 'run', '调查完成，已核对代码证据');
     const reviewText = await fetch(`http://127.0.0.1:${server.port}/api/tasks/task/content-reviews`,
       { method: 'POST', headers, body: JSON.stringify({ expectedVersion: detail.task.version,
         targetKind: 'review', targetId: 'review-secret', text: '审查意见已人工核对', idempotencyKey: 'review-finding' }) });
     assert.equal(reviewText.status, 200);
-    const duplicate = await fetch(`http://127.0.0.1:${server.port}/api/tasks/task/content-reviews`,
+    const removedResultReview = await fetch(`http://127.0.0.1:${server.port}/api/tasks/task/content-reviews`,
       { method: 'POST', headers, body: JSON.stringify({ expectedVersion: detail.task.version,
         targetKind: 'result', targetId: 'run', text: '调查完成，已核对代码证据', idempotencyKey: 'review-run' }) });
-    assert.equal((await duplicate.json() as { duplicate: boolean }).duplicate, true);
+    assert.equal(removedResultReview.status, 400);
     const published = await (await fetch(`http://127.0.0.1:${server.port}/api/tasks/task`, { headers })).json() as Record<string, any>;
     assert.equal(published.records.find((item: any) => item.id === 'secret-question').prompt, '请确认复现步骤与预期行为');
-    assert.equal(published.runs[0].conclusion, '调查完成，已核对代码证据');
+    assert.equal(published.runs[0].conclusion, undefined);
     assert.equal(published.records.find((item: any) => item.id === 'review-secret').summary, '审查意见已人工核对');
     assert.doesNotMatch(JSON.stringify(published), /sensitive-review-value/);
     assert.doesNotMatch(JSON.stringify(published), /demo-secret|super-secret|question-secret|"resultRef"/);

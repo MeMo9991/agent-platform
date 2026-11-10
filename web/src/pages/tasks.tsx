@@ -50,23 +50,23 @@ export function TasksPage({ repoKeys, canDelete }: { repoKeys: string[]; canDele
     <Card className="task-table-card"><div className={`filter-card${filtersOpen ? ' filters-open' : ''}`}>
       <Button className="filter-toggle" aria-expanded={filtersOpen} onClick={() => setFiltersOpen(value => !value)}>{filtersOpen ? '收起筛选' : '展开筛选'}</Button>
       <div className="filter-scroll-wrap"><div className="filters" onScroll={filterFade.onScroll}>
-      <Select aria-label="状态" selectedKey={state || 'all'} onSelectionChange={key => { setState(key === 'all' ? '' : String(key ?? '')); setOffset(0); }}>
+      <Select size="sm" aria-label="状态" selectedKey={state || 'all'} onSelectionChange={key => { setState(key === 'all' ? '' : String(key ?? '')); setOffset(0); }}>
         <SelectItem id="all">全部状态</SelectItem>{['queued','investigating','developing','verifying','waiting_human','paused','blocked','failed','cancelled','closed'].map(value =>
           <SelectItem key={value} id={value}>{value}</SelectItem>)}</Select>
-      <Select aria-label="仓库" selectedKey={repoKey || 'all'} onSelectionChange={key => { setRepoKey(key === 'all' ? '' : String(key ?? '')); setOffset(0); }}>
+      <Select size="sm" aria-label="仓库" selectedKey={repoKey || 'all'} onSelectionChange={key => { setRepoKey(key === 'all' ? '' : String(key ?? '')); setOffset(0); }}>
         <SelectItem id="all">全部仓库</SelectItem>{repoKeys.map(value => <SelectItem key={value} id={value}>{value}</SelectItem>)}</Select>
-      <Input aria-label="来源 ID" value={sourceId} onChange={value => { setSourceId(value); setOffset(0); }} placeholder="来源 ID" />
-      <Input type="date" aria-label="开始日期" leadingAddon={<span className="text-caption-1-medium text-text-tertiary">从</span>}
+      <Input size="small" aria-label="来源 ID" value={sourceId} onChange={value => { setSourceId(value); setOffset(0); }} placeholder="来源 ID" />
+      <Input size="small" type="date" aria-label="开始日期" leadingAddon={<span className="text-caption-1-medium text-text-tertiary">从</span>}
         value={from} onChange={value => { setFrom(value); setOffset(0); }} />
-      <Input type="date" aria-label="结束日期" leadingAddon={<span className="text-caption-1-medium text-text-tertiary">到</span>}
+      <Input size="small" type="date" aria-label="结束日期" leadingAddon={<span className="text-caption-1-medium text-text-tertiary">到</span>}
         value={to} onChange={value => { setTo(value); setOffset(0); }} />
     </div><ScrollFade progress={filterFade.progress} /></div></div>
       {data?.items.length ? <div className="task-table-scroll-wrap"><div className="task-table-scroll" onScroll={tableFade.onScroll}>
         <Table aria-label="任务列表" size="sm"><TableHeader>
         <TableColumn isRowHeader>任务</TableColumn><TableColumn>状态</TableColumn><TableColumn>仓库</TableColumn><TableColumn>更新时间</TableColumn><TableColumn>行动</TableColumn>
       </TableHeader><TableBody>{data.items.map(task => <TableRow key={task.id} id={task.id}>
-        <TableCell><a className="task-link" href={`#/tasks/${encodeURIComponent(task.id)}`}>{task.title}</a><small className="row-subtitle">{task.id}</small></TableCell>
-        <TableCell><Badge>{task.state}</Badge></TableCell><TableCell>{task.repoKey}</TableCell>
+        <TableCell><a className="task-link" title={task.title} href={`#/tasks/${encodeURIComponent(task.id)}`}>{task.title}</a><small className="row-subtitle">{task.id}</small></TableCell>
+        <TableCell><Badge>{task.state}</Badge></TableCell><TableCell><span title={task.repoKey}>{task.repoKey}</span></TableCell>
         <TableCell>{new Date(task.updatedAt).toLocaleString()}</TableCell>
         <TableCell><Button variant="ghost" size="xs" iconOnly leadingIcon={RiDeleteBinLine}
           className="text-text-secondary hover:bg-background-secondary-hover hover:text-text-primary"
