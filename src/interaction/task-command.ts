@@ -3,7 +3,8 @@ import { id } from '../shared/model.js';
 
 const base = z.object({ taskId: id, expectedVersion: z.number().int().positive(),
   idempotencyKey: id.max(200) }).strict();
-const withReason = base.extend({ reason: z.string().trim().min(1).max(2000) });
+const withReason = base.extend({ reason: z.string().trim().max(2000)
+  .transform(value => value || '操作人未填写原因').default('操作人未填写原因') });
 export const taskCommand = z.discriminatedUnion('kind', [
   withReason.extend({ kind: z.literal('pause') }),
   withReason.extend({ kind: z.literal('resume') }),

@@ -20,6 +20,7 @@ import { approvalRequest, approvalDecision, answer } from '../../interaction/mod
 import type { routeReviewDecision } from '../../interaction/model.js';
 import type { RoutePlan } from '../../agent/kernel/task-loop.js';
 import type { CandidateRow } from '../../agent/router/candidate-finder.js';
+import { hasCodeChangeIntent } from '../../authorization/auto-pr.js';
 
 export class SqliteStore implements EventRepository {
   readonly db: DatabaseSync;
@@ -237,8 +238,9 @@ export class SqliteStore implements EventRepository {
       const event = this.get(value.mandate.sourceEventId);
       if (!event || event.status !== 'routing' || value.originEventId !== event.id ||
           event.sourceId !== `manual:${value.repoKey}` || event.repoKey !== value.repoKey ||
-          event.metaData.autoPr !== true || event.attachments.length || value.mandate.goal !== event.title)
-        throw new Error('Automatic PR intake lacks trusted opt-in');
+          event.kind !== 'manual_task' || event.attachments.length ||
+          !hasCodeChangeIntent(event.body) || value.mandate.goal !== event.title)
+        throw new Error('Automatic development intake lacks trusted code-change intent');
     } else if (value.mandate.authority.kind !== 'trusted_rule')
       throw new Error('Human-approved Mandate requires a verified authorization service');
     this.db.prepare(`INSERT INTO task

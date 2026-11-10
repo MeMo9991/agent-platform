@@ -10,7 +10,7 @@ import type { TaskRecord } from '../agent/task/model.js';
 import type { CodeHost, repositoryConfig } from '../repository-ci/model.js';
 import type { z } from 'zod';
 import { evaluateStage5Action } from './stage5-policy.js';
-import { autoPrDiffAllowed, autoPrPathsAllowed, autoPrRuleRef } from './auto-pr.js';
+import { autoPrDiffAllowed, autoPrMandate, autoPrPathsAllowed } from './auto-pr.js';
 import { baseUrl, credential } from '../repository-ci/providers/http.js';
 import { changeRef } from '../repository-ci/model.js';
 import { checksReady } from '../repository-ci/gate.js';
@@ -38,13 +38,14 @@ async function pushBranch(repo: Repository, cwd: string, sourceSha: string, bran
 export function createStage5OpenChange(store: SqliteStore, repositories: Readonly<Record<string, Repository>>,
   hosts: Readonly<Record<string, CodeHost>>, workspace: WorkspaceManager, policyVersion: string,
   push: typeof pushBranch = pushBranch) {
-  function autoApproved(task: NonNullable<ReturnType<SqliteStore['getTask']>>, repo: Repository,
+  function autoEligible(task: NonNullable<ReturnType<SqliteStore['getTask']>>, repo: Repository,
     review: NonNullable<ReturnType<SqliteStore['latestReview']>>,
     changed: readonly string[], diff: string, sourceSha: string, targetSha: string): boolean {
     const event = store.get(task.mandate.sourceEventId);
-    if (task.mandate.authority.kind !== 'auto_pr' ||
-        task.mandate.authority.ruleRef !== autoPrRuleRef(repo, policyVersion) ||
-        event?.metaData.autoPr !== true || review.verdict !== 'pass' || review.findings.length ||
+    const expected = event && autoPrMandate(event, repo, policyVersion);
+    if (task.mandate.authority.kind !== 'auto_pr' || expected?.authority.kind !== 'auto_pr' ||
+        task.mandate.authority.ruleRef !== expected.authority.ruleRef ||
+        review.verdict !== 'pass' || review.findings.length ||
         !autoPrPathsAllowed(changed, repo) || !autoPrDiffAllowed(diff)) return false;
     const decision = evaluateStage5Action({ mandate: task.mandate, repository: repo, action: 'open_pr',
       sourceSha, targetSha, targetBranch: repo.targetBranch, changedPaths: changed, diff, approvalValid: true });
@@ -95,9 +96,11 @@ export function createStage5OpenChange(store: SqliteStore, repositories: Readonl
   return {
     async prepare(taskId: string, expectedVersion: number): Promise<Result> {
       const { task, repo, review, sourceSha, targetSha, changed, diff } = await facts(taskId);
+      if (task.mandate.authority.kind === 'auto_pr' &&
+          !autoEligible(task, repo, review, changed, diff, sourceSha, targetSha))
+        throw new Error('Automatic PR candidate is outside the low-risk policy');
       const approvalValid = store.hasActionApproval({ taskId, action: 'open_pr', sourceSha,
-        targetBranch: repo.targetBranch, targetSha, policyVersion }) ||
-        autoApproved(task, repo, review, changed, diff, sourceSha, targetSha);
+        targetBranch: repo.targetBranch, targetSha, policyVersion });
       const decision = evaluateStage5Action({ mandate: task.mandate, repository: repo, action: 'open_pr',
         sourceSha, targetSha, targetBranch: repo.targetBranch, changedPaths: changed, diff, approvalValid });
       if (decision.kind === 'deny') throw new Error(decision.reason);
@@ -136,9 +139,11 @@ export function createStage5OpenChange(store: SqliteStore, repositories: Readonl
     },
     async execute(taskId: string, expectedVersion: number): Promise<{ kind: 'opened' | 'uncertain'; changeId?: string }> {
       const { task, repo, host, review, sourceSha, targetSha, changed, diff, sourcePath } = await facts(taskId);
+      if (task.mandate.authority.kind === 'auto_pr' &&
+          !autoEligible(task, repo, review, changed, diff, sourceSha, targetSha))
+        throw new Error('Automatic PR candidate is outside the low-risk policy');
       const approvalValid = store.hasActionApproval({ taskId, action: 'open_pr', sourceSha,
-        targetBranch: repo.targetBranch, targetSha, policyVersion }) ||
-        autoApproved(task, repo, review, changed, diff, sourceSha, targetSha);
+        targetBranch: repo.targetBranch, targetSha, policyVersion });
       const decision = evaluateStage5Action({ mandate: task.mandate, repository: repo, action: 'open_pr',
         sourceSha, targetSha, targetBranch: repo.targetBranch, changedPaths: changed, diff, approvalValid });
       if (decision.kind !== 'allow' || !host.findChangeByBranch)
