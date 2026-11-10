@@ -1,16 +1,32 @@
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import type { KernelCoordinator } from '../kernel/model.js';
 import type { Task, TaskMandate } from '../task/model.js';
 import type { AgentRunner, Run, WorkspaceManager } from './model.js';
 import type { z } from 'zod';
-import type { executionAttestation, developmentEvidence, agentSnapshot } from './model.js';
+import { reviewEvidence, type executionAttestation, type developmentEvidence,
+  type verificationEvidence, type agentSnapshot } from './model.js';
 import type { SkillLoader } from '../../skills/model.js';
 import type { SqliteStore } from '../../storage/sqlite/store.js';
 import type { AttachmentReader, AttachmentRef } from '../../event/model.js';
 
 export type ExecutionAttestation = z.infer<typeof executionAttestation>;
+export function parseReviewOutput(summary: string): z.infer<typeof reviewEvidence> {
+  try { return reviewEvidence.parse(JSON.parse(summary)); }
+  catch { /* Qoder may wrap its structured result in one JSON code block. */ }
+  const lines = summary.split(/\r?\n/);
+  const fences = lines.flatMap((line, index) => line.startsWith('```') ? [index] : []);
+  if (!fences.length) {
+    const starts = lines.flatMap((line, index) => line.startsWith('{') ? [index] : []);
+    if (starts.length !== 1) throw new Error('Review result has no unique final JSON object');
+    return reviewEvidence.parse(JSON.parse(lines.slice(starts[0]!).join('\n')));
+  }
+  if (fences.length !== 2 || !/^```json[ \t]*$/.test(lines[fences[0]!]!) ||
+      !/^```[ \t]*$/.test(lines[fences[1]!]!) || fences[1]! <= fences[0]! + 1)
+    throw new Error('Review result has no unique JSON code block');
+  return reviewEvidence.parse(JSON.parse(lines.slice(fences[0]! + 1, fences[1]!).join('\n')));
+}
 export interface ExecutionBoundary {
   attest(input: { runId: string; repoKey: string; workspacePath: string; mode: 'read' | 'write';
     mandate: TaskMandate }): Promise<ExecutionAttestation | undefined>;
@@ -20,6 +36,10 @@ export interface ExecutionBoundary {
         exitCode: number | null; logRef: string; terminationConfirmed: boolean }>;
       terminate(): Promise<{ terminated: boolean; logRef?: string }>;
     };
+  prepareDependencies?(input: { proof: ExecutionAttestation; cwd: string }): Promise<{
+    command: string; args: string[]; timeoutMs: number; startedAt: string; endedAt: string;
+    result: 'passed' | 'failed' | 'timeout' | 'unavailable'; exitCode: number | null;
+    logRef: string; terminationConfirmed: boolean }>;
   release?(proof: ExecutionAttestation): Promise<void>;
 }
 export function createWorkerManager(input: { store: SqliteStore; coordinator: KernelCoordinator;
@@ -31,6 +51,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
   attachmentReaders?: Readonly<Record<string, AttachmentReader>>;
   checkLogDirectory?: string;
   skillRepoPath: string; skillCommitSha: string; maxRunMs: number;
+  enabledStages?: readonly Run['stage'][];
   limits: { maxConcurrentRuns: number; perRepoConcurrentRuns: number; perAgentConcurrentRuns: number;
     reservedHumanResume: number } }) {
   const workerId = randomUUID();
@@ -92,25 +113,46 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
   async function completeRun(run: Run, snapshot: Extract<z.infer<typeof agentSnapshot>, { kind: 'finished' }>,
     recovered = false): Promise<void> {
     let development: z.infer<typeof developmentEvidence> | undefined;
-    if (run.stage === 'develop' && snapshot.exitCode === 0 && snapshot.resultRef) {
+    let verification: z.infer<typeof verificationEvidence> | undefined;
+    let review: z.infer<typeof reviewEvidence> | undefined;
+    if ((run.stage === 'develop' || run.stage === 'verify') && snapshot.exitCode === 0 && snapshot.resultRef) {
       try {
         const task = input.store.getTask(run.taskId);
-        if (!task || !run.execution || run.execution.mode !== 'write' ||
+        if (!task || !run.execution || run.execution.mode !== (run.stage === 'develop' ? 'write' : 'read') ||
             run.execution.runId !== run.id || run.execution.repoKey !== task.repoKey ||
-            run.execution.workspacePath !== run.workspaceRef || run.commitSha !== task.baseRef ||
-            !input.workspace.verifyDevelopment)
-          throw new Error('Development Run has no matching workspace, Mandate base or isolation proof');
-        const git = await input.workspace.verifyDevelopment(run);
-        if (git.baseSha !== run.commitSha) throw new Error('Verified diff base does not match Run');
+            run.execution.workspacePath !== run.workspaceRef || !run.commitSha ||
+            (run.stage === 'develop' && (run.commitSha !== task.baseRef || !input.workspace.verifyDevelopment)))
+          throw new Error('Run has no matching workspace, SHA or isolation proof');
+        const git = run.stage === 'develop' ? await input.workspace.verifyDevelopment!(run)
+          : { baseSha: task.baseRef ?? '', commitSha: run.commitSha, diffRef: '' };
+        if (run.stage === 'develop' && git.baseSha !== run.commitSha)
+          throw new Error('Verified diff base does not match Run');
         const checks: z.infer<typeof developmentEvidence>['checks'] = [];
         let terminationUnconfirmed = false;
+        let dependencyFailed = false;
+        if (input.localChecks?.[task.repoKey]?.some(check => check.command === 'npm') &&
+            input.boundary.prepareDependencies) {
+          try {
+            const preparation = await input.boundary.prepareDependencies({ proof: run.execution, cwd: run.workspaceRef! });
+            checks.push(preparation);
+            dependencyFailed = preparation.result !== 'passed' || preparation.exitCode !== 0 ||
+              !preparation.terminationConfirmed;
+            if (!preparation.terminationConfirmed) terminationUnconfirmed = true;
+          } catch {
+            checks.push({ command: 'npm', args: ['ci', '--ignore-scripts'], timeoutMs: 180_000,
+              startedAt: new Date().toISOString(), endedAt: new Date().toISOString(),
+              result: 'unavailable', exitCode: null, logRef: await unavailableLog(), terminationConfirmed: false });
+            dependencyFailed = true;
+            terminationUnconfirmed = true;
+          }
+        }
         for (const check of input.localChecks?.[task.repoKey] ?? []) {
           const startedAt = new Date().toISOString();
           let receipt: { result: 'passed' | 'failed' | 'timeout' | 'unavailable';
             exitCode: number | null; logRef: string; terminationConfirmed: boolean };
           const controller = new AbortController();
           let handle: ReturnType<NonNullable<ExecutionBoundary['runCheck']>> | undefined;
-          const noStart = !input.boundary.runCheck || terminationUnconfirmed;
+          const noStart = !input.boundary.runCheck || terminationUnconfirmed || dependencyFailed;
           try {
             if (noStart) receipt = { result: 'unavailable', exitCode: null,
               logRef: await unavailableLog(), terminationConfirmed: true };
@@ -143,27 +185,47 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
         }
         let postCheckError: string | undefined;
         if (terminationUnconfirmed) postCheckError = 'Local check process termination is unconfirmed';
+        else if (dependencyFailed) postCheckError = 'Dependency preparation failed';
         else {
           try {
             if (!input.workspace.verifyAfterChecks) throw new Error('Post-check Git verifier is unavailable');
             await input.workspace.verifyAfterChecks(run, git.commitSha);
           } catch (error) { postCheckError = error instanceof Error ? error.message : String(error); }
         }
-        development = { ...git, checks, postCheckVerified: !postCheckError, postCheckError };
+        if (run.stage === 'develop') development = { ...git, checks, postCheckVerified: !postCheckError, postCheckError };
+        else verification = { subjectSha: run.commitSha, checks, postCheckVerified: !postCheckError, postCheckError };
       } catch (error) {
         input.store.saveRecord({ id: randomUUID(), taskId: run.taskId, runId: run.id,
           kind: 'agent_report', status: 'failed',
-          summary: `Development evidence rejected: ${error instanceof Error ? error.message : String(error)}`,
+          summary: `${run.stage} evidence rejected: ${error instanceof Error ? error.message : String(error)}`,
+          at: new Date().toISOString() });
+      }
+    }
+    if (run.stage === 'review' && snapshot.exitCode === 0 && snapshot.resultRef && run.sessionId && run.commitSha) {
+      try {
+        const runner = run.agentKind ? input.runners[run.agentKind] : undefined;
+        if (!runner?.resultSummary || !run.execution || run.execution.mode !== 'read' ||
+            run.execution.workspacePath !== run.workspaceRef || !input.workspace.verifyAfterChecks)
+          throw new Error('Review session or isolation proof is missing');
+        const summary = await runner.resultSummary(run.id, run.sessionId, snapshot.resultRef);
+        if (Buffer.byteLength(summary, 'utf8') > 65_536) throw new Error('Review result exceeds limit');
+        review = parseReviewOutput(summary);
+        if (review.subjectSha !== run.commitSha) throw new Error('Review result names another SHA');
+        await input.workspace.verifyAfterChecks(run, run.commitSha);
+      } catch (error) {
+        input.store.saveRecord({ id: randomUUID(), taskId: run.taskId, runId: run.id,
+          kind: 'agent_report', status: 'failed',
+          summary: `Review evidence rejected: ${error instanceof Error ? error.message : String(error)}`,
           at: new Date().toISOString() });
       }
     }
     try {
       if (recovered) await input.coordinator.onSignal({ kind: 'recovery', taskId: run.taskId, runId: run.id,
         observation: { kind: 'finished', sessionId: run.sessionId!, exitCode: snapshot.exitCode,
-          resultRef: snapshot.resultRef, development } });
+          resultRef: snapshot.resultRef, development, verification, review } });
       else await input.coordinator.onSignal({ kind: 'agent_event', taskId: run.taskId,
         event: { kind: 'result', runId: run.id, status: snapshot.exitCode === 0 ? 'succeeded' : 'failed',
-          exitCode: snapshot.exitCode, resultRef: snapshot.resultRef, development } });
+          exitCode: snapshot.exitCode, resultRef: snapshot.resultRef, development, verification, review } });
     } finally {
       if (run.workspaceRef) await rm(resolve(run.workspaceRef, '.git', 'agent-input'), { recursive: true, force: true });
       if (run.execution) await input.boundary.release?.(run.execution);
@@ -230,7 +292,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
   }, async tick(): Promise<boolean> {
     const at = new Date();
     const claimed = input.store.claimRun(workerId, at.toISOString(),
-      new Date(at.getTime() + input.maxRunMs + 60_000).toISOString(), input.limits, Object.keys(input.runners));
+      new Date(at.getTime() + input.maxRunMs + 60_000).toISOString(), input.limits, Object.keys(input.runners), input.enabledStages);
     if (!claimed) return false;
     const task = input.store.getTask(claimed.taskId);
     if (!task) { input.coordinator.onWorkerFailure(claimed.id, 'Task is missing', 'pause'); return true; }
@@ -255,10 +317,12 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
         if (claimed.execution) await input.boundary.release?.(claimed.execution);
       }
       const mode = claimed.stage === 'develop' ? 'write' : 'read';
+      const risk = mode === 'write' ? input.riskPolicy?.assess(task, claimed) ?? 'unknown' : 'low';
+      const riskRank = { low: 0, medium: 1, high: 2, unknown: 3 } as const;
       if (mode === 'write' && (!task.mandate.allowedActions.includes('edit') ||
           task.mandate.repoKey !== task.repoKey ||
           (input.policyVersion && task.mandate.policyVersion !== input.policyVersion) ||
-          (input.riskPolicy?.assess(task, claimed) ?? 'unknown') !== 'low'))
+          risk === 'unknown' || riskRank[risk] > riskRank[task.mandate.maxAutoRisk]))
         throw new Error('Edit Mandate does not authorize this repository');
       let skill;
       try { skill = await input.skills.load({ repoRef: input.skillRepoPath,
@@ -270,7 +334,8 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
       }
       const workspace = await input.workspace.prepare(claimed);
       if (workspace.repoKey !== task.repoKey) throw new Error('Workspace repository mismatch');
-      input.store.setTaskBaseRef(task.id, workspace.baseSha);
+      if (claimed.stage === 'investigate' || claimed.stage === 'develop')
+        input.store.setTaskBaseRef(task.id, workspace.baseSha);
       const attestation = await input.boundary.attest({ runId: claimed.id, repoKey: task.repoKey, workspacePath: workspace.path,
         mode, mandate: task.mandate });
       attested = attestation;
@@ -330,9 +395,9 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
         }
         return results;
       };
-      previousResults.push(...await readConclusions(task.id, claimed.id));
+      if (claimed.stage !== 'review') previousResults.push(...await readConclusions(task.id, claimed.id));
       let parentTaskFacts;
-      if (task.parentTaskId) {
+      if (task.parentTaskId && claimed.stage !== 'review') {
         const parent = input.store.getTask(task.parentTaskId);
         if (!parent || parent.repoKey !== task.repoKey || parent.id === task.id)
           throw new Error('Related Task is missing or belongs to another repository');
@@ -355,7 +420,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
       let reopenEvidence;
       const reopenedRow = input.store.db.prepare("SELECT id FROM task_record WHERE task_id=? AND kind='reopen' ORDER BY at DESC,id DESC LIMIT 1")
         .get(task.id);
-      if (reopenedRow) {
+      if (reopenedRow && claimed.stage !== 'review') {
         const record = input.store.getRecord(String(reopenedRow.id));
         if (record?.kind !== 'reopen' || record.nextIteration !== task.iteration)
           throw new Error('Current Task reopening evidence is missing or stale');
@@ -382,9 +447,32 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
         .filter(record => record?.kind === 'answer')
         .map(record => record?.kind === 'answer'
           ? { questionId: record.questionId, content: record.content, status: record.status } : undefined);
+      let reviewEvidenceFacts;
+      if (claimed.stage === 'review') {
+        if (!claimed.commitSha) throw new Error('Review has no pinned SHA');
+        const recordRow = input.store.db.prepare(`SELECT id FROM task_record WHERE task_id=? AND kind='development'
+          AND json_extract(payload_json,'$.commitSha')=? AND json_extract(payload_json,'$.postCheckVerified')=1
+          ORDER BY at DESC LIMIT 1`).get(task.id, claimed.commitSha);
+        const record = recordRow ? input.store.getRecord(String(recordRow.id)) : undefined;
+        if (record?.kind !== 'development' || !record.diffRef) throw new Error('Review diff evidence is missing');
+        const evidenceRoot = await realpath(resolve(input.checkLogDirectory ?? '.runtime/check-logs', '..', 'evidence'));
+        const diffPath = await realpath(record.diffRef);
+        if (!diffPath.startsWith(`${evidenceRoot}/`) || (await stat(diffPath)).size > 2 * 1024 * 1024)
+          throw new Error('Review diff is outside the trusted evidence directory or too large');
+        const directory = resolve(workspace.path, '.git', 'agent-input');
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        const stagedDiff = resolve(directory, 'review.patch');
+        await writeFile(stagedDiff, await readFile(diffPath), { mode: 0o600, flag: 'wx' });
+        const checks = input.store.db.prepare(`SELECT payload_json FROM task_record WHERE task_id=? AND kind='check'
+          AND subject_sha=? ORDER BY at,id`).all(task.id, claimed.commitSha)
+          .map(row => JSON.parse(String(row.payload_json)) as { command: string; args: string[];
+            result: string; exitCode: number | null; logRef: string });
+        reviewEvidenceFacts = { sourceSha: claimed.commitSha, diffPath: stagedDiff,
+          checks: checks.map(({ command, args, result, exitCode }) => ({ command, args, result, exitCode })) };
+      }
       const facts = { taskId: task.id, iteration: task.iteration, repoKey: task.repoKey,
         scope: task.scope, baseSha: task.baseRef ?? workspace.baseSha, previousResults, parentTaskFacts,
-        reopenEvidence,
+        reopenEvidence: claimed.stage === 'review' ? undefined : reopenEvidence, reviewEvidence: reviewEvidenceFacts,
         events: eventFacts, answers: answeredFacts };
       const request = { taskId: task.id, runId: claimed.id, stage: claimed.stage,
         mandate: latest.mandate, repoKey: latest.repoKey, workspace,
@@ -441,8 +529,10 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
       }
       if (attested) await input.boundary.release?.(attested);
       if (attachmentDirectory) await rm(attachmentDirectory, { recursive: true, force: true });
+      const startupTerminated = error instanceof Error &&
+        (error as Error & { terminationConfirmed?: boolean }).terminationConfirmed === true;
       input.coordinator.onWorkerFailure(claimed.id, error instanceof Error ? error.message : 'Worker preflight failed',
-        'pause', attemptedNewSession && !launchedSession);
+        'pause', attemptedNewSession && !launchedSession && !startupTerminated);
       return true;
     }
   }, async poll(): Promise<number> {

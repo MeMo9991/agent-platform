@@ -86,7 +86,9 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
   if (task.owner && ['resume', 'retry', 'cancel'].includes(input.kind))
     throw new Error('Human takeover result is required first');
   if (!input.reason.trim()) throw new Error('Reason is required');
-  if (['resume', 'retry'].includes(input.kind) && !['paused', 'failed', 'blocked'].includes(task.state))
+  const latestReview = input.kind === 'retry' && task.state === 'waiting_human' ? store.latestReview(task.id) : undefined;
+  const retryEmptyReview = latestReview?.verdict === 'block' && latestReview.findings.length === 0;
+  if (['resume', 'retry'].includes(input.kind) && !['paused', 'failed', 'blocked'].includes(task.state) && !retryEmptyReview)
     throw new Error('Task is not ready to resume or retry');
   if (['pause', 'takeover'].includes(input.kind) && !['queued', 'investigating', 'developing', 'waiting_human'].includes(task.state))
     throw new Error('Task cannot be paused or taken over now');
@@ -134,17 +136,58 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
         }
       }
     } else {
-      if (!['paused', 'failed', 'blocked'].includes(current.state) || store.hasActiveRun(current.id))
+      if ((!['paused', 'failed', 'blocked'].includes(current.state) && !retryEmptyReview) || store.hasActiveRun(current.id))
         throw new Error('Task is not ready to resume or retry');
       const last = store.db.prepare('SELECT id FROM run WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT 1').get(current.id);
       const previous = last ? store.getRun(String(last.id)) : undefined;
-      if (!previous || !['investigate', 'develop'].includes(previous.stage) || !previous.agentKind)
-        throw new Error('No safe Run stage is available for retry');
-      store.saveTransition(current.id, 'queued', input.reason, now, randomUUID(), actor);
-      const next: Run = { id: randomUUID(), taskId: current.id, iteration: current.iteration,
-        stage: previous.stage, status: 'queued', requestKey: `command:${input.idempotencyKey}`,
-        priority: current.priority, attempt: previous.attempt + 1, agentKind: previous.agentKind, createdAt: now };
-      store.saveRun(next);
+      if (retryEmptyReview) {
+        const review = store.latestReview(current.id);
+        if (current.state !== 'waiting_human' || !review || review.verdict !== 'block' || review.findings.length ||
+            !previous || previous.id !== review.runId || previous.stage !== 'review' ||
+            previous.status !== 'succeeded' || previous.iteration !== current.iteration ||
+            previous.commitSha !== review.subjectSha || !previous.agentKind ||
+            store.db.prepare("SELECT 1 FROM task_record WHERE task_id=? AND kind IN ('question','approval_request') AND status='open' LIMIT 1").get(current.id))
+          throw new Error('No pinned, empty blocking review is available for retry');
+        store.saveTransition(current.id, 'reviewing', input.reason, now, randomUUID(), actor);
+        store.saveRun({ id: randomUUID(), taskId: current.id, iteration: current.iteration,
+          stage: 'review', status: 'queued', requestKey: `command:${input.idempotencyKey}`,
+          priority: current.priority, attempt: previous.attempt + 1, agentKind: previous.agentKind,
+          commitSha: previous.commitSha, createdAt: now });
+      } else {
+        const retryVerify = previous?.stage === 'verify' && previous.status === 'failed' &&
+          previous.commitSha && /^[a-f0-9]{40}$/.test(previous.commitSha) &&
+          store.db.prepare(`SELECT 1 FROM task_record WHERE task_id=? AND kind='development'
+            AND json_extract(payload_json,'$.commitSha')=? AND json_extract(payload_json,'$.postCheckVerified')=1
+            LIMIT 1`).get(current.id, previous.commitSha);
+        const retryReview = previous?.stage === 'review' && previous.status === 'failed' &&
+          previous.commitSha && /^[a-f0-9]{40}$/.test(previous.commitSha) &&
+          store.db.prepare("SELECT 1 FROM run WHERE task_id=? AND stage='verify' AND status='succeeded' AND commit_sha=? LIMIT 1")
+            .get(current.id, previous.commitSha) &&
+          !store.db.prepare("SELECT 1 FROM task_record WHERE task_id=? AND run_id=? AND kind='review' LIMIT 1")
+            .get(current.id, previous.id);
+        const review = store.latestReview(current.id);
+        const retryUnsupportedReview = current.state === 'blocked' && previous?.stage === 'develop' && previous.status === 'failed' &&
+          previous.iteration === current.iteration && review?.verdict === 'pass' && review.runId &&
+          review.subjectSha === previous.commitSha &&
+          review.findings.some(finding => !['low', 'medium', 'high', 'unknown'].includes(finding.severity)) &&
+          store.db.prepare("SELECT 1 FROM run WHERE id=? AND task_id=? AND stage='review' AND status='succeeded' AND commit_sha=? LIMIT 1")
+            .get(review.runId, current.id, review.subjectSha) &&
+          store.db.prepare("SELECT 1 FROM run WHERE task_id=? AND stage='verify' AND status='succeeded' AND commit_sha=? LIMIT 1")
+            .get(current.id, review.subjectSha) &&
+          !store.db.prepare("SELECT 1 FROM task_record WHERE task_id=? AND run_id=? AND kind='development' LIMIT 1")
+            .get(current.id, previous.id);
+        if (!previous || !(['investigate', 'develop'].includes(previous.stage) || retryVerify || retryReview ||
+            retryUnsupportedReview) || !previous.agentKind)
+          throw new Error('No safe Run stage is available for retry');
+        store.saveTransition(current.id, 'queued', input.reason, now, randomUUID(), actor);
+        const next: Run = { id: randomUUID(), taskId: current.id, iteration: current.iteration,
+          stage: retryUnsupportedReview ? 'review' : previous.stage, status: 'queued',
+          requestKey: `command:${input.idempotencyKey}`,
+          priority: current.priority, attempt: previous.attempt + 1, agentKind: previous.agentKind,
+          commitSha: retryVerify || retryReview || retryUnsupportedReview ? previous.commitSha : undefined,
+          createdAt: now };
+        store.saveRun(next);
+      }
     }
     const nextVersion = Number(store.db.prepare('SELECT version FROM task WHERE id=?').get(current.id)?.version);
     store.db.prepare('INSERT INTO dashboard_command(idempotency_key,actor_id,task_id,kind,reason,task_version) VALUES (?,?,?,?,?,?)')

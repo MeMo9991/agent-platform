@@ -5,6 +5,7 @@ import { task, taskRecord, type Task, type TaskRecord } from '../../agent/task/m
 import { subscription, type Subscription } from '../../agent/task/model.js';
 import { routeDecision } from '../../agent/router/model.js';
 import { transitionTask } from '../../agent/task/transition.js';
+import { isBlockingReview } from '../../agent/task/workflow.js';
 import type { TaskTransitionResult } from '../../agent/task/transition.js';
 import type { z } from 'zod';
 import type { actorRef } from '../../shared/model.js';
@@ -19,6 +20,7 @@ import { approvalRequest, approvalDecision, answer } from '../../interaction/mod
 import type { routeReviewDecision } from '../../interaction/model.js';
 import type { RoutePlan } from '../../agent/kernel/task-loop.js';
 import type { CandidateRow } from '../../agent/router/candidate-finder.js';
+import { hasCodeChangeIntent } from '../../authorization/auto-pr.js';
 
 export class SqliteStore implements EventRepository {
   readonly db: DatabaseSync;
@@ -148,7 +150,8 @@ export class SqliteStore implements EventRepository {
       let taskId: string;
       if (decision.kind === 'new_task') {
         if (decision.mandate.sourceEventId !== eventId || decision.mandate.repoKey !== decision.repoKey ||
-            decision.mandate.authority.kind !== 'trusted_rule') throw new Error('Invalid intake Mandate');
+            (decision.mandate.authority.kind !== 'trusted_rule' &&
+              decision.mandate.authority.kind !== 'auto_pr')) throw new Error('Invalid intake Mandate');
         if (!plan.task || !plan.run || plan.task.id !== plan.run.taskId || plan.taskId !== plan.task.id ||
             plan.task.repoKey !== decision.repoKey || plan.task.mandate.sourceEventId !== eventId ||
             plan.task.parentTaskId !== decision.parentTaskId ||
@@ -231,7 +234,15 @@ export class SqliteStore implements EventRepository {
   }
   saveTask(input: Task): void {
     const value = task.parse(input);
-    if (value.mandate.authority.kind !== 'trusted_rule') throw new Error('Human-approved Mandate requires a verified authorization service');
+    if (value.mandate.authority.kind === 'auto_pr') {
+      const event = this.get(value.mandate.sourceEventId);
+      if (!event || event.status !== 'routing' || value.originEventId !== event.id ||
+          event.sourceId !== `manual:${value.repoKey}` || event.repoKey !== value.repoKey ||
+          event.kind !== 'manual_task' || event.attachments.length ||
+          !hasCodeChangeIntent(event.body) || value.mandate.goal !== event.title)
+        throw new Error('Automatic development intake lacks trusted code-change intent');
+    } else if (value.mandate.authority.kind !== 'trusted_rule')
+      throw new Error('Human-approved Mandate requires a verified authorization service');
     this.db.prepare(`INSERT INTO task
       (id,origin_event_id,repo_key,title,scope,mandate,state,iteration,priority,owner,base_ref,parent_task_id,created_at,updated_at,payload_json)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(value.id, value.originEventId ?? null, value.repoKey, value.title,
@@ -320,20 +331,116 @@ export class SqliteStore implements EventRepository {
     const request = approvalRequest.parse(input);
     this.transaction(() => {
       const current = this.getTask(request.taskId);
-      if (request.kind !== 'scope_change') throw new Error('Action approval is handled by the later effect gate');
-      if (!current || current.state !== 'waiting_human' || current.iteration !== request.iteration || !current.baseRef ||
-          current.baseRef !== request.sourceSha || current.mandate.policyVersion !== request.policyVersion)
+      const stageFive = request.kind === 'action' || request.proposedMandate.allowedActions.some(action =>
+        action === 'open_pr' || action === 'merge');
+      const reviewedSha = stageFive ? this.latestReviewedSha(request.taskId) : undefined;
+      if (!current || current.state !== 'waiting_human' ||
+          (request.kind === 'scope_change' && current.iteration !== request.iteration) ||
+          (stageFive ? reviewedSha !== request.sourceSha : current.baseRef !== request.sourceSha) ||
+          current.mandate.policyVersion !== request.policyVersion)
         throw new Error('Approval request does not match current Task, policy and SHA');
       if (request.kind === 'scope_change' && (request.proposedMandate.repoKey !== current.repoKey ||
           request.proposedMandate.sourceEventId !== current.mandate.sourceEventId ||
           request.proposedMandate.policyVersion !== current.mandate.policyVersion ||
-          request.proposedMandate.allowedActions.some(action => !['investigate', 'edit'].includes(action)) ||
+          request.proposedMandate.goal !== current.mandate.goal ||
+          request.proposedMandate.allowedActions.some(action => !['investigate', 'edit', 'open_pr', 'merge'].includes(action)) ||
+          current.mandate.allowedActions.some(action => !request.proposedMandate.allowedActions.includes(action)) ||
           !request.proposedMandate.allowedActions.includes('investigate') ||
           request.proposedMandate.authority.kind !== 'human_approval' ||
           request.proposedMandate.authority.approvalRef !== request.id))
-        throw new Error('Scope request is outside stage three authority');
+        throw new Error('Scope request is outside supported authority');
+      if (request.kind === 'action' && (!['open_pr', 'merge'].includes(request.action) ||
+          !current.mandate.allowedActions.includes(request.action) ||
+          this.latestReview(current.id)?.id !== request.reviewRecordId))
+        throw new Error('Action request is outside the current Task Mandate');
       this.saveRecord({ id: request.id, taskId: request.taskId, kind: 'approval_request', request, status: 'open',
         at: new Date().toISOString() });
+    });
+  }
+  latestReview(taskId: string): Extract<TaskRecord, { kind: 'review' }> | undefined {
+    const current = this.getTask(taskId);
+    if (!current) return undefined;
+    const row = this.db.prepare(`SELECT payload_json FROM task_record WHERE task_id=? AND kind='review'
+      ORDER BY at DESC,rowid DESC LIMIT 1`).get(taskId);
+    if (!row) return undefined;
+    const review = taskRecord.parse(JSON.parse(String(row.payload_json)));
+    return review.kind === 'review' && review.iteration === current.iteration ? review : undefined;
+  }
+  latestReviewedSha(taskId: string): string | undefined {
+    const review = this.latestReview(taskId);
+    if (!review) return undefined;
+    if (!isBlockingReview(review)) return review.subjectSha;
+    if (!review.findings.length) return undefined;
+    const rows = this.db.prepare(`SELECT payload_json FROM task_record WHERE task_id=?
+      AND kind='review_resolution' AND json_extract(payload_json,'$.reviewRecordId')=?`)
+      .all(taskId, review.id);
+    const resolved = new Set(rows.map(row => {
+      const value = taskRecord.parse(JSON.parse(String(row.payload_json)));
+      return value.kind === 'review_resolution' ? value.findingIndex : -1;
+    }));
+    return review.findings.every((_, index) => resolved.has(index) &&
+      this.hasPublishedReviewFinding(taskId, review.id, review.subjectSha, index)) ? review.subjectSha : undefined;
+  }
+  hasPublishedReviewFinding(taskId: string, reviewRecordId: string, subjectSha: string, findingIndex: number): boolean {
+    return Boolean(this.db.prepare(`SELECT 1 FROM task_record WHERE task_id=? AND kind='review_finding_publication'
+      AND json_extract(payload_json,'$.reviewRecordId')=?
+      AND json_extract(payload_json,'$.subjectSha')=?
+      AND json_extract(payload_json,'$.findingIndex')=? LIMIT 1`)
+      .get(taskId, reviewRecordId, subjectSha, findingIndex));
+  }
+  saveReviewResolution(input: Extract<TaskRecord, { kind: 'review_resolution' }>): boolean {
+    const value = taskRecord.parse(input);
+    if (value.kind !== 'review_resolution') throw new Error('Review resolution is invalid');
+    return this.transaction(() => {
+      const prior = this.db.prepare("SELECT payload_json FROM task_record WHERE kind='review_resolution' AND idempotency_key=?")
+        .get(value.idempotencyKey);
+      if (prior) {
+        const record = taskRecord.parse(JSON.parse(String(prior.payload_json)));
+        if (record.kind === 'review_resolution' && record.taskId === value.taskId &&
+            record.reviewRecordId === value.reviewRecordId && record.findingIndex === value.findingIndex &&
+            record.disposition === value.disposition && record.reason === value.reason &&
+            record.actor.id === value.actor.id) return this.latestReviewedSha(value.taskId) === value.subjectSha;
+        throw new Error('Review resolution idempotency key conflicts');
+      }
+      const current = this.getTask(value.taskId);
+      const review = this.latestReview(value.taskId);
+      if (!current || current.state !== 'waiting_human' || !review || !isBlockingReview(review) ||
+          review.id !== value.reviewRecordId || review.subjectSha !== value.subjectSha ||
+          value.findingIndex >= review.findings.length ||
+          !this.hasPublishedReviewFinding(value.taskId, review.id, review.subjectSha, value.findingIndex) ||
+          this.db.prepare(`SELECT 1 FROM task_record WHERE task_id=? AND kind='review_resolution'
+            AND json_extract(payload_json,'$.reviewRecordId')=?
+            AND json_extract(payload_json,'$.findingIndex')=?`).get(value.taskId, value.reviewRecordId, value.findingIndex))
+        throw new Error('Review finding is stale or already resolved');
+      this.saveRecord(value);
+      return this.latestReviewedSha(value.taskId) === value.subjectSha;
+    });
+  }
+  hasActionApproval(input: { taskId: string; action: 'open_pr' | 'merge'; sourceSha: string;
+    targetBranch: string; targetSha: string; changeRef?: string; policyVersion: string }): boolean {
+    const current = this.getTask(input.taskId);
+    const review = this.latestReview(input.taskId);
+    if (!current || current.state !== 'ready_to_merge' || !review ||
+        current.mandate.policyVersion !== input.policyVersion ||
+        !current.mandate.allowedActions.includes(input.action) ||
+        this.latestReviewedSha(input.taskId) !== input.sourceSha) return false;
+    const rows = this.db.prepare(`SELECT payload_json FROM task_record WHERE task_id=?
+      AND kind='approval_request' AND status='approved' ORDER BY at DESC,id DESC`).all(input.taskId);
+    return rows.some(row => {
+      const record = taskRecord.parse(JSON.parse(String(row.payload_json)));
+      if (record.kind !== 'approval_request') return false;
+      const request = approvalRequest.parse(record.request);
+      if (request.kind !== 'action' || request.action !== input.action ||
+          request.sourceSha !== input.sourceSha || request.reviewRecordId !== review.id ||
+          request.targetBranch !== input.targetBranch ||
+          request.targetSha !== input.targetSha || request.changeRef !== input.changeRef ||
+          request.policyVersion !== input.policyVersion) return false;
+      const approval = this.db.prepare(`SELECT payload_json FROM task_record WHERE task_id=?
+        AND kind='approval' AND json_extract(payload_json,'$.requestId')=? LIMIT 1`)
+        .get(input.taskId, request.id);
+      if (!approval) return false;
+      const decision = taskRecord.parse(JSON.parse(String(approval.payload_json)));
+      return decision.kind === 'approval' && decision.decision === 'approve';
     });
   }
   invalidateOpenApprovals(taskId: string, reopeningRecordId: string): void {
@@ -367,9 +474,12 @@ export class SqliteStore implements EventRepository {
       if (record.kind !== 'approval_request' || record.status !== 'open') throw new Error('Approval request is closed');
       const request = approvalRequest.parse(record.request);
       const current = this.getTask(record.taskId);
+      const stageFive = request.kind === 'action' || request.proposedMandate.allowedActions.some(action =>
+        action === 'open_pr' || action === 'merge');
       if (!current || current.state !== 'waiting_human' ||
           (request.kind === 'scope_change' && current.iteration !== request.iteration) ||
-          current.baseRef !== request.sourceSha ||
+          (stageFive ? this.latestReviewedSha(current.id) !== request.sourceSha : current.baseRef !== request.sourceSha) ||
+          (request.kind === 'action' && this.latestReview(current.id)?.id !== request.reviewRecordId) ||
           current.mandate.policyVersion !== request.policyVersion) throw new Error('Approval request is stale');
       this.saveRecord({ id: randomUUID(), taskId: current.id, kind: 'approval', requestId: request.id,
         action: request.kind === 'scope_change' ? 'edit' : request.action, subjectSha: request.sourceSha,
@@ -385,7 +495,7 @@ export class SqliteStore implements EventRepository {
         if (changed.changes !== 1) throw new Error('Approval Task state changed');
         return next;
       }
-      return undefined;
+      return request.kind === 'action' && value.decision === 'approve' ? current : undefined;
     });
   }
   recordAnswer(value: z.infer<typeof answer>): { task: Task; run: Run } | undefined {
@@ -454,6 +564,23 @@ export class SqliteStore implements EventRepository {
     const row = this.db.prepare('SELECT payload_json FROM run WHERE id=?').get(id);
     return row ? run.parse(JSON.parse(String(row.payload_json))) : undefined;
   }
+  countReviewBlocks(taskId: string, iteration: number): number {
+    const rows = this.db.prepare(`SELECT record.payload_json FROM task_record AS record
+      JOIN run ON run.id=record.run_id WHERE record.task_id=? AND run.iteration=?
+      AND run.stage='review' AND record.kind='review'`).all(taskId, iteration);
+    return rows.filter(row => {
+      const record = taskRecord.parse(JSON.parse(String(row.payload_json)));
+      return record.kind === 'review' && isBlockingReview(record);
+    }).length;
+  }
+  setRepairBaseRef(taskId: string, sourceSha: string): void {
+    const current = this.getTask(taskId);
+    if (!current || current.state !== 'developing' || !/^[a-f0-9]{40}$/.test(sourceSha))
+      throw new Error('Repair base does not match a developing Task');
+    const next = task.parse({ ...current, baseRef: sourceSha });
+    this.db.prepare('UPDATE task SET base_ref=?,payload_json=? WHERE id=? AND state=?')
+      .run(sourceSha, JSON.stringify(next), taskId, 'developing');
+  }
   replaceRun(input: Run, expectedStatus: Run['status']): void {
     const value = run.parse(input);
     const current = this.getRun(value.id);
@@ -470,17 +597,18 @@ export class SqliteStore implements EventRepository {
   }
   claimRun(workerId: string, at: string, leaseUntil: string, limits: {
     maxConcurrentRuns: number; perRepoConcurrentRuns: number; perAgentConcurrentRuns: number; reservedHumanResume: number;
-  }, agentKinds: readonly string[]): Run | undefined {
+  }, agentKinds: readonly string[], stages: readonly Run['stage'][] = ['investigate', 'develop']): Run | undefined {
     return this.transaction(() => {
       if (this.db.prepare(`SELECT 1 FROM run WHERE status='paused'
         AND json_extract(payload_json,'$.processTerminationUnconfirmed')=1 LIMIT 1`).get()) return undefined;
       const active = this.db.prepare(`SELECT r.task_id,r.session_id,r.agent_kind,r.queue_class,t.repo_key FROM run r
         JOIN task t ON t.id=r.task_id WHERE r.status='running'`).all();
       const queued = this.db.prepare(`SELECT r.id,t.repo_key FROM run r JOIN task t ON t.id=r.task_id
-        WHERE r.status='queued' AND r.stage IN ('investigate','develop')
+        WHERE r.status='queued'
         ORDER BY (r.queue_class='human_resume') DESC,r.priority DESC,r.created_at,r.id`).all();
       for (const row of queued) {
         const candidate = this.getRun(String(row.id))!;
+        if (!stages.includes(candidate.stage)) continue;
         if (this.getTask(candidate.taskId)?.state === 'waiting_human') continue;
         if (!candidate.agentKind || !agentKinds.includes(candidate.agentKind) ||
             active.length >= limits.maxConcurrentRuns ||
@@ -512,6 +640,58 @@ export class SqliteStore implements EventRepository {
         'status' in value ? value.status ?? null : null, 'subjectSha' in value ? value.subjectSha ?? null : null,
         'idempotencyKey' in value ? value.idempotencyKey ?? null : null,
         'actor' in value ? JSON.stringify(value.actor) : null, JSON.stringify(value), value.at);
+  }
+  saveEffectIntent(input: Extract<TaskRecord, { kind: 'effect' }> & { request: NonNullable<Extract<TaskRecord,
+    { kind: 'effect' }>['request']> }): Extract<TaskRecord, { kind: 'effect' }> {
+    return this.transaction(() => {
+      const prior = this.db.prepare("SELECT payload_json FROM task_record WHERE kind='effect' AND idempotency_key=?")
+        .get(input.idempotencyKey);
+      if (prior) {
+        const record = taskRecord.parse(JSON.parse(String(prior.payload_json)));
+        if (record.kind !== 'effect' || record.taskId !== input.taskId || record.action !== input.action ||
+            JSON.stringify(record.request) !== JSON.stringify(input.request))
+          throw new Error('Effect idempotency key conflicts with another request');
+        return record;
+      }
+      if (input.status !== 'pending' || input.subjectSha !== input.request.sourceSha)
+        throw new Error('Effect intent must bind its source SHA');
+      const owner = this.getTask(input.taskId);
+      if (!owner || input.request.repoKey !== owner.repoKey ||
+          !owner.mandate.allowedActions.includes(input.action) ||
+          owner.mandate.policyVersion !== input.request.policyVersion)
+        throw new Error('Effect intent is outside the current Task Mandate');
+      this.saveRecord(input);
+      return input;
+    });
+  }
+  rearmUncertainEffect(id: string): void {
+    this.transaction(() => {
+      const record = this.getRecord(id);
+      if (record?.kind !== 'effect' || record.action !== 'open_pr' || record.status !== 'uncertain' ||
+          !record.request || record.receipt) throw new Error('Effect is not eligible for recovery');
+      const next = taskRecord.parse({ ...record, status: 'pending' });
+      const changed = this.db.prepare('UPDATE task_record SET status=?,payload_json=? WHERE id=? AND status=?')
+        .run('pending', JSON.stringify(next), id, 'uncertain');
+      if (changed.changes !== 1) throw new Error('Effect changed before recovery');
+    });
+  }
+  settleEffect(id: string, status: 'done' | 'uncertain' | 'failed',
+    receipt?: Extract<TaskRecord, { kind: 'effect' }>['receipt']): void {
+    this.transaction(() => {
+      const record = this.getRecord(id);
+      if (record?.kind !== 'effect' || !['pending', 'uncertain'].includes(record.status) ||
+          (status === 'done' && !receipt) || (status !== 'done' && receipt))
+        throw new Error('Effect intent cannot be settled with this receipt');
+      if (receipt && (!record.request || receipt.observedSourceSha !== record.request.sourceSha ||
+          receipt.observedTargetSha !== record.request.targetSha ||
+          (record.action === 'merge' && (!receipt.merged || !receipt.mergedSha ||
+            receipt.changeId !== record.request.changeId))))
+        throw new Error('Effect receipt does not match the intent');
+      const next = taskRecord.parse({ ...record, status, receipt });
+      const changed = this.db.prepare('UPDATE task_record SET status=?,payload_json=? WHERE id=? AND status=?')
+        .run(status, JSON.stringify(next), id, record.status);
+      if (changed.changes !== 1) throw new Error('Effect intent changed before settlement');
+    });
   }
   setEventLinkStatus(taskId: string, eventId: string, from: 'pending' | 'delivered' | 'uncertain',
     to: 'delivered' | 'handled' | 'uncertain' | 'handback'): void {

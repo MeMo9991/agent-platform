@@ -39,7 +39,7 @@ export default function App() {
     : segments[0] === 'tasks' ? <TasksPage repoKeys={config.repoKeys} canDelete={config.roles.includes('command')} />
     : segments[0] === 'events' && segments[1] ? <EventPage id={decodeURIComponent(segments[1])} repoKeys={config.repoKeys} canRoute={config.roles.includes('route')} />
     : segments[0] === 'new' ? config.roles.includes('submit') ? <ManualSubmit repoKeys={config.repoKeys} /> : <p>当前凭据没有提交任务权限。</p>
-    : segments[0] === 'settings' ? config.roles.includes('configure') ? <SettingsPage /> : <p>当前凭据没有配置权限。</p> : <OverviewPage />;
+    : segments[0] === 'settings' ? config.roles.includes('configure') ? <SettingsPage /> : <p>当前凭据没有配置权限。</p> : <OverviewPage canApprove={config.roles.includes('approve')} />;
   const navigation = [
     { id: 'overview', href: '#/', label: '待办总览', icon: RiDashboardLine },
     { id: 'tasks', href: '#/tasks', label: '任务列表', icon: RiFileList2Line },

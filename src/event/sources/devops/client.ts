@@ -15,6 +15,8 @@ export function createDefectApiReaders(config: DefectSourceConfig,
     headers.set('qfctid', 'YQJT');
     headers.set('useragent', 'pc');
     headers.set('lang', 'zh-cn');
+    headers.set('origin', 'https://iwork.faw.cn');
+    headers.set('referer', 'https://iwork.faw.cn/');
     const response = await request(`${baseUrl}/${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
     if (!response.ok) throw new Error(`Defect API returned HTTP ${response.status}`);
     return response.json();

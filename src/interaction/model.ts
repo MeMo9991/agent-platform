@@ -16,8 +16,11 @@ export const routeReviewDecision = z.discriminatedUnion('choice', [
 export const approvalRequest = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('scope_change'), id, taskId: id, iteration: z.number().int().positive(),
     proposedMandate: mandate, sourceSha: id, policyVersion: id }),
-  z.object({ kind: z.literal('action'), id, taskId: id, action, sourceSha: id, targetSha: id.optional(), changeRef: id.optional(), environment: id.optional(), releaseVersion: id.optional(), releaseTargetDigest: id.optional(), policyVersion: id })
-    .superRefine((value, context) => { if (value.action === 'merge' && (!value.targetSha || !value.changeRef)) context.addIssue({ code: 'custom', message: 'Merge approval needs target SHA and change ref' });
+  z.object({ kind: z.literal('action'), id, taskId: id, action, sourceSha: id, reviewRecordId: id.optional(),
+    targetBranch: id.optional(), targetSha: id.optional(), changeRef: id.optional(), environment: id.optional(), releaseVersion: id.optional(), releaseTargetDigest: id.optional(), policyVersion: id })
+    .superRefine((value, context) => { if (['open_pr', 'merge'].includes(value.action) && (!value.targetBranch || !value.targetSha || !value.reviewRecordId))
+      context.addIssue({ code: 'custom', message: 'Code-host approval needs review, target branch and SHA' });
+      if (value.action === 'merge' && !value.changeRef) context.addIssue({ code: 'custom', message: 'Merge approval needs change ref' });
       if ((value.action === 'release' || value.action === 'rollback') && (!value.environment || !value.releaseVersion || !value.releaseTargetDigest)) context.addIssue({ code: 'custom', message: 'Release approval needs environment, version and target digest' }); }),
 ]);
 export const approvalDecision = z.object({ requestId: id, actor: humanActor, decision: z.enum(['approve', 'reject']), at: timestamp, idempotencyKey: id });

@@ -78,7 +78,8 @@ for (const outcome of ['passed', 'timeout', 'unavailable', 'unterminated', 'term
     const current = store.getTask(taskId)!;
     store.saveApprovalRequest({ kind: 'scope_change', id: 'scope', taskId, iteration: 1,
       sourceSha: baseSha, policyVersion: 'p1', proposedMandate: { ...current.mandate,
-        allowedActions: ['investigate', 'edit'], authority: { kind: 'human_approval', approvalRef: 'scope' } } });
+        allowedActions: ['investigate', 'edit'], maxAutoRisk: outcome === 'passed' ? 'high' : 'low',
+        authority: { kind: 'human_approval', approvalRef: 'scope' } } });
     await coordinator.onSignal({ kind: 'human_response', taskId, response: { kind: 'approval_decision', value: { requestId: 'scope', actor: { kind: 'human', id: 'owner' }, decision: 'approve',
       at: new Date().toISOString(), idempotencyKey: 'approval-key' } } });
     const logRef = join(directory, 'check.log');
@@ -109,7 +110,7 @@ for (const outcome of ['passed', 'timeout', 'unavailable', 'unterminated', 'term
           async terminate() { if (outcome === 'unterminated') return new Promise<never>(() => {});
             if (outcome === 'terminate-throws') throw new Error('Termination failed');
             terminated = true; return { terminated, logRef }; } }; } },
-      riskPolicy: { assess() { return 'low'; } }, policyVersion: 'p1',
+      riskPolicy: { assess() { return outcome === 'passed' ? 'high' : 'low'; } }, policyVersion: 'p1',
       localChecks: { 'agent-platform': [{ command: 'npm', args: ['test'],
         timeoutMs: outcome === 'timeout' || outcome === 'unterminated' || outcome === 'terminate-throws' ? 20 : 5000 }] },
       skillRepoPath: 'agent-platform', skillCommitSha: baseSha, maxRunMs: 60_000,

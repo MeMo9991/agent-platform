@@ -261,7 +261,10 @@ test('successful investigation requests SHA-bound edit scope and queues no devel
     assert.equal(store.db.prepare("SELECT count(*) AS n FROM run WHERE stage='develop'").get()?.n, 0);
     const request = store.getRecord(`scope-${claimed.id}`);
     assert.equal(request?.kind, 'approval_request');
-    if (request?.kind === 'approval_request') assert.equal((request.request as { sourceSha: string }).sourceSha, sha);
+    if (request?.kind === 'approval_request') {
+      assert.equal((request.request as { sourceSha: string }).sourceSha, sha);
+      assert.equal((request.request as { proposedMandate: { maxAutoRisk: string } }).proposedMandate.maxAutoRisk, 'high');
+    }
   } finally { store.close(); }
 });
 
@@ -371,6 +374,34 @@ test('verified runner receives linked input once and only its explicit receipt h
     assert.equal(store.getRun(runId)?.processTerminationUnconfirmed, true);
     assert.equal(store.getRun(runId)?.resultRef, undefined);
     assert.equal(store.db.prepare("SELECT count(*) AS n FROM task_record WHERE kind='agent_report' AND status='succeeded'").get()?.n, 0);
+  } finally { store.close(); }
+});
+
+test('confirmed Qoder startup exit does not block unrelated queued Runs', async () => {
+  const store = new SqliteStore(':memory:', { [sourceId]: [] });
+  try {
+    store.registerSource(sourceId, 'fixture', 'fixture', true);
+    store.accept(event);
+    const coordinator = createKernelCoordinator(store, { [sourceId]: 'agent-platform' },
+      'p1', 'fixture', 'qoder', ['agent-platform']);
+    coordinator.processPending();
+    const manager = createWorkerManager({ store, coordinator, enabledAgents: ['qoder'],
+      runners: { qoder: { capabilities: () => ({ start: 'supported' }),
+        async start() { throw Object.assign(new Error('Authentication failed'), { terminationConfirmed: true }); },
+        async read() { return { kind: 'unknown', runId: 'none' }; },
+        async cancel() { return { kind: 'accepted' }; } } },
+      workspace: { async prepare() { return { repoKey: 'agent-platform', path: '/tmp/confirmed-startup-exit',
+        baseSha: 'a'.repeat(40) }; } },
+      skills: { async load(ref) { return { ref, content: 'Investigate safely' }; } },
+      boundary: { async attest(value) { return { verified: true, runId: value.runId,
+        repoKey: value.repoKey, workspacePath: value.workspacePath,
+        mode: 'read', adapterVersion: 'test', configDigest: 'test' }; } },
+      skillRepoPath: 'agent-platform', skillCommitSha: 'a'.repeat(40), maxRunMs: 60_000,
+      limits: { maxConcurrentRuns: 2, perRepoConcurrentRuns: 2, perAgentConcurrentRuns: 2, reservedHumanResume: 1 } });
+    assert.equal(await manager.tick(), true);
+    const run = store.getRun(String(store.db.prepare('SELECT id FROM run').get()?.id));
+    assert.equal(run?.status, 'paused');
+    assert.equal(run?.processTerminationUnconfirmed, false);
   } finally { store.close(); }
 });
 

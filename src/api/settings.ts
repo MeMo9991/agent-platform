@@ -5,8 +5,9 @@ import { z } from 'zod';
 import { platformConfig, type PlatformConfig } from '../bootstrap/config.js';
 import { devopsDefectParameters } from '../bootstrap/devops-task.js';
 import { scheduleConfig, type ScheduleConfig } from '../bootstrap/scheduler.js';
+import { devopsCredentials, readCredentials, writeCredentials, credentialsExist } from '../bootstrap/devops-credentials.js';
 
-export const settingsGroup = z.enum(['repositories', 'sources', 'schedules', 'agents', 'budget', 'policyRef', 'releasePipelines', 'port']);
+export const settingsGroup = z.enum(['repositories', 'sources', 'schedules', 'agents', 'budget', 'policyRef', 'releasePipelines', 'port', 'devopsCredentials']);
 export type SettingsGroup = z.infer<typeof settingsGroup>;
 export type SettingsPaths = { platform: string; schedules: string };
 
@@ -50,13 +51,18 @@ function publicRepositories(platform: PlatformConfig) {
 }
 export function readSettings(paths: SettingsPaths) {
   const { platform, schedules, revision } = load(paths);
+  const creds = readCredentials();
   return { revision, restartRequired: true,
     groups: { repositories: publicRepositories(platform), sources: platform.sources, schedules: schedules.tasks,
       agents: platform.agents, budget: platform.budget, policyRef: platform.policyRef,
-      releasePipelines: platform.releasePipelines, port: platform.interaction?.port },
+      releasePipelines: platform.releasePipelines, port: platform.interaction?.port,
+      devopsCredentials: creds ? { authorization: '(已配置，留空保持不变)', cookie: '(已配置，留空保持不变)' }
+        : { authorization: '', cookie: '' } },
     protected: { actorId: platform.interaction?.actorId, roles: platform.interaction?.roles,
-      credentialFileConfigured: Boolean(platform.interaction?.credentialFile) } };
+      credentialFileConfigured: Boolean(platform.interaction?.credentialFile),
+      devopsCredentialsConfigured: credentialsExist() } };
 }
+
 function writeAtomic(path: string, value: unknown, expectedBytes: string): void {
   const target = resolve(path);
   const info = lstatSync(target);
@@ -72,6 +78,17 @@ function writeAtomic(path: string, value: unknown, expectedBytes: string): void 
 export function saveSettings(paths: SettingsPaths, group: SettingsGroup, expectedRevision: string, value: unknown) {
   const current = load(paths);
   if (current.revision !== expectedRevision) throw new Error('Configuration version changed; reload before saving');
+  if (group === 'devopsCredentials') {
+    const input = value as Record<string, unknown>;
+    const existing = readCredentials();
+    const authorization = typeof input.authorization === 'string' && !input.authorization.startsWith('(已配置')
+      ? input.authorization : existing?.authorization;
+    const cookie = typeof input.cookie === 'string' && !input.cookie.startsWith('(已配置')
+      ? input.cookie : existing?.cookie;
+    if (!authorization || !cookie) throw new Error('DevOps credentials require both authorization and cookie');
+    writeCredentials({ authorization, cookie });
+    return { revision: load(paths).revision, restartRequired: false };
+  }
   const nextPlatform: Record<string, unknown> = { ...current.platform };
   const nextSchedules: Record<string, unknown> = { ...current.schedules };
   if (group === 'schedules') nextSchedules.tasks = value;
