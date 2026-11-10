@@ -16,12 +16,17 @@
       "localPath": "."
     }
   ],
+  "projectGroups": [
+    { "projectKey": "devops-project-4655971863", "repoKeys": [] }
+  ],
   "sources": [
     {
       "id": "devops-assigned",
       "kind": "devops-defect",
-      "configRef": "devops-assigned-defects",
-      "enabled": true
+      "configRef": "devops-assigned",
+      "enabled": true,
+      "projectKey": "devops-project-4655971863",
+      "devops": { "businessProjectId": 4655971863, "pageSize": 10 }
     }
   ],
   "agents": [{ "kind": "qoder", "enabled": true }],

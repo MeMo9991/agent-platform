@@ -3,11 +3,11 @@ import { lstatSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
 import { platformConfig, type PlatformConfig } from '../bootstrap/config.js';
-import { devopsDefectParameters } from '../bootstrap/devops-task.js';
 import { scheduleConfig, type ScheduleConfig } from '../bootstrap/scheduler.js';
+import { validateScheduledSources } from '../bootstrap/start-schedules.js';
 import { devopsCredentials, readCredentials, writeCredentials, credentialsExist } from '../bootstrap/devops-credentials.js';
 
-export const settingsGroup = z.enum(['repositories', 'sources', 'schedules', 'agents', 'budget', 'policyRef', 'releasePipelines', 'port', 'devopsCredentials']);
+export const settingsGroup = z.enum(['repositories', 'projectGroups', 'sources', 'schedules', 'agents', 'budget', 'policyRef', 'releasePipelines', 'port', 'devopsCredentials']);
 export type SettingsGroup = z.infer<typeof settingsGroup>;
 export type SettingsPaths = { platform: string; schedules: string };
 
@@ -21,20 +21,11 @@ function load(paths: SettingsPaths): Loaded {
     platformBytes, scheduleBytes };
 }
 function validatePair(platform: PlatformConfig, schedules: ScheduleConfig): void {
-  const sourceIds = new Set<string>();
+  validateScheduledSources(platform, schedules);
   for (const task of schedules.tasks) {
     if (task.kind !== 'devops-defect-poll') {
       if (task.enabled) throw new Error(`No handler for scheduled task ${task.id}`);
-      continue;
     }
-    const params = devopsDefectParameters.parse(task.parameters);
-    if (sourceIds.has(params.sourceId)) throw new Error(`Duplicate scheduled scan for source ${params.sourceId}`);
-    sourceIds.add(params.sourceId);
-    const source = platform.sources.find(item => item.id === params.sourceId);
-    if (!source || source.kind !== 'devops-defect' || source.configRef !== task.id || (task.enabled && !source.enabled))
-      throw new Error(`Scheduled task ${task.id} has no matching enabled source`);
-    if (params.repoKey && !platform.repositories.some(repo => repo.repoKey === params.repoKey))
-      throw new Error(`Unknown repository ${params.repoKey} for scheduled task ${task.id}`);
   }
   if (!platform.agents.some(agent => agent.kind === 'qoder') ||
       platform.agents.some(agent => agent.enabled && agent.kind !== 'qoder'))
@@ -49,11 +40,16 @@ function publicRepositories(platform: PlatformConfig) {
     localPathConfigured: Boolean(repo.localPath), credentialsRefConfigured: Boolean(repo.credentialsRef) };
   });
 }
+function publicProjectGroups(platform: PlatformConfig) {
+  return platform.projectGroups.map(group => ({ projectKey: group.projectKey, repoKeys: group.repoKeys,
+    defaultRepoKey: group.defaultRepoKey, searchRootConfigured: Boolean(group.searchRoot) }));
+}
 export function readSettings(paths: SettingsPaths) {
   const { platform, schedules, revision } = load(paths);
   const creds = readCredentials();
   return { revision, restartRequired: true,
-    groups: { repositories: publicRepositories(platform), sources: platform.sources, schedules: schedules.tasks,
+    groups: { repositories: publicRepositories(platform), projectGroups: publicProjectGroups(platform),
+      sources: platform.sources, schedules: schedules.tasks,
       agents: platform.agents, budget: platform.budget, policyRef: platform.policyRef,
       releasePipelines: platform.releasePipelines, port: platform.interaction?.port,
       devopsCredentials: creds ? { authorization: '(已配置，留空保持不变)', cookie: '(已配置，留空保持不变)' }
@@ -92,6 +88,17 @@ export function saveSettings(paths: SettingsPaths, group: SettingsGroup, expecte
   const nextPlatform: Record<string, unknown> = { ...current.platform };
   const nextSchedules: Record<string, unknown> = { ...current.schedules };
   if (group === 'schedules') nextSchedules.tasks = value;
+  else if (group === 'projectGroups') {
+    if (!Array.isArray(value)) throw new Error('Project groups must be an array');
+    nextPlatform.projectGroups = value.map((item: unknown) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Invalid project group');
+      const group = item as Record<string, unknown>;
+      const previous = current.platform.projectGroups.find(existing => existing.projectKey === group.projectKey);
+      const { searchRootConfigured: _configured, ...fields } = group;
+      void _configured;
+      return { ...fields, searchRoot: group.searchRoot === null ? undefined : group.searchRoot ?? previous?.searchRoot };
+    });
+  }
   else if (group === 'repositories') {
     if (!Array.isArray(value)) throw new Error('Repositories must be an array');
     nextPlatform.repositories = value.map((item: unknown) => {

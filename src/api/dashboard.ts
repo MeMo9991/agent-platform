@@ -155,13 +155,16 @@ function linkedTaskId(store: SqliteStore, eventId: string): string | undefined {
       record.at DESC, record.id DESC LIMIT 1`).get(eventId);
   return row ? String(row.task_id) : undefined;
 }
-function safeEvent(store: SqliteStore, id: string) {
+function safeEvent(store: SqliteStore, id: string, sourceRepoKeys: Readonly<Record<string, readonly string[]>> = {}) {
   const event = store.get(id);
   if (!event) return undefined;
   const { metaData, routingData, attachments, ...publicEvent } = event;
   const routing = routingData && typeof routingData === 'object' ? routingData as Record<string, unknown> : {};
   const route = routing.decision && typeof routing.decision === 'object' ? routing.decision as Record<string, unknown> : routing;
-  return { ...publicEvent, taskId: linkedTaskId(store, id), attachments: attachments.map(item => ({ id: item.id, kind: item.kind,
+  return { ...publicEvent, allowedRepoKeys: sourceRepoKeys[event.sourceId],
+    repositorySelection: ['repository-name', 'file-name', 'default'].includes(String(metaData.repositorySelection))
+      ? metaData.repositorySelection : undefined,
+    taskId: linkedTaskId(store, id), attachments: attachments.map(item => ({ id: item.id, kind: item.kind,
     mimeType: item.mimeType, imageUrl: `/api/events/${encodeURIComponent(id)}/images/${encodeURIComponent(item.id)}` })),
     routing: { reason: typeof route.reason === 'string' ? route.reason : undefined,
       candidates: Array.isArray(route.candidates) ? route.candidates : [] } };
@@ -196,6 +199,7 @@ function protectedDirectory(path: string): string {
 }
 
 export type DashboardOptions = { actorId: string; repoKeys: readonly string[];
+  sourceRepoKeys?: Readonly<Record<string, readonly string[]>>;
   imageDirectory: string; attachmentReaders: Readonly<Record<string, AttachmentReader>>;
   runners?: Readonly<Record<string, AgentRunner | undefined>>; workerCapacity?: number;
   evidenceRoot?: string; takeoverEvidence?: TakeoverEvidencePorts; settingsPaths?: SettingsPaths;
@@ -245,7 +249,7 @@ export async function handleDashboard(request: IncomingMessage, response: Server
     if (request.method === 'GET' && path === '/api/inbox') {
       const { limit, offset } = page(url);
       const events = store.db.prepare("SELECT id FROM source_event WHERE status='needs_human' ORDER BY received_at,id LIMIT ? OFFSET ?")
-        .all(limit, offset).map(row => safeEvent(store, String(row.id)));
+        .all(limit, offset).map(row => safeEvent(store, String(row.id), options.sourceRepoKeys));
       const requests = store.db.prepare("SELECT payload_json FROM task_record WHERE kind IN ('question','approval_request') AND status='open' ORDER BY at,id LIMIT ? OFFSET ?")
         .all(limit, offset).map(row => safeRecord(JSON.parse(String(row.payload_json)), options.evidenceRoot ?? '', store));
       const tasks = store.db.prepare("SELECT id FROM task WHERE state IN ('failed','blocked','paused','waiting_human') ORDER BY updated_at DESC,id LIMIT ? OFFSET ?")
@@ -291,12 +295,12 @@ export async function handleDashboard(request: IncomingMessage, response: Server
       const records = store.db.prepare('SELECT payload_json FROM task_record WHERE task_id=? ORDER BY at,id').all(id)
         .map(row => safeRecord(JSON.parse(String(row.payload_json)), options.evidenceRoot ?? '', store));
       const events = store.db.prepare('SELECT DISTINCT event_id FROM task_record WHERE task_id=? AND event_id IS NOT NULL UNION SELECT origin_event_id FROM task WHERE id=? AND origin_event_id IS NOT NULL')
-        .all(id, id).map(row => safeEvent(store, String(row.event_id ?? row.origin_event_id)));
+        .all(id, id).map(row => safeEvent(store, String(row.event_id ?? row.origin_event_id), options.sourceRepoKeys));
       send(response, 200, { task, runs, records, events }); return true;
     }
     const eventMatch = /^\/api\/events\/([^/]+)$/.exec(path);
     if (request.method === 'GET' && eventMatch) {
-      const event = safeEvent(store, decodeURIComponent(eventMatch[1]!));
+      const event = safeEvent(store, decodeURIComponent(eventMatch[1]!), options.sourceRepoKeys);
       send(response, event ? 200 : 404, event ?? { error: 'Event not found' }); return true;
     }
     const reviewMatch = /^\/api\/tasks\/([^/]+)\/content-reviews$/.exec(path);
@@ -379,7 +383,7 @@ export async function handleDashboard(request: IncomingMessage, response: Server
       const value = routeReviewDecision.parse({ ...(await readBody(request, 65_536) as Record<string, unknown>),
         eventId, actor: { kind: 'human', id: options.actorId }, at: new Date().toISOString() });
       await coordinator.onSignal({ kind: 'human_response', response: { kind: 'route_decision', value } });
-      const event = safeEvent(store, eventId);
+      const event = safeEvent(store, eventId, options.sourceRepoKeys);
       send(response, 200, { ok: true, event, taskId: event?.taskId });
       return true;
     }

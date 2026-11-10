@@ -14,8 +14,6 @@ import { createMacQoderRuntime } from '../agent/worker/mac-sandbox.js';
 import { createGitWorkspaceManager } from '../agent/worker/workspace.js';
 import { createGitSkillLoader } from '../skills/git-loader.js';
 import { execFileSync } from 'node:child_process';
-import { loadScheduleConfig } from './scheduler.js';
-import { devopsDefectParameters } from './devops-task.js';
 import { createDevopsAttachmentReader } from '../event/sources/devops/attachment.js';
 import { startWorkerLoop } from './worker-loop.js';
 import { acquireInstanceLock } from './instance-lock.js';
@@ -51,14 +49,12 @@ const runtime = startConfiguredSchedules({
   (taskId, error) => { console.error(`Scheduled task ${taskId} failed`, error); });
 stopRuntime = runtime.stop;
 
-const schedule = loadScheduleConfig(process.env.AGENT_PLATFORM_SCHEDULES ?? 'config/schedules.json');
-const trustedRepoBySource = Object.fromEntries(schedule.tasks.filter(item => item.enabled && item.kind === 'devops-defect-poll')
-  .map(item => devopsDefectParameters.parse(item.parameters)).filter(item => item.repoKey)
-  .map(item => [item.sourceId, item.repoKey!]));
+const sourceRepoKeys = Object.fromEntries(platform.sources.filter(source => source.projectKey)
+  .map(source => [source.id, platform.projectGroups.find(group => group.projectKey === source.projectKey)!.repoKeys]));
+const trustedRepoBySource: Record<string, string | readonly string[]> = { ...sourceRepoKeys };
 for (const repo of platform.repositories) trustedRepoBySource[`manual:${repo.repoKey}`] = repo.repoKey;
-const attachmentReaders = Object.fromEntries(schedule.tasks.filter(item => item.enabled && item.kind === 'devops-defect-poll')
-  .map(item => devopsDefectParameters.parse(item.parameters))
-  .map(item => [item.sourceId, createDevopsAttachmentReader(item.sourceId, authorizationHeaders)]));
+const attachmentReaders = Object.fromEntries(platform.sources.filter(item => item.enabled && item.kind === 'devops-defect')
+  .map(item => [item.id, createDevopsAttachmentReader(item.id, authorizationHeaders)]));
 const imageDirectory = resolve('.runtime/manual-images');
 await mkdir(imageDirectory, { recursive: true, mode: 0o700 });
 for (const repo of platform.repositories) attachmentReaders[`manual:${repo.repoKey}`] =
@@ -83,7 +79,7 @@ const coordinator = createKernelCoordinator(runtime.store, trustedRepoBySource, 
   createTaskCandidateFinder(runtime.store), event => {
     const repo = platform.repositories.find(item => item.repoKey === event.repoKey);
     return repo && autoPrMandate(event, repo, platform.policyRef);
-  });
+  }, sourceRepoKeys);
 let routeTimer: ReturnType<typeof setInterval> | undefined;
 let ciTimer: ReturnType<typeof setInterval> | undefined;
 let ciTick: Promise<void> | undefined;
@@ -142,6 +138,7 @@ try {
     ...platform.interaction,
     dashboard: { actorId: platform.interaction.actorId,
       repoKeys: platform.repositories.map(repo => repo.repoKey),
+      sourceRepoKeys,
       imageDirectory, attachmentReaders, runners,
       evidenceRoot: resolve(root, '.runtime'),
       stage5OpenChange,
