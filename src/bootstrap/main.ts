@@ -24,6 +24,7 @@ import { createCodeHosts } from '../repository-ci/providers/index.js';
 import { createStage5OpenChange } from '../authorization/stage5-open-change.js';
 import { autoPrMandate, autoPrRuleRef } from '../authorization/auto-pr.js';
 import { randomUUID } from 'node:crypto';
+import { authorizationHeaders as defaultAuthorizationHeaders } from './devops-credentials.js';
 
 const platform = platformConfig.parse(JSON.parse(readFileSync(process.env.AGENT_PLATFORM_CONFIG ?? 'config/platform.json', 'utf8')));
 const databasePath = process.env.AGENT_PLATFORM_DATABASE ?? '.runtime/state/agent-platform.sqlite3';
@@ -33,17 +34,20 @@ const instanceLock = await acquireInstanceLock(databasePath, () => {
 });
 let stopRuntime: (() => Promise<void>) | undefined;
 try {
-const providerPath = process.env.AGENT_PLATFORM_AUTH_PROVIDER;
-if (!providerPath) throw new Error('AGENT_PLATFORM_AUTH_PROVIDER must name a trusted authorization provider module');
-const provider: unknown = await import(pathToFileURL(resolve(providerPath)).href);
-const authorizationHeaders = (provider as { authorizationHeaders?: unknown }).authorizationHeaders;
-if (typeof authorizationHeaders !== 'function') throw new Error('Authorization provider must export authorizationHeaders()');
+const authorizationHeaders = process.env.AGENT_PLATFORM_AUTH_PROVIDER
+  ? await (async () => {
+      const provider: unknown = await import(pathToFileURL(resolve(process.env.AGENT_PLATFORM_AUTH_PROVIDER!)).href);
+      const fn = (provider as { authorizationHeaders?: unknown }).authorizationHeaders;
+      if (typeof fn !== 'function') throw new Error('Authorization provider must export authorizationHeaders()');
+      return fn as () => Promise<HeadersInit>;
+    })()
+  : defaultAuthorizationHeaders;
 
 const runtime = startConfiguredSchedules({
   platform: process.env.AGENT_PLATFORM_CONFIG ?? 'config/platform.json',
   schedules: process.env.AGENT_PLATFORM_SCHEDULES ?? 'config/schedules.json',
   database: databasePath,
-}, authorizationHeaders as () => Promise<HeadersInit>,
+}, authorizationHeaders,
   (taskId, error) => { console.error(`Scheduled task ${taskId} failed`, error); });
 stopRuntime = runtime.stop;
 
@@ -54,8 +58,7 @@ const trustedRepoBySource = Object.fromEntries(schedule.tasks.filter(item => ite
 for (const repo of platform.repositories) trustedRepoBySource[`manual:${repo.repoKey}`] = repo.repoKey;
 const attachmentReaders = Object.fromEntries(schedule.tasks.filter(item => item.enabled && item.kind === 'devops-defect-poll')
   .map(item => devopsDefectParameters.parse(item.parameters))
-  .map(item => [item.sourceId, createDevopsAttachmentReader(item.sourceId,
-    authorizationHeaders as () => Promise<HeadersInit>)]));
+  .map(item => [item.sourceId, createDevopsAttachmentReader(item.sourceId, authorizationHeaders)]));
 const imageDirectory = resolve('.runtime/manual-images');
 await mkdir(imageDirectory, { recursive: true, mode: 0o700 });
 for (const repo of platform.repositories) attachmentReaders[`manual:${repo.repoKey}`] =

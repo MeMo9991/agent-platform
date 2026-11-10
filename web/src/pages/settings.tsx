@@ -5,15 +5,17 @@ import { Textarea } from '@/components/base/textarea/textarea';
 import { Card } from '../components/ui';
 import { cx } from '@/utils/cx';
 
-type Group = 'repositories' | 'sources' | 'schedules' | 'agents' | 'budget' | 'policyRef' | 'releasePipelines' | 'port';
+type Group = 'repositories' | 'sources' | 'schedules' | 'agents' | 'budget' | 'policyRef' | 'releasePipelines' | 'port' | 'devopsCredentials';
 type Settings = { revision: string; restartRequired: boolean; groups: Record<Group, unknown>;
-  protected: { actorId?: string; roles?: string[]; credentialFileConfigured: boolean } };
+  protected: { actorId?: string; roles?: string[]; credentialFileConfigured: boolean; devopsCredentialsConfigured: boolean } };
 const categories: { id: string; title: string; groups: { id: Group; title: string; hint: string }[] }[] = [
   { id: 'repositories', title: '仓库与检查', groups: [
     { id: 'repositories', title: '代码仓库', hint: '仓库、目标分支、必需检查和本地检查命令。绝对本机路径不回显；不填写会保留原值，填写 null 可清除。凭据引用只读，新仓库先使用未配置状态。' }] },
   { id: 'sources', title: '来源与调度', groups: [
     { id: 'sources', title: '事件来源', hint: '来源 ID、类型、关联配置及启用状态。' },
     { id: 'schedules', title: '轮询任务', hint: '轮询间隔、启动执行及 DevOps 参数。' }] },
+  { id: 'credentials', title: '外部认证', groups: [
+    { id: 'devopsCredentials', title: 'DevOps 凭据', hint: 'DevOps API 的 Authorization 和 Cookie。保存后立即生效，无需重启。' }] },
   { id: 'agents', title: 'Agent 与预算', groups: [
     { id: 'agents', title: 'Agent', hint: '当前阶段仅支持 Qoder。' },
     { id: 'budget', title: '运行预算', hint: '运行时长、并发上限及人工恢复保留名额。' },
@@ -65,7 +67,7 @@ export function SettingsPage() {
             rows={Math.min(18, Math.max(4, (drafts[group.id]?.split('\n').length ?? 4) + 1))} resize="vertical" className="font-mono"
             fieldClassName="bg-background-primary-default border border-separator-border" />
         </Card>)}{category === 'service' && <Card className="settings-card"><h3>受保护的信任根</h3>
-          <p className="muted">身份：{settings.protected.actorId ?? '未配置'} · 角色：{settings.protected.roles?.join('、') || '无'} · 凭据文件：{settings.protected.credentialFileConfigured ? '已配置' : '未配置'}</p>
+          <p className="muted">身份：{settings.protected.actorId ?? '未配置'} · 角色：{settings.protected.roles?.join('、') || '无'} · 凭据文件：{settings.protected.credentialFileConfigured ? '已配置' : '未配置'} · DevOps 凭据：{settings.protected.devopsCredentialsConfigured ? '已配置' : '未配置'}</p>
           <p className="muted">这些字段只能在受信配置文件中维护，API 不返回凭据内容或文件路径。</p></Card>}</>}
       </div></div></div>;
 }
