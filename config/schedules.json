@@ -5,18 +5,9 @@
       "enabled": false,
       "intervalSeconds": 300,
       "runOnStart": true,
-      "projectKey": "devops-project-cloudbom",
-      "kind": "devops-defect-poll",
-      "businessProjectId": 4655971863,
-      "pageSize": 10
-    },
-    {
-      "id": "agent-platform-prs",
-      "enabled": false,
-      "intervalSeconds": 300,
-      "runOnStart": false,
-      "projectKey": "agent-platform",
-      "kind": "github-pr-poll"
+      "parameters": {
+        "sourceId": "devops-assigned"
+      }
     }
   ]
 }
