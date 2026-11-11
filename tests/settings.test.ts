@@ -20,21 +20,14 @@ test('settings save validates groups, preserves trust roots and hides local path
     credentialsRef: 'unconfigured', localPath: '/private/secret/new-service' });
   platform.interaction.credentialFile = '/private/secret/token';
   platform.projectGroups[0].searchRoot = '/private/secret/projects';
-  platform.projectGroups[1].searchRoot = '/private/secret/cloudbom';
-  platform.projectGroups[1].defaultRepoKey = 'new-service';
   writeFileSync(paths.platform, JSON.stringify(platform));
   writeFileSync(paths.schedules, readFileSync('config/schedules.json'));
   try {
     const before = readSettings(paths);
     assert.equal(JSON.stringify(before).includes('/private/secret'), false);
-    const repos = before.groups.projectGroups[0].repositories;
-    assert.equal(repos[0].localPath, undefined);
-    assert.equal(repos[0].localPathConfigured, true);
-    assert.equal(repos[0].credentialsRefConfigured, true);
-    const service = before.groups.projectGroups[1].repositories[0];
-    assert.deepEqual(service.autoPr, { enabled: false, allowedPrefixes: [] });
-    assert.equal(service.credentialsRefConfigured, false);
-    assert.equal(service.localPathConfigured, true);
+    assert.equal(before.groups.repositories[0].localPath, undefined);
+    assert.equal(before.groups.repositories[0].localPathConfigured, true);
+    assert.equal(before.groups.repositories[0].credentialsRefConfigured, true);
     assert.equal(before.groups.projectGroups[0].searchRootConfigured, true);
     assert.equal(before.protected.credentialFileConfigured, true);
     const changed = structuredClone(before.groups.projectGroups);
@@ -49,19 +42,14 @@ test('settings save validates groups, preserves trust roots and hides local path
     assert.equal(persisted.projectGroups[1].repositories[0].localPath, '/private/secret/new-service');
     assert.equal(persisted.projectGroups[0].repositories[0].targetBranch, 'develop');
     assert.deepEqual(persisted.interaction, platform.interaction);
-    const groups = structuredClone(readSettings(paths).groups.projectGroups);
-    groups[0].defaultRepoKey = 'agent-platform';
+    const groups = structuredClone(before.groups.projectGroups);
+    groups[0].repoKeys = ['agent-platform'];
     const grouped = saveSettings(paths, 'projectGroups', saved.revision, groups);
     const groupedFile = JSON.parse(readFileSync(paths.platform, 'utf8')) as Record<string, any>;
     assert.equal(groupedFile.projectGroups[0].searchRoot, '/private/secret/projects');
-    assert.equal(groupedFile.projectGroups[0].defaultRepoKey, 'agent-platform');
-    const renamed = structuredClone(readSettings(paths).groups.projectGroups);
-    renamed[1].projectKey = 'devops-project-cloudbom';
-    const renamedResult = saveSettings(paths, 'projectGroups', grouped.revision, renamed);
-    assert.equal(JSON.parse(readFileSync(paths.platform, 'utf8')).projectGroups[1].searchRoot, '/private/secret/cloudbom');
-    assert.equal(JSON.parse(readFileSync(paths.schedules, 'utf8')).tasks[0].projectKey, 'devops-project-cloudbom');
+    assert.deepEqual(groupedFile.projectGroups[0].repoKeys, ['agent-platform']);
     assert.throws(() => saveSettings(paths, 'budget', before.revision, before.groups.budget), /version changed/);
-    assert.throws(() => saveSettings(paths, 'port', renamedResult.revision, 70000));
+    assert.throws(() => saveSettings(paths, 'port', grouped.revision, 70000));
     assert.equal((JSON.parse(readFileSync(paths.platform, 'utf8')) as Record<string, any>).interaction.port, platform.interaction.port);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

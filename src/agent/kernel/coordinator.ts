@@ -45,10 +45,11 @@ export interface KernelStore extends EventLoopStore {
   invalidateOpenApprovals(taskId: string, reopeningRecordId: string): void;
 }
 
-export function createKernelCoordinator(store: KernelStore, trustedRepoBySource: Readonly<Record<string, string>>,
+export function createKernelCoordinator(store: KernelStore, trustedRepoBySource: Readonly<Record<string, string | readonly string[]>>,
   policyVersion: string, ruleRef: string, agentKind: string,
   allowedRepos: readonly string[], finder: TaskCandidateFinder,
-  autoMandate?: (event: SourceEvent) => Task['mandate'] | undefined): KernelCoordinator & { processPending(limit?: number): number;
+  autoMandate?: (event: SourceEvent) => Task['mandate'] | undefined,
+  sourceRepoKeys: Readonly<Record<string, readonly string[]>> = {}): KernelCoordinator & { processPending(limit?: number): number;
     resolveHumanRoute(value: z.infer<typeof routeReviewDecision>): string | undefined } {
   const eventLoop = createEventLoop(store, trustedRepoBySource, policyVersion, ruleRef, agentKind, finder, 60_000, autoMandate);
   const actor = { kind: 'system' as const, id: 'kernel' };
@@ -104,7 +105,7 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
         }
         const owner = value.choice === 'existing_task' ? store.getTask(value.taskId)
           : value.choice === 'new_task' && value.parentTaskId ? store.getTask(value.parentTaskId) : undefined;
-        const routed = decideHumanRoute(value, event, owner, allowedRepos, policyVersion);
+        const routed = decideHumanRoute(value, event, owner, sourceRepoKeys[event.sourceId] ?? allowedRepos, policyVersion);
         const automatic = routed.kind === 'new_task' ? autoMandate?.(event) : undefined;
         const decision = automatic && routed.kind === 'new_task' && automatic.repoKey === routed.repoKey
           ? { ...routed, mandate: automatic } : routed;

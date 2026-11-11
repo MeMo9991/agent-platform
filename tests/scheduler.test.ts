@@ -10,8 +10,8 @@ import { startConfiguredSchedules } from '../src/bootstrap/start-schedules.js';
 test('schedule file binds scans to project groups and rejects duplicate identities', () => {
   const config = loadScheduleConfig('config/schedules.json');
   assert.deepEqual(config.tasks.map(task => [task.id, task.kind, task.intervalSeconds]),
-    [['devops-assigned', 'devops-defect-poll', 300], ['agent-platform-prs', 'github-pr-poll', 300]]);
-  assert.equal(config.tasks[0]?.projectKey, 'devops-project-4655971863');
+    [['devops-assigned-defects', 'devops-defect-poll', 300]]);
+  assert.deepEqual(config.tasks[0]?.parameters, { sourceId: 'devops-assigned' });
   assert.throws(() => scheduleConfig.parse({ tasks: [config.tasks[0], config.tasks[0]] }), /Duplicate scheduled task ID/);
   assert.throws(() => startSchedules(config, {}, () => {}), /No handler/);
 });
@@ -25,13 +25,15 @@ test('startup rejects duplicate scans, invalid DevOps projects and unknown group
     writeFileSync(paths.platform, JSON.stringify(platform));
     writeFileSync(paths.schedules, JSON.stringify({ tasks: [schedule.tasks[0],
       { ...schedule.tasks[0], id: 'second-scan' }] }));
-    assert.throws(() => startConfiguredSchedules(paths, async () => ({}), () => {}), /Duplicate scheduled scan for project group/);
-    writeFileSync(paths.schedules, JSON.stringify({ tasks: [{ ...schedule.tasks[0], businessProjectId: 0 }] }));
+    assert.throws(() => startConfiguredSchedules(paths, async () => ({}), () => {}), /Duplicate scheduled scan for source/);
+    platform.sources[0].devops.businessProjectId = 0;
+    writeFileSync(paths.platform, JSON.stringify(platform));
     assert.throws(() => startConfiguredSchedules(paths, async () => ({}), () => {}), /businessProjectId/);
-    writeFileSync(paths.schedules, JSON.stringify({ tasks: [{ ...schedule.tasks[0], projectKey: 'missing' }] }));
-    assert.throws(() => startConfiguredSchedules(paths, async () => ({}), () => {}), /matching project group/);
-    writeFileSync(paths.schedules, JSON.stringify({ tasks: [{ ...schedule.tasks[0], id: 'manual:agent-platform' }] }));
-    assert.throws(() => startConfiguredSchedules(paths, async () => ({}), () => {}), /reserved event source ID/);
+    platform.sources[0].devops.businessProjectId = 4655971863;
+    writeFileSync(paths.schedules, JSON.stringify(schedule));
+    platform.sources[0].enabled = false;
+    writeFileSync(paths.platform, JSON.stringify(platform));
+    assert.throws(() => startConfiguredSchedules(paths, async () => ({}), () => {}), /matching enabled DevOps source/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

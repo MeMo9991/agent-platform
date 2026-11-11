@@ -200,8 +200,6 @@ function protectedDirectory(path: string): string {
 }
 
 export type DashboardOptions = { actorId: string; repoKeys: readonly string[];
-  projectGroups?: Readonly<Record<string, { repoKeys: readonly string[]; defaultRepoKey?: string }>>;
-  selectRepositoryByGroup?: Readonly<Record<string, (title: string, body: string) => { repoKey: string } | undefined>>;
   sourceRepoKeys?: Readonly<Record<string, readonly string[]>>;
   imageDirectory: string; attachmentReaders: Readonly<Record<string, AttachmentReader>>;
   runners?: Readonly<Record<string, AgentRunner | undefined>>; workerCapacity?: number;

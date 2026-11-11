@@ -50,10 +50,17 @@
       "repositories": []
     }
   ],
-  "agents": [
+  "projectGroups": [
+    { "projectKey": "devops-project-4655971863", "repoKeys": [] }
+  ],
+  "sources": [
     {
-      "kind": "qoder",
-      "enabled": true
+      "id": "devops-assigned",
+      "kind": "devops-defect",
+      "configRef": "devops-assigned",
+      "enabled": true,
+      "projectKey": "devops-project-4655971863",
+      "devops": { "businessProjectId": 4655971863, "pageSize": 10 }
     }
   ],
   "interaction": {
