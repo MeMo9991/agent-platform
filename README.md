@@ -16,11 +16,11 @@ npm run selfcheck
 
 事件来源配置必须为每个 `sourceId` 指定可保留的 `metaData` 字段；入口和仓储都拒绝未列入的字段。默认 Mandate 仅由受信接单规则生成低风险调查授权；扩大授权必须来自平台核验过的人工审批记录，或经显式启用的低风险自动 PR 规则。交互 API 在每次请求中校验 Bearer 凭据，并由服务端指定人工身份；审批角色、请求状态、Task iteration、策略版本和代码 SHA 在写入时校验。外部动作仍由后续阶段的门禁在执行前重检。
 
-阶段 2 的任务由 `config/schedules.json` 配置间隔、启停和 `sourceId`；`config/platform.json` 注册受信来源、项目组和各 Git 仓库。DevOps 的 `businessProjectId`、`pageSize` 放在来源配置中。启动时先校验任务、来源和项目组，再注册来源并启动定时器；同一来源不能配置多个扫描任务。SQLite 写入也会拒绝未注册或已禁用的来源。修改配置后需重启。
+`config/platform.json` 的 `projectGroups` 直接包含各组仓库；所有项目组都可人工提交事件。`config/schedules.json` 的任务通过 `projectKey` 指向项目组，任务 `id` 是稳定的扫描事件来源 ID。DevOps 缺陷任务在自身配置 `businessProjectId` 和 `pageSize`；GitHub PR 任务扫描组内仓库面向各自 `targetBranch` 的开放 PR。新增同组仓库只改该项目组，新增扫描类型才需要实现一次适配器。启动时校验项目组和任务并注册来源；SQLite 拒绝未注册或已禁用的来源。修改配置后需重启。
 
-微服务项目组用 `repoKeys` 列出允许的仓库，`searchRoot` 指定私有本地目录，`defaultRepoKey` 指定无明确代码线索时的主责仓库。每个仓库仍单独配置 GitLab/GitHub 项目及 `localPath`；只有路径位于 `searchRoot` 内且 Git `origin` 与受信配置一致时才可自动选择。来源文本明确包含唯一仓库键，或两个代码标识命中同一仓库的已跟踪文件名时选该仓库；否则选已就绪的默认仓库。自动选择只创建调查范围，不授予 DevOps 事件自动改码或提 PR 权限。既有事件和 Task 不会因配置修改重新归属。
+微服务项目组用 `searchRoot` 指定私有本地目录，用 `defaultRepoKey` 指定无明确代码线索时的主责仓库。组内各仓库分别配置远程项目、本地 `localPath` 和合并目标 `targetBranch`；只有路径位于 `searchRoot` 内且 Git `origin` 与受信配置一致时才可自动选择。来源文本明确包含唯一仓库键，或两个代码标识命中同一仓库的已跟踪文件名时选该仓库；否则选已就绪的默认仓库。人工提交先选项目组，可让系统自动选仓或在组内指定仓库。自动选择只创建调查范围，不授予 DevOps 或 GitHub PR 事件自动改码或提 PR 权限。既有事件和 Task 不会因配置修改重新归属。
 
-仓库内的 `config/platform.json` 保留一个空的项目组示例。实际本机路径应放在 Git 忽略的 `.runtime/` 配置文件中，通过 `AGENT_PLATFORM_CONFIG` 指向该文件；配置页不会回显绝对 `searchRoot` 和 `localPath`。未配置可用仓库的来源事件进入人工复核。
+仓库内的 `config/platform.json` 保留一个空的 DevOps 项目组示例和一个平台自身项目组。实际本机路径应放在 Git 忽略的 `.runtime/` 配置文件中，通过 `AGENT_PLATFORM_CONFIG` 指向该文件；配置页不会回显绝对 `searchRoot` 和 `localPath`。未配置可用仓库的缺陷事件进入人工复核。默认 GitHub PR 任务需 `AGENT_PLATFORM_GITHUB_TOKEN` 提供读取 PR 的令牌；它只发现开放 PR，跳过平台任务创建的 PR 分支。平台已关联的 PR 状态仍由原有代码托管轮询处理。
 
 服务入口是 `npm start`（先运行 `npm run build`）。启动前需设置 `AGENT_PLATFORM_AUTH_PROVIDER` 为受信 JavaScript 模块路径，该模块导出异步 `authorizationHeaders()`，返回当前请求所需的请求头；仓库尚未实现凭据获取与刷新。可用 `AGENT_PLATFORM_CONFIG`、`AGENT_PLATFORM_SCHEDULES`、`AGENT_PLATFORM_DATABASE` 覆盖三个默认路径。默认数据库位于 `.runtime/state/agent-platform.sqlite3`；自定义数据库所在目录必须归当前服务账号所有，且权限不能开放给其他账号。旧位置的数据库不会自动迁移，已有数据应在停服后备份并迁入私有目录。默认缺陷任务启动即扫描，此后每 300 秒扫描一次；停止时等待当前扫描完成并关闭数据库。每轮从第一页重扫，页码在并发增删时可能移动。真实接口演练待鉴权方案提供后进行。
 

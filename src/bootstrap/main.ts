@@ -137,6 +137,10 @@ try {
     ...platform.interaction,
     dashboard: { actorId: platform.interaction.actorId,
       repoKeys: platform.repositories.map(repo => repo.repoKey),
+      projectGroups: Object.fromEntries(platform.projectGroups.map(group => [group.projectKey,
+        { repoKeys: group.repoKeys, defaultRepoKey: group.defaultRepoKey }])),
+      selectRepositoryByGroup: Object.fromEntries(platform.projectGroups.map(group =>
+        [group.projectKey, createRepositorySelector(group, platform.repositories)])),
       sourceRepoKeys,
       imageDirectory, attachmentReaders, runners,
       evidenceRoot: resolve(root, '.runtime'),

@@ -3,21 +3,40 @@ import { createEventIngress } from '../event/ingress.js';
 import { defectMetadataFields } from '../event/sources/devops/defects.js';
 import type { MetadataFields } from '../event/model.js';
 import { SqliteStore } from '../storage/sqlite/store.js';
-import { devopsDefectSource, platformConfig, type PlatformConfig } from './config.js';
-import { createDevopsDefectTask, devopsDefectParameters } from './devops-task.js';
+import { platformConfig, type PlatformConfig } from './config.js';
+import { createDevopsDefectTask } from './devops-task.js';
+import { createGithubPrTask, githubPrMetadataFields } from './github-pr-task.js';
 import { loadScheduleConfig, startSchedules, type ScheduleConfig } from './scheduler.js';
 
 export function validateScheduledSources(platform: PlatformConfig, schedule: ScheduleConfig): void {
-  const sourceIds = new Set<string>();
-  for (const task of schedule.tasks.filter(task => task.kind === 'devops-defect-poll')) {
-    const { sourceId } = devopsDefectParameters.parse(task.parameters);
-    if (sourceIds.has(sourceId)) throw new Error(`Duplicate scheduled scan for source ${sourceId}`);
-    sourceIds.add(sourceId);
-    const source = platform.sources.find(item => item.id === sourceId);
-    if (!source || source.kind !== 'devops-defect' || (task.enabled && !source.enabled))
-      throw new Error(`Scheduled task ${task.id} has no matching enabled DevOps source`);
-    devopsDefectSource.parse(source);
+  const scans = new Set<string>();
+  const sourceIds = new Set(platform.sources.map(source => source.id));
+  const devopsProjects = new Set<number>();
+  for (const task of schedule.tasks) {
+    if (sourceIds.has(task.id) || task.id.startsWith('manual:'))
+      throw new Error(`Duplicate or reserved event source ID ${task.id}`);
+    sourceIds.add(task.id);
+    const group = platform.projectGroups.find(item => item.projectKey === task.projectKey);
+    if (!group) throw new Error(`Scheduled task ${task.id} has no matching project group`);
+    const scan = `${task.kind}:${task.projectKey}`;
+    if (scans.has(scan)) throw new Error(`Duplicate scheduled scan for project group ${task.projectKey}`);
+    scans.add(scan);
+    if (task.kind === 'devops-defect-poll') {
+      if (devopsProjects.has(task.businessProjectId)) throw new Error('Duplicate DevOps businessProjectId');
+      devopsProjects.add(task.businessProjectId);
+    } else if (!group.repositories.length || group.repositories.some(repo => repo.provider !== 'github'))
+      throw new Error(`GitHub PR scan requires GitHub repositories in ${task.projectKey}`);
   }
+}
+
+export function withScheduledSources(platform: PlatformConfig, schedule: ScheduleConfig): PlatformConfig {
+  validateScheduledSources(platform, schedule);
+  return { ...platform, sources: [...platform.sources, ...schedule.tasks.map(task => ({
+    id: task.id, kind: task.kind === 'devops-defect-poll' ? 'devops-defect' : 'github-pr',
+    configRef: task.id, enabled: task.enabled, projectKey: task.projectKey,
+    ...(task.kind === 'devops-defect-poll' ? { devops: {
+      businessProjectId: task.businessProjectId, pageSize: task.pageSize } } : {}),
+  }))] };
 }
 
 export function startConfiguredSchedules(paths: { platform: string; schedules: string; database: string },
@@ -25,9 +44,9 @@ export function startConfiguredSchedules(paths: { platform: string; schedules: s
   request: typeof fetch = fetch): { store: SqliteStore; platform: PlatformConfig; stop: () => Promise<void> } {
   const configured = platformConfig.parse(JSON.parse(readFileSync(paths.platform, 'utf8')));
   const schedule = loadScheduleConfig(paths.schedules);
-  validateScheduledSources(platform, schedule);
-  const metadata: Record<string, readonly string[]> = Object.fromEntries(platform.sources.filter(source => source.kind === 'devops-defect')
-    .map(source => [source.id, defectMetadataFields])) satisfies MetadataFields;
+  const platform = withScheduledSources(configured, schedule);
+  const metadata: Record<string, readonly string[]> = Object.fromEntries(platform.sources.map(source =>
+    [source.id, source.kind === 'devops-defect' ? defectMetadataFields : githubPrMetadataFields])) satisfies MetadataFields;
   for (const repo of platform.repositories) metadata[`manual:${repo.repoKey}`] = ['contentDigest'];
   const store = new SqliteStore(paths.database, metadata);
   try {
@@ -38,6 +57,7 @@ export function startConfiguredSchedules(paths: { platform: string; schedules: s
     const ingress = createEventIngress(store, metadata);
     const stopTimers = startSchedules(schedule, {
       'devops-defect-poll': createDevopsDefectTask(platform, ingress, authorizationHeaders, request),
+      'github-pr-poll': createGithubPrTask(platform, ingress, request),
     }, onError);
     let stopped = false;
     return { store, platform, async stop() { if (stopped) return; stopped = true; await stopTimers(); store.close(); } };
