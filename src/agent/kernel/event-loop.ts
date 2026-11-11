@@ -13,7 +13,7 @@ export interface EventLoopStore {
   commitRoute(eventId: string, plan: RoutePlan, at: string): string | undefined;
 }
 
-export function createEventLoop(store: EventLoopStore, trustedRepoBySource: Readonly<Record<string, string>>,
+export function createEventLoop(store: EventLoopStore, trustedRepoBySource: Readonly<Record<string, string | readonly string[]>>,
   policyVersion: string, ruleRef: string, agentKind: string, finder: TaskCandidateFinder, leaseMs = 60_000,
   autoMandate?: (event: SourceEvent) => TaskMandate | undefined) {
   return { processOne(): boolean {

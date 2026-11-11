@@ -11,9 +11,9 @@ test('schedule file binds scans to project groups and rejects duplicate identiti
   const config = loadScheduleConfig('config/schedules.json');
   assert.deepEqual(config.tasks.map(task => [task.id, task.kind, task.intervalSeconds]),
     [['devops-assigned', 'devops-defect-poll', 300], ['agent-platform-prs', 'github-pr-poll', 300]]);
-  assert.equal(config.tasks[0]?.projectKey, 'devops-project-4655971863');
+  assert.equal(config.tasks[0]?.projectKey, 'devops-project-cloudbom');
   assert.throws(() => scheduleConfig.parse({ tasks: [config.tasks[0], config.tasks[0]] }), /Duplicate scheduled task ID/);
-  assert.throws(() => startSchedules(config, {}, () => {}), /No handler/);
+  assert.throws(() => startSchedules({ tasks: config.tasks.map(task => ({ ...task, enabled: true })) }, {}, () => {}), /No handler/);
 });
 
 test('startup rejects duplicate scans, invalid DevOps projects and unknown groups before timers start', () => {

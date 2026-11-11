@@ -56,10 +56,10 @@ test('settings save validates groups, preserves trust roots and hides local path
     assert.equal(groupedFile.projectGroups[0].searchRoot, '/private/secret/projects');
     assert.equal(groupedFile.projectGroups[0].defaultRepoKey, 'agent-platform');
     const renamed = structuredClone(readSettings(paths).groups.projectGroups);
-    renamed[1].projectKey = 'devops-project-cloudbom';
+    renamed[1].projectKey = 'devops-project-renamed';
     const renamedResult = saveSettings(paths, 'projectGroups', grouped.revision, renamed);
     assert.equal(JSON.parse(readFileSync(paths.platform, 'utf8')).projectGroups[1].searchRoot, '/private/secret/cloudbom');
-    assert.equal(JSON.parse(readFileSync(paths.schedules, 'utf8')).tasks[0].projectKey, 'devops-project-cloudbom');
+    assert.equal(JSON.parse(readFileSync(paths.schedules, 'utf8')).tasks[0].projectKey, 'devops-project-renamed');
     assert.throws(() => saveSettings(paths, 'budget', before.revision, before.groups.budget), /version changed/);
     assert.throws(() => saveSettings(paths, 'port', renamedResult.revision, 70000));
     assert.equal((JSON.parse(readFileSync(paths.platform, 'utf8')) as Record<string, any>).interaction.port, platform.interaction.port);

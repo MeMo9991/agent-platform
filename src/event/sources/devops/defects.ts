@@ -14,20 +14,22 @@ const defectPage = z.object({
   data: z.object({ pageNum: z.number().int().positive(), pageSize: z.number().int().positive(),
     total: z.number().int().nonnegative(), list: z.array(defect) }),
 });
-export const defectMetadataFields = ['businessProjectId', 'statusId', 'descriptionId', 'priority', 'environment', 'gmtCreated', 'gmtModified'] as const;
-export type DefectSourceConfig = { sourceId: string; businessProjectId: number; repoKey?: string; pageSize?: number };
+export const defectMetadataFields = ['businessProjectId', 'statusId', 'descriptionId', 'priority', 'environment', 'gmtCreated', 'gmtModified', 'repositorySelection'] as const;
+export type DefectSourceConfig = { sourceId: string; businessProjectId: number; pageSize?: number };
+export type RepositorySelection = { repoKey: string; reason: 'repository-name' | 'file-name' | 'default' };
 
 export function normalizeDefect(raw: z.infer<typeof defect>, config: DefectSourceConfig,
-  detail: { body: string; attachments: NormalizedEvent['attachments'] }): NormalizedEvent {
+  detail: { body: string; attachments: NormalizedEvent['attachments'] }, selection?: RepositorySelection): NormalizedEvent {
   if (raw.businessProjectId !== config.businessProjectId) throw new Error(`Unexpected project for defect ${raw.id}`);
   const revisionFacts = [raw.gmtModified, raw.subject, detail.body, detail.attachments, raw.descriptionId, raw.statusId, raw.priority, raw.environment];
   return {
     sourceId: config.sourceId, externalId: String(raw.id), objectKey: String(raw.id), kind: 'bug',
     revision: createHash('sha256').update(JSON.stringify(revisionFacts)).digest('hex'),
-    title: raw.subject, body: detail.body, repoKey: config.repoKey,
+    title: raw.subject, body: detail.body, repoKey: selection?.repoKey,
     attachments: detail.attachments,
     metaData: { businessProjectId: raw.businessProjectId, statusId: raw.statusId, descriptionId: raw.descriptionId,
-      priority: raw.priority, environment: raw.environment, gmtCreated: raw.gmtCreated, gmtModified: raw.gmtModified },
+      priority: raw.priority, environment: raw.environment, gmtCreated: raw.gmtCreated, gmtModified: raw.gmtModified,
+      ...(selection ? { repositorySelection: selection.reason } : {}) },
   };
 }
 
@@ -40,7 +42,8 @@ export function parseDefectPage(payload: unknown, config: DefectSourceConfig, ex
 }
 
 export function createDefectSource(config: DefectSourceConfig, readPage: (page: number) => Promise<unknown>,
-  readDetail: (id: number) => Promise<unknown>): PollingSource {
+  readDetail: (id: number) => Promise<unknown>,
+  selectRepository?: (title: string, body: string) => RepositorySelection | undefined): PollingSource {
   return { async read(cursor) {
     const page = cursor === undefined ? 1 : Number(cursor);
     if (!Number.isSafeInteger(page) || page < 1) throw new Error('Invalid page cursor');
@@ -48,7 +51,8 @@ export function createDefectSource(config: DefectSourceConfig, readPage: (page: 
     const events: NormalizedEvent[] = [];
     for (const item of result.items) {
       const detail = parseDefectDetail(await readDetail(item.id), item.id, config.businessProjectId);
-      events.push(normalizeDefect(detail.item, config, detail.description));
+      events.push(normalizeDefect(detail.item, config, detail.description,
+        selectRepository?.(detail.item.subject, detail.description.body)));
     }
     return { events, nextCursor: result.nextCursor };
   } };

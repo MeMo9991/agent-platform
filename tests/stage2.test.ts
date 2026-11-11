@@ -107,7 +107,7 @@ test('image reader only opens validated same-source references with bounded imag
 });
 
 test('configured DevOps task starts and reads list and detail through the registered handler', async () => {
-  const scheduled = loadScheduleConfig('config/schedules.json').tasks[0]!;
+  const scheduled = { ...loadScheduleConfig('config/schedules.json').tasks[0]!, enabled: true, runOnStart: true };
   assert.equal(scheduled.intervalSeconds, 300);
   const directory = mkdtempSync(join(tmpdir(), 'agent-platform-runtime-'));
   const repoPath = join(directory, 'repo');
@@ -117,7 +117,7 @@ test('configured DevOps task starts and reads list and detail through the regist
   const platform = JSON.parse(readFileSync('config/platform.json', 'utf8'));
   const repo = platform.projectGroups[0].repositories.pop();
   repo.localPath = repoPath;
-  platform.projectGroups[1] = { projectKey: 'devops-project-4655971863', repositories: [repo],
+  platform.projectGroups[1] = { projectKey: 'devops-project-cloudbom', repositories: [repo],
     defaultRepoKey: 'agent-platform', searchRoot: directory };
   const platformPath = join(directory, 'platform.json');
   writeFileSync(platformPath, JSON.stringify(platform));

@@ -5,6 +5,7 @@ export type Task = { id: string; title: string; scope: string; repoKey: string; 
 export type ImageRef = { id: string; kind: string; mimeType?: string; imageUrl: string };
 export type Event = { id: string; title: string; body: string; status: string; repoKey?: string;
   sourceId: string; receivedAt: string; url?: string; taskId?: string; attachments: ImageRef[];
+  allowedRepoKeys?: string[]; repositorySelection?: 'repository-name' | 'file-name' | 'default';
   routing?: { reason?: string; candidates: { taskId: string; evidence?: unknown[] }[] } };
 export type Run = { id: string; stage: string; status: string; sessionId?: string;
   agentKind?: string; model?: string; commitSha?: string; skillRef?: { path: string; commitSha: string };
