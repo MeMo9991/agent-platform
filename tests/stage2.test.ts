@@ -107,7 +107,7 @@ test('image reader only opens validated same-source references with bounded imag
 });
 
 test('configured DevOps task starts and reads list and detail through the registered handler', async () => {
-  const scheduled = loadScheduleConfig('config/schedules.json').tasks[0]!;
+  const scheduled = { ...loadScheduleConfig('config/schedules.json').tasks[0]!, enabled: true, runOnStart: true };
   assert.equal(scheduled.intervalSeconds, 300);
   const directory = mkdtempSync(join(tmpdir(), 'agent-platform-runtime-'));
   const repoPath = join(directory, 'repo');
@@ -115,11 +115,14 @@ test('configured DevOps task starts and reads list and detail through the regist
   execFileSync('git', ['init', '-q', repoPath]);
   execFileSync('git', ['-C', repoPath, 'remote', 'add', 'origin', 'https://github.com/MeMo9991/agent-platform.git']);
   const platform = JSON.parse(readFileSync('config/platform.json', 'utf8'));
-  platform.repositories[0].localPath = repoPath;
-  platform.projectGroups[0] = { projectKey: 'devops-project-4655971863', repoKeys: ['agent-platform'],
+  const repo = platform.projectGroups[0].repositories.pop();
+  repo.localPath = repoPath;
+  platform.projectGroups[1] = { projectKey: 'devops-project-cloudbom', repositories: [repo],
     defaultRepoKey: 'agent-platform', searchRoot: directory };
   const platformPath = join(directory, 'platform.json');
   writeFileSync(platformPath, JSON.stringify(platform));
+  const schedulePath = join(directory, 'schedules.json');
+  writeFileSync(schedulePath, JSON.stringify({ tasks: [scheduled] }));
   const paths: string[] = [];
   const request: typeof fetch = async (input, init) => {
     const path = String(input).split('/').at(-1)!;
@@ -129,7 +132,7 @@ test('configured DevOps task starts and reads list and detail through the regist
       data: { pageNum: 1, pageSize: 10, total: 1, list: [item(11406133)] } } : detail(11406133));
   };
   try {
-    const runtime = startConfiguredSchedules({ platform: platformPath, schedules: 'config/schedules.json',
+    const runtime = startConfiguredSchedules({ platform: platformPath, schedules: schedulePath,
       database: join(directory, 'events.sqlite3') }, async () => ({ Authorization: 'Bearer test-only' }),
     error => { throw error; }, request);
     await runtime.stop();

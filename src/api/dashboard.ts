@@ -14,7 +14,8 @@ import { completeTakeover, executeTaskCommand, type TakeoverEvidencePorts } from
 import { taskCommand } from '../interaction/task-command.js';
 import { readSettings, saveSettings, settingsGroup, type SettingsPaths } from './settings.js';
 
-const submit = z.object({ repoKey: z.string().min(1), body: z.string().trim().min(1).max(20_000),
+const submit = z.object({ projectKey: z.string().min(1).optional(), repoKey: z.string().min(1).optional(),
+  body: z.string().trim().min(1).max(20_000),
   idempotencyKey: z.string().min(1).max(200), images: z.array(z.object({ data: z.string(), mimeType: z.string() })).max(2).default([]) }).strict();
 const decision = z.object({ expectedVersion: z.number().int().positive(), value: z.record(z.string(), z.unknown()) }).strict();
 const allowedImageTypes: Record<string, string> = { 'image/png': '89504e470d0a1a0a',
@@ -199,6 +200,8 @@ function protectedDirectory(path: string): string {
 }
 
 export type DashboardOptions = { actorId: string; repoKeys: readonly string[];
+  projectGroups?: Readonly<Record<string, { repoKeys: readonly string[]; defaultRepoKey?: string }>>;
+  selectRepositoryByGroup?: Readonly<Record<string, (title: string, body: string) => { repoKey: string } | undefined>>;
   sourceRepoKeys?: Readonly<Record<string, readonly string[]>>;
   imageDirectory: string; attachmentReaders: Readonly<Record<string, AttachmentReader>>;
   runners?: Readonly<Record<string, AgentRunner | undefined>>; workerCapacity?: number;
@@ -220,6 +223,8 @@ export async function handleDashboard(request: IncomingMessage, response: Server
   try {
     if (request.method === 'GET' && path === '/api/config') {
       send(response, 200, { actorId: options.actorId, repoKeys: options.repoKeys,
+        projectGroups: Object.entries(options.projectGroups ?? {}).map(([projectKey, group]) =>
+          ({ projectKey, repoKeys: group.repoKeys, defaultRepoKey: group.defaultRepoKey })),
         roles,
         stage5WritesEnabled: options.stage5WritesEnabled === true }); return true;
     }
@@ -408,13 +413,18 @@ export async function handleDashboard(request: IncomingMessage, response: Server
     if (request.method === 'POST' && path === '/api/events') {
       if (!roles.includes('submit')) throw new Error('Submission role required');
       const input = submit.parse(await readBody(request));
-      if (!options.repoKeys.includes(input.repoKey)) throw new Error('Repository is not authorized');
-      const sourceId = `manual:${input.repoKey}`;
+      const group = input.projectKey ? options.projectGroups?.[input.projectKey] : undefined;
+      if (input.projectKey && !group) throw new Error('Project group is not authorized');
+      const repoKey = input.repoKey ?? (group?.repoKeys.length === 1 ? group.repoKeys[0]
+        : input.projectKey ? options.selectRepositoryByGroup?.[input.projectKey]?.(input.body.split('\n')[0]!, input.body)?.repoKey : undefined);
+      if (!repoKey || !options.repoKeys.includes(repoKey) || (group && !group.repoKeys.includes(repoKey)))
+        throw new Error('Select a repository in the project group');
+      const sourceId = `manual:${repoKey}`;
       const directory = protectedDirectory(resolve(options.imageDirectory));
       const created: string[] = [];
       try {
         const images = input.images.map(image => ({ bytes: imageBytes(image.data, image.mimeType), mimeType: image.mimeType }));
-        const digest = createHash('sha256').update(JSON.stringify([input.repoKey, input.body,
+        const digest = createHash('sha256').update(JSON.stringify([repoKey, input.body,
           images.map(image => [image.mimeType, createHash('sha256').update(image.bytes).digest('hex')])])).digest('hex');
         const attachments = images.map(image => {
           const bytes = image.bytes;
@@ -426,7 +436,7 @@ export async function handleDashboard(request: IncomingMessage, response: Server
         });
         const result = await createEventIngress(store, { [sourceId]: ['contentDigest'] }).accept({ sourceId,
           externalId: `${options.actorId}:${input.idempotencyKey}`, revision: '1', kind: 'manual_task',
-          title: input.body.split('\n')[0]!.slice(0, 200), body: input.body, repoKey: input.repoKey,
+          title: input.body.split('\n')[0]!.slice(0, 200), body: input.body, repoKey,
           attachments, metaData: { contentDigest: digest } });
         if (result.duplicate && store.get(result.eventId)?.metaData.contentDigest !== digest)
           throw new Error('Idempotency key belongs to another submission');

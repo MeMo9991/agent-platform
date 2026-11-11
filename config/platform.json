@@ -1,38 +1,72 @@
 {
-  "repositories": [
-    {
-      "repoKey": "agent-platform",
-      "provider": "github",
-      "hostUrl": "https://github.com",
-      "projectRef": "MeMo9991/agent-platform",
-      "targetBranch": "main",
-      "requiredChecks": ["verify"],
-      "autoPr": { "enabled": true, "allowedPrefixes": ["src/", "tests/", "web/src/"] },
-      "localChecks": [
-        { "command": "npm", "args": ["run", "typecheck"], "timeoutMs": 120000 },
-        { "command": "node", "args": ["--import", "tsx", "--test", "--test-skip-pattern=development Git proof checks|macOS sandbox limits|trusted check reuses|sandboxed process leaves|trusted npm ci prepares|formal entry rejects a second process"], "timeoutMs": 180000 }
-      ],
-      "credentialsRef": "env:AGENT_PLATFORM_GITHUB_TOKEN",
-      "localPath": "."
-    }
-  ],
   "projectGroups": [
-    { "projectKey": "devops-project-4655971863", "repoKeys": [] }
-  ],
-  "sources": [
     {
-      "id": "devops-assigned",
-      "kind": "devops-defect",
-      "configRef": "devops-assigned",
-      "enabled": true,
-      "projectKey": "devops-project-4655971863",
-      "devops": { "businessProjectId": 4655971863, "pageSize": 10 }
+      "projectKey": "agent-platform",
+      "repositories": [
+        {
+          "repoKey": "agent-platform",
+          "provider": "github",
+          "hostUrl": "https://github.com",
+          "projectRef": "MeMo9991/agent-platform",
+          "targetBranch": "main",
+          "requiredChecks": [
+            "verify"
+          ],
+          "autoPr": {
+            "enabled": true,
+            "allowedPrefixes": [
+              "src/",
+              "tests/",
+              "web/src/"
+            ]
+          },
+          "localChecks": [
+            {
+              "command": "npm",
+              "args": [
+                "run",
+                "typecheck"
+              ],
+              "timeoutMs": 120000
+            },
+            {
+              "command": "node",
+              "args": [
+                "--import",
+                "tsx",
+                "--test",
+                "--test-skip-pattern=development Git proof checks|macOS sandbox limits|trusted check reuses|sandboxed process leaves|trusted npm ci prepares|formal entry rejects a second process"
+              ],
+              "timeoutMs": 180000
+            }
+          ],
+          "credentialsRef": "env:AGENT_PLATFORM_GITHUB_TOKEN",
+          "localPath": "."
+        }
+      ]
+    },
+    {
+      "projectKey": "devops-project-cloudbom",
+      "repositories": []
     }
   ],
-  "agents": [{ "kind": "qoder", "enabled": true }],
+  "agents": [
+    {
+      "kind": "qoder",
+      "enabled": true
+    }
+  ],
   "interaction": {
     "actorId": "local-owner",
-    "roles": ["answer", "route", "approve", "reopen", "submit", "command", "configure"],
+    "roles": [
+      "answer",
+      "route",
+      "approve",
+      "reopen",
+      "submit",
+      "command",
+      "configure"
+    ],
     "credentialFile": "~/.config/agent-platform/local-api.token",
     "port": 8765
   },

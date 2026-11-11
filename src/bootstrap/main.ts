@@ -1,10 +1,8 @@
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { startConfiguredSchedules } from './start-schedules.js';
-import { readFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { platformConfig } from './config.js';
 import { createKernelCoordinator } from '../agent/kernel/coordinator.js';
 import { createTaskCandidateFinder } from '../agent/router/candidate-finder.js';
 import { startLocalApi } from '../api/local.js';
@@ -18,13 +16,13 @@ import { createDevopsAttachmentReader } from '../event/sources/devops/attachment
 import { startWorkerLoop } from './worker-loop.js';
 import { acquireInstanceLock } from './instance-lock.js';
 import { createManualAttachmentReader } from '../event/sources/manual/attachment.js';
+import { createRepositorySelector } from './repository-selection.js';
 import { createCodeHosts } from '../repository-ci/providers/index.js';
 import { createStage5OpenChange } from '../authorization/stage5-open-change.js';
 import { autoPrMandate, autoPrRuleRef } from '../authorization/auto-pr.js';
 import { randomUUID } from 'node:crypto';
 import { authorizationHeaders as defaultAuthorizationHeaders } from './devops-credentials.js';
 
-const platform = platformConfig.parse(JSON.parse(readFileSync(process.env.AGENT_PLATFORM_CONFIG ?? 'config/platform.json', 'utf8')));
 const databasePath = process.env.AGENT_PLATFORM_DATABASE ?? '.runtime/state/agent-platform.sqlite3';
 const instanceLock = await acquireInstanceLock(databasePath, () => {
   console.error('Instance lock was lost; stopping to prevent concurrent dispatch');
@@ -48,6 +46,7 @@ const runtime = startConfiguredSchedules({
 }, authorizationHeaders,
   (taskId, error) => { console.error(`Scheduled task ${taskId} failed`, error); });
 stopRuntime = runtime.stop;
+const platform = runtime.platform;
 
 const sourceRepoKeys = Object.fromEntries(platform.sources.filter(source => source.projectKey)
   .map(source => [source.id, platform.projectGroups.find(group => group.projectKey === source.projectKey)!.repoKeys]));
@@ -138,6 +137,10 @@ try {
     ...platform.interaction,
     dashboard: { actorId: platform.interaction.actorId,
       repoKeys: platform.repositories.map(repo => repo.repoKey),
+      projectGroups: Object.fromEntries(platform.projectGroups.map(group => [group.projectKey,
+        { repoKeys: group.repoKeys, defaultRepoKey: group.defaultRepoKey }])),
+      selectRepositoryByGroup: Object.fromEntries(platform.projectGroups.map(group =>
+        [group.projectKey, createRepositorySelector(group, platform.repositories)])),
       sourceRepoKeys,
       imageDirectory, attachmentReaders, runners,
       evidenceRoot: resolve(root, '.runtime'),
