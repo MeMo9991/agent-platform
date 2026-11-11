@@ -2,14 +2,17 @@ import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { id } from '../shared/model.js';
 
-export const scheduledTask = z.object({
-  id, kind: id, enabled: z.boolean(), intervalSeconds: z.number().int().min(1).max(2_147_483),
-  runOnStart: z.boolean(), parameters: z.record(z.string(), z.unknown()),
-}).strict();
+const scheduleBase = z.object({ id, enabled: z.boolean(),
+  intervalSeconds: z.number().int().min(1).max(2_147_483), runOnStart: z.boolean(), projectKey: id });
+export const scheduledTask = z.discriminatedUnion('kind', [
+  scheduleBase.extend({ kind: z.literal('devops-defect-poll'),
+    businessProjectId: z.number().int().positive(), pageSize: z.number().int().positive().optional() }).strict(),
+  scheduleBase.extend({ kind: z.literal('github-pr-poll') }).strict(),
+]);
 export const scheduleConfig = z.object({ tasks: z.array(scheduledTask) }).strict().refine(
   value => new Set(value.tasks.map(task => task.id)).size === value.tasks.length, 'Duplicate scheduled task ID');
 export type ScheduleConfig = z.infer<typeof scheduleConfig>;
-export type TaskHandler = (parameters: Record<string, unknown>) => Promise<void>;
+export type TaskHandler = (task: z.infer<typeof scheduledTask>) => Promise<void>;
 
 export function loadScheduleConfig(path: string): ScheduleConfig {
   return scheduleConfig.parse(JSON.parse(readFileSync(path, 'utf8')));
@@ -25,7 +28,7 @@ export function startSchedules(config: ScheduleConfig, handlers: Readonly<Record
   for (const task of tasks) {
     const tick = () => {
       if (stopped || active.has(task.id)) return;
-      const run = Promise.resolve().then(() => handlers[task.kind]!(task.parameters))
+      const run = Promise.resolve().then(() => handlers[task.kind]!(task))
         .catch(error => {
           try { onError(task.id, error); }
           catch (reportError) { console.error(`Scheduled task ${task.id} error reporter failed`, reportError); }

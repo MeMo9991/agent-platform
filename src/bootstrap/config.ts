@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isAbsolute } from 'node:path';
 import { id } from '../shared/model.js';
 import { repositoryConfig, type CodeHost } from '../repository-ci/model.js';
 import type { ReleasePipeline } from '../repository-ci/model.js';
@@ -9,9 +10,26 @@ export type RegisteredSource =
   | { mode: 'polling'; source: PollingSource }
   | { mode: 'push'; source: PushSource };
 
-export const platformConfig = z.object({ repositories: z.array(repositoryConfig).refine(
-  values => new Set(values.map(value => value.repoKey)).size === values.length, 'Duplicate repoKey'),
-  sources: z.array(z.object({ id, kind: id, configRef: id, enabled: z.boolean() })),
+export const projectGroup = z.object({ projectKey: id,
+  repositories: z.array(repositoryConfig).default([]),
+  repoKeys: z.array(id).optional(), // legacy configuration is accepted during migration
+  searchRoot: id.refine(isAbsolute, 'Project search root must be absolute').optional(),
+  defaultRepoKey: id.optional() }).strict()
+  .refine(value => !value.repoKeys || !value.repositories.length, 'repoKeys cannot accompany nested repositories')
+  .transform(value => ({ ...value,
+    repoKeys: value.repositories.length ? value.repositories.map(repo => repo.repoKey) : value.repoKeys ?? [] }))
+  .refine(value => new Set(value.repoKeys).size === value.repoKeys.length &&
+    (!value.defaultRepoKey || value.searchRoot), 'Duplicate project repository or missing search root');
+export const devopsSourceConfig = z.object({
+  businessProjectId: z.number().int().positive(), pageSize: z.number().int().positive().optional(),
+}).strict();
+const sourceConfig = z.object({ id, kind: id, configRef: id, enabled: z.boolean(),
+  projectKey: id.optional(), devops: devopsSourceConfig.optional() });
+export const devopsDefectSource = sourceConfig.safeExtend({
+  kind: z.literal('devops-defect'), projectKey: id, devops: devopsSourceConfig,
+});
+export const platformConfig = z.object({ repositories: z.array(repositoryConfig).default([]),
+  projectGroups: z.array(projectGroup).default([]), sources: z.array(sourceConfig).default([]),
   agents: z.array(z.object({ kind: id, enabled: z.boolean() })),
   interaction: z.object({ actorId: id, roles: z.array(z.enum(['answer', 'route', 'approve', 'reopen', 'submit', 'command', 'configure'])),
     credentialFile: id, port: z.number().int().min(1).max(65535) }).optional(),
@@ -22,12 +40,24 @@ export const platformConfig = z.object({ repositories: z.array(repositoryConfig)
     reservedHumanResume: z.number().int().nonnegative().default(1) }).refine(
       value => value.reservedHumanResume < value.maxConcurrentRuns, 'Resume reservation must leave a normal slot'), policyRef: id })
   .superRefine((value, context) => {
-    if (new Set(value.sources.map(item => item.id)).size !== value.sources.length ||
+    const repositories = [...value.repositories, ...value.projectGroups.flatMap(group => group.repositories)];
+    const groups = new Map(value.projectGroups.map(group => [group.projectKey, group.repoKeys]));
+    const devopsProjects = value.sources.filter(source => source.kind === 'devops-defect')
+      .map(source => source.devops?.businessProjectId);
+    if (new Set(repositories.map(repo => repo.repoKey)).size !== repositories.length ||
+        groups.size !== value.projectGroups.length ||
+        new Set(devopsProjects).size !== devopsProjects.length ||
+        value.projectGroups.some(group => group.repoKeys.some(repoKey => !repositories.some(repo => repo.repoKey === repoKey)) ||
+          (group.defaultRepoKey && !group.repoKeys.includes(group.defaultRepoKey))) ||
+        value.sources.some(source => source.kind === 'devops-defect' &&
+          (!source.projectKey || !source.devops || !groups.has(source.projectKey))) ||
+        new Set(value.sources.map(item => item.id)).size !== value.sources.length ||
         new Set(value.agents.map(item => item.kind)).size !== value.agents.length ||
         new Set(value.releasePipelines.map(item => `${item.repoKey}\0${item.environment}`)).size !== value.releasePipelines.length ||
-        value.releasePipelines.some(item => !value.repositories.some(repo => repo.repoKey === item.repoKey)))
+        value.releasePipelines.some(item => !repositories.some(repo => repo.repoKey === item.repoKey)))
       context.addIssue({ code: 'custom', message: 'Duplicate or unknown adapter registration' });
-  });
+  }).transform(value => ({ ...value,
+    repositories: [...value.repositories, ...value.projectGroups.flatMap(group => group.repositories)] }));
 export type PlatformConfig = z.infer<typeof platformConfig>;
 export function selectCodeHost(repoKey: string, config: PlatformConfig, hosts: Readonly<Record<string, CodeHost | undefined>>): CodeHost {
   const repo = config.repositories.find(item => item.repoKey === repoKey);

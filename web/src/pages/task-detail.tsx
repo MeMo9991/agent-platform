@@ -351,8 +351,9 @@ export function TaskDetailPage({ id, actorId, roles }: { id: string; actorId: st
       <Card className="task-summary"><div className="card-heading"><div><span className="eyebrow">任务边界</span><h2>当前范围与授权</h2></div></div>
         <div className="detail-grid"><div><small>任务范围</small><p>{detail.task.scope}</p></div><div><small>目标</small><p>{detail.task.mandate.goal}</p></div></div>
         <div className="detail-foot">许可动作：{detail.task.mandate.allowedActions.join('、')} <span>策略：{detail.task.mandate.policyVersion}</span></div></Card>
-      <Card><h2>来源</h2>{detail.events.length ? detail.events.map(event => <p key={event.id}>
-        <a href={`#/events/${encodeURIComponent(event.id)}`}>{event.title}</a> <Badge>{event.status}</Badge></p>)
+      <Card><h2>来源</h2>{detail.events.length ? detail.events.map(event => <div key={event.id}>
+        <p><a href={`#/events/${encodeURIComponent(event.id)}`}>{event.title}</a> <Badge>{event.status}</Badge></p>
+        {event.body && <p className="source-text">{event.body}</p>}</div>)
         : <p className="muted">尚无来源记录</p>}</Card>
         </TabPanel>
         <TabPanel id="actions" shouldForceMount className="stack task-tab-panel">

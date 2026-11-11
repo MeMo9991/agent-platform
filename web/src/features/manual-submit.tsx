@@ -13,8 +13,11 @@ function AttachmentIcon({ className, ...rest }: { className?: string; 'aria-hidd
 }
 
 type Receipt = { eventId: string; taskId?: string; status: string; duplicate: boolean };
-export function ManualSubmit({ repoKeys }: { repoKeys: string[] }) {
-  const [repoKey, setRepoKey] = useState(repoKeys[0] ?? '');
+export function ManualSubmit({ projectGroups }: { projectGroups: {
+  projectKey: string; repoKeys: string[]; defaultRepoKey?: string }[] }) {
+  const [projectKey, setProjectKey] = useState(projectGroups[0]?.projectKey ?? '');
+  const [repoKey, setRepoKey] = useState('');
+  const group = projectGroups.find(item => item.projectKey === projectKey);
   const [body, setBody] = useState('');
   const [files, setFiles] = useState<File[]>([]);
   const [receipt, setReceipt] = useState<Receipt>();
@@ -46,7 +49,7 @@ export function ManualSubmit({ repoKeys }: { repoKeys: string[] }) {
           reader.onload = () => resolve(String(reader.result).split(',')[1] ?? ''); reader.onerror = reject;
           reader.readAsDataURL(file); }) })));
       const result = await api<Receipt>('/api/events', { method: 'POST',
-        body: { repoKey, body, images, idempotencyKey: submitKey } });
+        body: { projectKey, ...(repoKey ? { repoKey } : {}), body, images, idempotencyKey: submitKey } });
       setReceipt(result); setBody(''); setFiles([]); setSubmitKey(crypto.randomUUID());
     } catch (cause) { setError(cause instanceof Error ? cause.message : '提交失败'); }
     finally { setBusy(false); }
@@ -70,12 +73,17 @@ export function ManualSubmit({ repoKeys }: { repoKeys: string[] }) {
         rows={3} autoResize maxRows={5} maxLength={20000} fieldClassName="bg-background-primary-default" isRequired
         placeholder="描述目标、现象、复现步骤或需要调查的问题…" />
       <div className="chat-submit-toolbar"><div className="chat-submit-options">
-        <Select aria-label="目标仓库" className="chat-submit-repo" size="sm"
+        <Select aria-label="项目组" className="chat-submit-repo" size="sm"
+          triggerClassName="rounded-full border-border-button-default bg-background-secondary-default px-3 py-1.5 shadow-none hover:bg-background-secondary-hover"
+          selectedKey={projectKey} onSelectionChange={key => { setProjectKey(String(key ?? '')); setRepoKey(''); setSubmitKey(crypto.randomUUID()); }} isRequired>
+          {projectGroups.map(item => <SelectItem key={item.projectKey} id={item.projectKey}>{item.projectKey}</SelectItem>)}</Select>
+        <Select aria-label="代码仓库" className="chat-submit-repo" size="sm"
           triggerClassName="rounded-full border-border-button-default bg-background-secondary-default px-3 py-1.5 shadow-none hover:bg-background-secondary-hover"
           renderValue={<span className="flex min-w-0 items-center gap-2"><RiGitRepositoryLine aria-hidden className="size-4 shrink-0 text-foreground-icon-secondary" />
-            <span className="truncate">{repoKey}</span></span>}
-          selectedKey={repoKey} onSelectionChange={key => { setRepoKey(String(key ?? '')); setSubmitKey(crypto.randomUUID()); }} isRequired>
-          {repoKeys.map(key => <SelectItem key={key} id={key}>{key}</SelectItem>)}</Select>
+            <span className="truncate">{repoKey || '自动选择'}</span></span>}
+          selectedKey={repoKey || 'auto'} onSelectionChange={key => { setRepoKey(key === 'auto' ? '' : String(key ?? '')); setSubmitKey(crypto.randomUUID()); }}>
+          <SelectItem id="auto">自动选择</SelectItem>
+          {group?.repoKeys.map(key => <SelectItem key={key} id={key}>{key}</SelectItem>)}</Select>
         <Button type="button" variant="secondary" size="medium" iconOnly leadingIcon={AttachmentIcon}
           className="rounded-full bg-background-secondary-default shadow-none hover:bg-background-secondary-hover"
           aria-label="添加图片附件" title="添加图片附件（最多 2 张，每张不超过 10 MB）"
@@ -84,7 +92,7 @@ export function ManualSubmit({ repoKeys }: { repoKeys: string[] }) {
           onChange={event => { setFiles(Array.from(event.currentTarget.files ?? [])); event.currentTarget.value = ''; setSubmitKey(crypto.randomUUID()); }} />
       </div><Button type="submit" variant="primary" size="medium" iconOnly leadingIcon={RiArrowUpLine}
         className="rounded-full bg-text-primary text-background-primary-default shadow-none hover:bg-text-secondary disabled:bg-background-tertiary-default disabled:text-text-tertiary"
-        aria-label={busy ? '提交中' : '提交任务'} title={busy ? '提交中' : '提交任务'} disabled={busy || !repoKey} /></div>
+        aria-label={busy ? '提交中' : '提交任务'} title={busy ? '提交中' : '提交任务'} disabled={busy || !projectKey || !group?.repoKeys.length} /></div>
       {files.length > 0 && <p className="chat-submit-files text-caption-1-medium text-text-tertiary">{files.map(file => file.name).join('、')}</p>}
       {error && <p role="alert" className="error chat-submit-error">{error}</p>}
     </form>

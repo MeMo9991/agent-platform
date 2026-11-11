@@ -14,7 +14,8 @@ import { completeTakeover, executeTaskCommand, type TakeoverEvidencePorts } from
 import { taskCommand } from '../interaction/task-command.js';
 import { readSettings, saveSettings, settingsGroup, type SettingsPaths } from './settings.js';
 
-const submit = z.object({ repoKey: z.string().min(1), body: z.string().trim().min(1).max(20_000),
+const submit = z.object({ projectKey: z.string().min(1).optional(), repoKey: z.string().min(1).optional(),
+  body: z.string().trim().min(1).max(20_000),
   idempotencyKey: z.string().min(1).max(200), images: z.array(z.object({ data: z.string(), mimeType: z.string() })).max(2).default([]) }).strict();
 const decision = z.object({ expectedVersion: z.number().int().positive(), value: z.record(z.string(), z.unknown()) }).strict();
 const allowedImageTypes: Record<string, string> = { 'image/png': '89504e470d0a1a0a',
@@ -155,13 +156,16 @@ function linkedTaskId(store: SqliteStore, eventId: string): string | undefined {
       record.at DESC, record.id DESC LIMIT 1`).get(eventId);
   return row ? String(row.task_id) : undefined;
 }
-function safeEvent(store: SqliteStore, id: string) {
+function safeEvent(store: SqliteStore, id: string, sourceRepoKeys: Readonly<Record<string, readonly string[]>> = {}) {
   const event = store.get(id);
   if (!event) return undefined;
   const { metaData, routingData, attachments, ...publicEvent } = event;
   const routing = routingData && typeof routingData === 'object' ? routingData as Record<string, unknown> : {};
   const route = routing.decision && typeof routing.decision === 'object' ? routing.decision as Record<string, unknown> : routing;
-  return { ...publicEvent, taskId: linkedTaskId(store, id), attachments: attachments.map(item => ({ id: item.id, kind: item.kind,
+  return { ...publicEvent, allowedRepoKeys: sourceRepoKeys[event.sourceId],
+    repositorySelection: ['repository-name', 'file-name', 'default'].includes(String(metaData.repositorySelection))
+      ? metaData.repositorySelection : undefined,
+    taskId: linkedTaskId(store, id), attachments: attachments.map(item => ({ id: item.id, kind: item.kind,
     mimeType: item.mimeType, imageUrl: `/api/events/${encodeURIComponent(id)}/images/${encodeURIComponent(item.id)}` })),
     routing: { reason: typeof route.reason === 'string' ? route.reason : undefined,
       candidates: Array.isArray(route.candidates) ? route.candidates : [] } };
@@ -196,6 +200,9 @@ function protectedDirectory(path: string): string {
 }
 
 export type DashboardOptions = { actorId: string; repoKeys: readonly string[];
+  projectGroups?: Readonly<Record<string, { repoKeys: readonly string[]; defaultRepoKey?: string }>>;
+  selectRepositoryByGroup?: Readonly<Record<string, (title: string, body: string) => { repoKey: string } | undefined>>;
+  sourceRepoKeys?: Readonly<Record<string, readonly string[]>>;
   imageDirectory: string; attachmentReaders: Readonly<Record<string, AttachmentReader>>;
   runners?: Readonly<Record<string, AgentRunner | undefined>>; workerCapacity?: number;
   evidenceRoot?: string; takeoverEvidence?: TakeoverEvidencePorts; settingsPaths?: SettingsPaths;
@@ -216,6 +223,8 @@ export async function handleDashboard(request: IncomingMessage, response: Server
   try {
     if (request.method === 'GET' && path === '/api/config') {
       send(response, 200, { actorId: options.actorId, repoKeys: options.repoKeys,
+        projectGroups: Object.entries(options.projectGroups ?? {}).map(([projectKey, group]) =>
+          ({ projectKey, repoKeys: group.repoKeys, defaultRepoKey: group.defaultRepoKey })),
         roles,
         stage5WritesEnabled: options.stage5WritesEnabled === true }); return true;
     }
@@ -245,7 +254,7 @@ export async function handleDashboard(request: IncomingMessage, response: Server
     if (request.method === 'GET' && path === '/api/inbox') {
       const { limit, offset } = page(url);
       const events = store.db.prepare("SELECT id FROM source_event WHERE status='needs_human' ORDER BY received_at,id LIMIT ? OFFSET ?")
-        .all(limit, offset).map(row => safeEvent(store, String(row.id)));
+        .all(limit, offset).map(row => safeEvent(store, String(row.id), options.sourceRepoKeys));
       const requests = store.db.prepare("SELECT payload_json FROM task_record WHERE kind IN ('question','approval_request') AND status='open' ORDER BY at,id LIMIT ? OFFSET ?")
         .all(limit, offset).map(row => safeRecord(JSON.parse(String(row.payload_json)), options.evidenceRoot ?? '', store));
       const tasks = store.db.prepare("SELECT id FROM task WHERE state IN ('failed','blocked','paused','waiting_human') ORDER BY updated_at DESC,id LIMIT ? OFFSET ?")
@@ -291,12 +300,12 @@ export async function handleDashboard(request: IncomingMessage, response: Server
       const records = store.db.prepare('SELECT payload_json FROM task_record WHERE task_id=? ORDER BY at,id').all(id)
         .map(row => safeRecord(JSON.parse(String(row.payload_json)), options.evidenceRoot ?? '', store));
       const events = store.db.prepare('SELECT DISTINCT event_id FROM task_record WHERE task_id=? AND event_id IS NOT NULL UNION SELECT origin_event_id FROM task WHERE id=? AND origin_event_id IS NOT NULL')
-        .all(id, id).map(row => safeEvent(store, String(row.event_id ?? row.origin_event_id)));
+        .all(id, id).map(row => safeEvent(store, String(row.event_id ?? row.origin_event_id), options.sourceRepoKeys));
       send(response, 200, { task, runs, records, events }); return true;
     }
     const eventMatch = /^\/api\/events\/([^/]+)$/.exec(path);
     if (request.method === 'GET' && eventMatch) {
-      const event = safeEvent(store, decodeURIComponent(eventMatch[1]!));
+      const event = safeEvent(store, decodeURIComponent(eventMatch[1]!), options.sourceRepoKeys);
       send(response, event ? 200 : 404, event ?? { error: 'Event not found' }); return true;
     }
     const reviewMatch = /^\/api\/tasks\/([^/]+)\/content-reviews$/.exec(path);
@@ -379,7 +388,7 @@ export async function handleDashboard(request: IncomingMessage, response: Server
       const value = routeReviewDecision.parse({ ...(await readBody(request, 65_536) as Record<string, unknown>),
         eventId, actor: { kind: 'human', id: options.actorId }, at: new Date().toISOString() });
       await coordinator.onSignal({ kind: 'human_response', response: { kind: 'route_decision', value } });
-      const event = safeEvent(store, eventId);
+      const event = safeEvent(store, eventId, options.sourceRepoKeys);
       send(response, 200, { ok: true, event, taskId: event?.taskId });
       return true;
     }
@@ -404,13 +413,18 @@ export async function handleDashboard(request: IncomingMessage, response: Server
     if (request.method === 'POST' && path === '/api/events') {
       if (!roles.includes('submit')) throw new Error('Submission role required');
       const input = submit.parse(await readBody(request));
-      if (!options.repoKeys.includes(input.repoKey)) throw new Error('Repository is not authorized');
-      const sourceId = `manual:${input.repoKey}`;
+      const group = input.projectKey ? options.projectGroups?.[input.projectKey] : undefined;
+      if (input.projectKey && !group) throw new Error('Project group is not authorized');
+      const repoKey = input.repoKey ?? (group?.repoKeys.length === 1 ? group.repoKeys[0]
+        : input.projectKey ? options.selectRepositoryByGroup?.[input.projectKey]?.(input.body.split('\n')[0]!, input.body)?.repoKey : undefined);
+      if (!repoKey || !options.repoKeys.includes(repoKey) || (group && !group.repoKeys.includes(repoKey)))
+        throw new Error('Select a repository in the project group');
+      const sourceId = `manual:${repoKey}`;
       const directory = protectedDirectory(resolve(options.imageDirectory));
       const created: string[] = [];
       try {
         const images = input.images.map(image => ({ bytes: imageBytes(image.data, image.mimeType), mimeType: image.mimeType }));
-        const digest = createHash('sha256').update(JSON.stringify([input.repoKey, input.body,
+        const digest = createHash('sha256').update(JSON.stringify([repoKey, input.body,
           images.map(image => [image.mimeType, createHash('sha256').update(image.bytes).digest('hex')])])).digest('hex');
         const attachments = images.map(image => {
           const bytes = image.bytes;
@@ -422,7 +436,7 @@ export async function handleDashboard(request: IncomingMessage, response: Server
         });
         const result = await createEventIngress(store, { [sourceId]: ['contentDigest'] }).accept({ sourceId,
           externalId: `${options.actorId}:${input.idempotencyKey}`, revision: '1', kind: 'manual_task',
-          title: input.body.split('\n')[0]!.slice(0, 200), body: input.body, repoKey: input.repoKey,
+          title: input.body.split('\n')[0]!.slice(0, 200), body: input.body, repoKey,
           attachments, metaData: { contentDigest: digest } });
         if (result.duplicate && store.get(result.eventId)?.metaData.contentDigest !== digest)
           throw new Error('Idempotency key belongs to another submission');

@@ -5,15 +5,14 @@ import { Textarea } from '@/components/base/textarea/textarea';
 import { Card } from '../components/ui';
 import { cx } from '@/utils/cx';
 
-type Group = 'repositories' | 'sources' | 'schedules' | 'agents' | 'budget' | 'policyRef' | 'releasePipelines' | 'port' | 'devopsCredentials';
+type Group = 'projectGroups' | 'schedules' | 'agents' | 'budget' | 'policyRef' | 'releasePipelines' | 'port' | 'devopsCredentials';
 type Settings = { revision: string; restartRequired: boolean; groups: Record<Group, unknown>;
   protected: { actorId?: string; roles?: string[]; credentialFileConfigured: boolean; devopsCredentialsConfigured: boolean } };
 const categories: { id: string; title: string; groups: { id: Group; title: string; hint: string }[] }[] = [
-  { id: 'repositories', title: '仓库与检查', groups: [
-    { id: 'repositories', title: '代码仓库', hint: '仓库、目标分支、必需检查和本地检查命令。绝对本机路径不回显；不填写会保留原值，填写 null 可清除。凭据引用只读，新仓库先使用未配置状态。' }] },
-  { id: 'sources', title: '来源与调度', groups: [
-    { id: 'sources', title: '事件来源', hint: '来源 ID、类型、关联配置及启用状态。' },
-    { id: 'schedules', title: '轮询任务', hint: '任务键：id、kind（devops-defect-poll）、enabled、intervalSeconds、runOnStart、parameters。parameters 必填 sourceId（对应事件来源 ID）、businessProjectId（正整数）；可选 pageSize（默认 10）、repoKey（对应仓库键）。' }] },
+  { id: 'projects', title: '项目组', groups: [
+    { id: 'projectGroups', title: '项目组与仓库', hint: '每个项目组直接包含仓库；人工提交默认开放。仓库各自设置合并目标分支 targetBranch。绝对路径和凭据引用不回显；路径留空保留原值，填 null 可清除。' }] },
+  { id: 'scans', title: '定时扫描', groups: [
+    { id: 'schedules', title: '发现事件的任务', hint: '每项用 projectKey 指向项目组。DevOps 缺陷填写 businessProjectId；GitHub PR 扫描使用 github-pr-poll。任务 id 是稳定的事件来源 ID。' }] },
   { id: 'credentials', title: '外部认证', groups: [
     { id: 'devopsCredentials', title: 'DevOps 凭据', hint: 'DevOps API 的 Authorization 和 Cookie。保存后立即生效，无需重启。' }] },
   { id: 'agents', title: 'Agent 与预算', groups: [
@@ -51,11 +50,11 @@ export function SettingsPage() {
   }
   const active = categories.find(item => item.id === category)!;
   return <div className="stack settings-page"><header className="page-heading"><div><span className="eyebrow">工作台 / 本机配置</span>
-    <h1>配置</h1><p className="muted">维护仓库、来源、Agent、预算与服务参数</p></div></header>
+    <h1>配置</h1><p className="muted">维护项目组、定时扫描、Agent、预算与服务参数 · 每组单独保存，重启服务后生效</p></div></header>
     <div className="settings-layout"><nav className="settings-nav" aria-label="配置分类">{categories.map(item =>
       <button key={item.id} type="button" className={cx('settings-nav-item', category === item.id && 'active')}
         aria-current={category === item.id ? 'page' : undefined} onClick={() => { setCategory(item.id); setError(''); setNotice(''); }}>{item.title}</button>)}</nav>
-      <div className="settings-content"><div className="settings-banner">每组单独保存 · 重启服务后生效</div>
+      <div className="settings-content">
         {error && <p role="alert" className="error">{error} <Button size="xs" variant="secondary" onClick={() => void load().catch(cause => setError(String(cause)))}>重新载入</Button></p>}
         {notice && <p role="status" className="settings-notice">{notice}</p>}
         {!settings && !error && <p>正在加载配置…</p>}
