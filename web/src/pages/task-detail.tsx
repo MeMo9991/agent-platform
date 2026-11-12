@@ -409,13 +409,12 @@ export function TaskDetailPage({ id, actorId, roles }: { id: string; actorId: st
         return <div className="run-row task-run" key={run.id}>
         <div className="task-run-heading"><strong>{run.stage}</strong><Badge>{run.status}</Badge>
           <Chip color="gray" variant="caption">{run.agentKind ?? 'Agent 待定'}</Chip></div>
-        {(run.sessionId || run.commitSha || run.skillRef || failureReason) && <dl className="task-run-meta">
+        {(run.sessionId || run.commitSha || failureReason) && <dl className="task-run-meta">
           {run.sessionId && <div><dt>Session</dt><dd><code>{run.sessionId}</code>
             <Button variant="secondary" size="xs" iconOnly leadingIcon={RiFileCopyLine} className="task-quiet-icon-button"
               aria-label={`复制 Session ${run.sessionId}`} title="复制 Session ID"
               onClick={() => void navigator.clipboard.writeText(run.sessionId!)} /></dd></div>}
           {run.commitSha && <div><dt>提交 SHA</dt><dd><code>{run.commitSha}</code></dd></div>}
-          {run.skillRef && <div className="task-run-skill"><dt>Skill</dt><dd><code>{run.skillRef.path}@{run.skillRef.commitSha}</code></dd></div>}
           {failureReason && <div className="task-run-reason"><dt>原因</dt><dd title={failureReason}><code>{failureReason}</code></dd></div>}
         </dl>}
         {review && <ReviewStageDetails review={review} records={detail.records} nextRun={detail.runs[index + 1]} />}
