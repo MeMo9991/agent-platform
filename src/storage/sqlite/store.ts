@@ -180,9 +180,13 @@ export class SqliteStore implements EventRepository {
         this.saveRun(plan.run);
       } else {
         const owner = this.getTask(decision.taskId);
-        if (!owner || !owner.mandate.allowedActions.includes('investigate') ||
-            (event.repoKey && owner.repoKey !== event.repoKey) ||
-            ['released', 'closed', 'cancelled'].includes(owner.state)) throw new Error('Invalid route owner');
+        if (!owner) throw new Error('Route owner task was not found');
+        if (!owner.mandate.allowedActions.includes('investigate'))
+          throw new Error('Route owner task does not allow investigation');
+        if (event.repoKey && owner.repoKey !== event.repoKey)
+          throw new Error('Route owner task belongs to another repository');
+        if (['released', 'closed', 'cancelled'].includes(owner.state))
+          throw new Error('Route owner task is closed or cancelled');
         if (plan.taskId !== owner.id || plan.task) throw new Error('Route plan owner changed');
         taskId = owner.id;
       }

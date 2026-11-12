@@ -86,9 +86,21 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
   if (task.owner && ['resume', 'retry', 'cancel'].includes(input.kind))
     throw new Error('Human takeover result is required first');
   if (!input.reason.trim()) throw new Error('Reason is required');
+  const latestRunStatus = (taskId: string) => {
+    const row = store.db.prepare('SELECT id FROM run WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT 1').get(taskId);
+    return row ? store.getRun(String(row.id))?.status : undefined;
+  };
+  const hasOpenHumanRequest = (taskId: string) => Boolean(store.db.prepare(`SELECT 1 FROM task_record
+    WHERE task_id=? AND kind IN ('question','approval_request') AND status='open' LIMIT 1`).get(taskId));
+  // Worker 故障（如隔离预检失败）会把任务停在 waiting_human、Run 停在 paused；
+  // 只要没有待人工请求，就允许直接重试，不必先手动暂停再重试。
+  const retryWorkerPause = (candidate: { id: string; state: string } | undefined) => Boolean(candidate) &&
+    candidate!.state === 'waiting_human' && !hasOpenHumanRequest(candidate!.id) &&
+    latestRunStatus(candidate!.id) === 'paused';
   const latestReview = input.kind === 'retry' && task.state === 'waiting_human' ? store.latestReview(task.id) : undefined;
   const retryEmptyReview = latestReview?.verdict === 'block' && latestReview.findings.length === 0;
-  if (['resume', 'retry'].includes(input.kind) && !['paused', 'failed', 'blocked'].includes(task.state) && !retryEmptyReview)
+  if (['resume', 'retry'].includes(input.kind) && !['paused', 'failed', 'blocked'].includes(task.state) &&
+      !retryEmptyReview && !retryWorkerPause(task))
     throw new Error('Task is not ready to resume or retry');
   if (['pause', 'takeover'].includes(input.kind) && !['queued', 'investigating', 'developing', 'waiting_human'].includes(task.state))
     throw new Error('Task cannot be paused or taken over now');
@@ -136,7 +148,8 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
         }
       }
     } else {
-      if ((!['paused', 'failed', 'blocked'].includes(current.state) && !retryEmptyReview) || store.hasActiveRun(current.id))
+      if ((!['paused', 'failed', 'blocked'].includes(current.state) && !retryEmptyReview &&
+          !retryWorkerPause(current)) || store.hasActiveRun(current.id))
         throw new Error('Task is not ready to resume or retry');
       const last = store.db.prepare('SELECT id FROM run WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT 1').get(current.id);
       const previous = last ? store.getRun(String(last.id)) : undefined;

@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { api, imageUrl } from '../app/api';
 import { Badge, Button, Card } from '../components/ui';
-import type { Event } from '../shared/types';
+import type { Event, Task } from '../shared/types';
 
 function Image({ path, alt }: { path: string; alt: string }) {
   const [url, setUrl] = useState('');
@@ -17,12 +17,20 @@ export function EventPage({ id, repoKeys, canRoute }: { id: string; repoKeys: st
   const [taskId, setTaskId] = useState('');
   const [parentTaskId, setParentTaskId] = useState('');
   const [repoKey, setRepoKey] = useState(repoKeys[0] ?? '');
-  const [reason, setReason] = useState('');
   const [error, setError] = useState('');
   const [result, setResult] = useState('');
   const [decisionKey, setDecisionKey] = useState(() => crypto.randomUUID());
   const allowedRepoKeys = event?.allowedRepoKeys ?? repoKeys;
   const selectedRepoKey = allowedRepoKeys.includes(repoKey) ? repoKey : allowedRepoKeys[0] ?? '';
+  const [ownerTasks, setOwnerTasks] = useState<Task[]>([]);
+  useEffect(() => { if (choice !== 'existing_task') return; let live = true;
+    void api<{ items: Task[] }>(`/api/tasks?limit=50${event?.repoKey ? `&repoKey=${encodeURIComponent(event.repoKey)}` : ''}`)
+      .then(value => { if (live) setOwnerTasks(value.items); })
+      .catch(() => { if (live) setOwnerTasks([]); });
+    return () => { live = false; };
+  }, [choice, event?.repoKey]);
+  const eligibleOwners = ownerTasks.filter(task => !['released', 'closed', 'cancelled'].includes(task.state) &&
+    task.mandate.allowedActions.includes('investigate'));
   useEffect(() => { let live = true;
     const load = () => api<Event>(`/api/events/${encodeURIComponent(id)}`).then(value => { if (live) setEvent(value); })
       .catch(cause => { if (live) setError(String(cause)); });
@@ -33,7 +41,7 @@ export function EventPage({ id, repoKeys, canRoute }: { id: string; repoKeys: st
     submit.preventDefault(); setError('');
     try {
       const value = await api<{ taskId?: string }>(`/api/events/${encodeURIComponent(id)}/routes`, { method: 'POST',
-        body: { choice, reason, idempotencyKey: decisionKey,
+        body: { choice, reason: '人工路由', idempotencyKey: decisionKey,
           ...(choice === 'existing_task' ? { taskId } : choice === 'new_task' ? { repoKey: selectedRepoKey,
             ...(parentTaskId ? { parentTaskId } : {}) } : {}) } });
       setResult(value.taskId ? `已关联任务 ${value.taskId}` : '路由决定已受理');
@@ -54,7 +62,10 @@ export function EventPage({ id, repoKeys, canRoute }: { id: string; repoKeys: st
         {event.routing?.candidates.map(item => <p key={item.taskId}>候选任务：<a href={`#/tasks/${encodeURIComponent(item.taskId)}`}>{item.taskId}</a></p>)}
         <form onSubmit={route} className="stack"><label>决定<select value={choice} onChange={change => { setChoice(change.target.value); setDecisionKey(crypto.randomUUID()); }}>
           <option value="new_task">建立新任务</option><option value="existing_task">关联已有任务</option><option value="ignored">忽略事件</option></select></label>
-          {choice === 'existing_task' && <label>任务 ID<input value={taskId} onChange={change => { setTaskId(change.target.value); setDecisionKey(crypto.randomUUID()); }} required /></label>}
+          {choice === 'existing_task' && <label>关联任务<select value={taskId} onChange={change => { setTaskId(change.target.value); setDecisionKey(crypto.randomUUID()); }} required>
+            <option value="">选择允许调查且未关闭的任务</option>{eligibleOwners.map(task =>
+              <option key={task.id} value={task.id}>{task.title}（{task.state}）</option>)}</select>
+            {!eligibleOwners.length && <span>没有可作为归属的任务</span>}</label>}
           {choice === 'new_task' && <label>目标仓库<select value={selectedRepoKey} onChange={change => { setRepoKey(change.target.value); setDecisionKey(crypto.randomUUID()); }}>
             {allowedRepoKeys.map(key => <option key={key}>{key}</option>)}</select>
             {!allowedRepoKeys.length && <span>项目组尚未配置可用仓库</span>}</label>}
@@ -62,7 +73,6 @@ export function EventPage({ id, repoKeys, canRoute }: { id: string; repoKeys: st
             setParentTaskId(change.target.value); setDecisionKey(crypto.randomUUID()); }}>
             <option value="">不关联</option>{event.routing?.candidates.map(item =>
               <option key={item.taskId} value={item.taskId}>候选任务 {item.taskId}</option>)}</select></label>}
-          <label>理由<textarea value={reason} onChange={change => { setReason(change.target.value); setDecisionKey(crypto.randomUUID()); }} required /></label>
           <Button type="submit" disabled={choice === 'new_task' && !allowedRepoKeys.length}>提交决定</Button></form></Card>}
       {result && <p role="status">{result}</p>}</>}
   </div>;

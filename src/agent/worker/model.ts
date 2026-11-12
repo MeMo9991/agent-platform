@@ -57,7 +57,7 @@ export const agentSnapshot = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('unknown'), runId: id }),
 ]);
 export const runRequest = z.object({ taskId: id, runId: id, stage: runStage, mandate, repoKey: id,
-  workspace: workspaceRef, input: agentInput, skill: loadedSkill, execution: executionAttestation,
+  workspace: workspaceRef, input: agentInput, skill: loadedSkill.optional(), execution: executionAttestation,
   attachmentPaths: z.array(id).optional(),
   timeoutMs: z.number().int().positive() });
 export type AgentInput = z.infer<typeof agentInput>;

@@ -84,8 +84,9 @@ let ciTimer: ReturnType<typeof setInterval> | undefined;
 let ciTick: Promise<void> | undefined;
 const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
 const skills = createGitSkillLoader({ 'agent-platform': root });
-if (stage5WorkerEnabled) for (const stage of ['verify', 'review'] as const)
-  await skills.load({ repoRef: 'agent-platform', path: `skills/${stage}/SKILL.md`, commitSha: head, stage });
+// 临时关闭自定义 Skill：启动时不再预加载 skills/verify、skills/review 的 SKILL.md。
+// if (stage5WorkerEnabled) for (const stage of ['verify', 'review'] as const)
+//   await skills.load({ repoRef: 'agent-platform', path: `skills/${stage}/SKILL.md`, commitSha: head, stage });
 const workspace = createGitWorkspaceManager(Object.fromEntries(platform.repositories.filter(repo => repo.localPath)
   .map(repo => [repo.repoKey, { path: resolve(repo.localPath!),
     remote: `${repo.hostUrl}/${repo.projectRef}.git` }])), resolve(root, '.runtime'),

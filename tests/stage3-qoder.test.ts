@@ -104,7 +104,8 @@ test('Qoder confirms input only after assistant output and keeps an early exit p
     assert.equal(cwd, workspace);
     assert.equal(proof.runId, 'run-1');
     assert.equal(args[args.indexOf('--mcp-config') + 1], '{"mcpServers":{}}');
-    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /Pinned skill content/);
+    // 临时关闭自定义 Skill：即使请求里带了 skill 内容，也不再注入系统提示词。
+    assert.doesNotMatch(args[args.indexOf('--append-system-prompt') + 1]!, /Pinned skill content/);
     assert.doesNotMatch(args[args.indexOf('--append-system-prompt') + 1]!, /Bug/);
     assert.match(args.at(-1)!, /Bug/);
     assert.equal(args[args.indexOf('--output-format') + 1], 'stream-json');

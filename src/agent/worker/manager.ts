@@ -335,14 +335,10 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
           (input.policyVersion && task.mandate.policyVersion !== input.policyVersion) ||
           risk === 'unknown' || riskRank[risk] > riskRank[task.mandate.maxAutoRisk]))
         throw new Error('Edit Mandate does not authorize this repository');
-      let skill;
-      try { skill = await input.skills.load({ repoRef: input.skillRepoPath,
-        path: `skills/${claimed.stage}/SKILL.md`, commitSha: input.skillCommitSha, stage: claimed.stage }); }
-      catch (error) {
-        input.coordinator.onWorkerFailure(claimed.id,
-          `Skill is unavailable: ${error instanceof Error ? error.message : String(error)}`, 'missing_skill');
-        return true;
-      }
+      // 临时关闭自定义 Skill 加载：不读取 skills/<stage>/SKILL.md，也不把提示词注入 Qoder。
+      // 需要恢复时取消下面注释，并同步恢复 runRequest.skill 与 system-prompt 的 {{skill}} 占位符。
+      // const skill = await input.skills.load({ repoRef: input.skillRepoPath,
+      //   path: `skills/${claimed.stage}/SKILL.md`, commitSha: input.skillCommitSha, stage: claimed.stage });
       const workspace = await input.workspace.prepare(claimed);
       if (workspace.repoKey !== task.repoKey) throw new Error('Workspace repository mismatch');
       if (claimed.stage === 'investigate' || claimed.stage === 'develop')
@@ -488,7 +484,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
       const request = { taskId: task.id, runId: claimed.id, stage: claimed.stage,
         mandate: latest.mandate, repoKey: latest.repoKey, workspace,
         input: { kind: 'task' as const, runId: claimed.id, prompt: JSON.stringify(facts),
-          sourceEventIds: initialEventIds }, skill, execution: attestation,
+          sourceEventIds: initialEventIds }, execution: attestation,
         attachmentPaths, timeoutMs: input.maxRunMs };
       let started: { sessionId: string } | { kind: 'unsupported' };
       if (humanResume && claimed.sessionId && runner.capabilities().resume === 'supported' &&
@@ -505,7 +501,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
       launchedSession = started.sessionId;
       launchedRunner = runner;
       input.store.replaceRun({ ...claimed, sessionId: started.sessionId, workspaceRef: workspace.path,
-        skillRef: skill.ref, commitSha: workspace.baseSha, execution: attestation }, 'running');
+        commitSha: workspace.baseSha, execution: attestation }, 'running');
       if (humanResume && claimed.sessionId && started.sessionId !== claimed.sessionId)
         input.store.saveRecord({ id: randomUUID(), taskId: task.id, runId: claimed.id,
           kind: 'session_handoff', fromSessionId: claimed.sessionId, toSessionId: started.sessionId,

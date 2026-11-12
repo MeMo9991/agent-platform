@@ -11,8 +11,8 @@ const config = {
 // Get token from env or command line
 const token = process.env.DEVOPS_TOKEN || process.argv[2];
 if (!token) {
-  console.error('Usage: DEVOPS_TOKEN=<token> node scripts/test-devops-api.mjs');
-  console.error('   or: node scripts/test-devops-api.mjs <token>');
+  console.error('Usage: DEVOPS_TOKEN=<token> node scripts/devops-api-probe.mjs');
+  console.error('   or: node scripts/devops-api-probe.mjs <token>');
   process.exit(1);
 }
 

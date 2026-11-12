@@ -34,8 +34,9 @@
               "args": [
                 "--import",
                 "tsx",
+                "--test-skip-pattern=development Git proof checks|macOS sandbox limits|trusted check reuses|sandboxed process leaves|trusted npm ci prepares|formal entry rejects a second process|write attestation binds",
                 "--test",
-                "--test-skip-pattern=development Git proof checks|macOS sandbox limits|trusted check reuses|sandboxed process leaves|trusted npm ci prepares|formal entry rejects a second process"
+                "tests"
               ],
               "timeoutMs": 180000
             }
