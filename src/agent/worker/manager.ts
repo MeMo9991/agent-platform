@@ -4,7 +4,7 @@ import { isAbsolute, resolve } from 'node:path';
 import type { KernelCoordinator } from '../kernel/model.js';
 import type { Task, TaskMandate } from '../task/model.js';
 import type { AgentRunner, Run, WorkspaceManager } from './model.js';
-import type { z } from 'zod';
+import { z } from 'zod';
 import { reviewEvidence, type executionAttestation, type developmentEvidence,
   type verificationEvidence, type agentSnapshot } from './model.js';
 import type { SkillLoader } from '../../skills/model.js';
@@ -12,6 +12,11 @@ import type { SqliteStore } from '../../storage/sqlite/store.js';
 import type { AttachmentReader, AttachmentRef } from '../../event/model.js';
 
 export type ExecutionAttestation = z.infer<typeof executionAttestation>;
+const questionOutput = z.object({ kind: z.literal('question'), prompt: z.string().trim().min(1).max(2000) }).strict();
+function parseQuestionOutput(summary: string): string | undefined {
+  try { return questionOutput.safeParse(JSON.parse(summary)).data?.prompt; }
+  catch { return undefined; }
+}
 export function parseReviewOutput(summary: string): z.infer<typeof reviewEvidence> {
   try { return reviewEvidence.parse(JSON.parse(summary)); }
   catch { /* Qoder may wrap its structured result in one JSON code block. */ }
@@ -233,6 +238,12 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
   }
   async function settleFinishedRun(run: Run, runner: AgentRunner | undefined,
     snapshot: Extract<z.infer<typeof agentSnapshot>, { kind: 'finished' }>, recovered = false): Promise<void> {
+    if (!input.store.openQuestionForRun(run.id) && (run.stage === 'investigate' || run.stage === 'develop') &&
+        snapshot.exitCode === 0 && snapshot.resultRef && run.sessionId && runner?.resultSummary) {
+      const prompt = parseQuestionOutput(await runner.resultSummary(run.id, run.sessionId, snapshot.resultRef));
+      if (prompt) await input.coordinator.onSignal({ kind: 'agent_event', taskId: run.taskId,
+        event: { kind: 'question', runId: run.id, questionId: randomUUID(), prompt } });
+    }
     if (!input.store.openQuestionForRun(run.id)) { await completeRun(run, snapshot, recovered); return; }
     if (!run.sessionId || !runner?.readDurable) {
       if (recovered) await input.coordinator.onSignal({ kind: 'recovery', taskId: run.taskId, runId: run.id,

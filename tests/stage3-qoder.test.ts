@@ -6,6 +6,22 @@ import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createQoderRunner } from '../src/agent/worker/agents/qoder.js';
+import { buildQoderSystemPrompt } from '../src/agent/worker/agents/qoder/system-prompt.js';
+
+test('Qoder reads edited prompt text for each new session', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'qoder-prompt-'));
+  try {
+    writeFileSync(join(directory, 'system-prompt.md'), '{{mandate}}\n{{skill}}');
+    writeFileSync(join(directory, 'question.md'), 'Ask first');
+    const request = { stage: 'investigate', mandate: { goal: 'Investigate' },
+      skill: { content: 'Read only' }, workspace: { baseSha: 'a'.repeat(40) } } as Parameters<typeof buildQoderSystemPrompt>[0];
+    assert.match(buildQoderSystemPrompt(request, directory), /Ask first$/);
+    writeFileSync(join(directory, 'question.md'), 'Ask the owner first');
+    assert.match(buildQoderSystemPrompt(request, directory), /Ask the owner first$/);
+    assert.throws(() => { writeFileSync(join(directory, 'system-prompt.md'), '{{skill}}');
+      buildQoderSystemPrompt(request, directory); }, /required placeholder/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
 
 test('develop grants only the built-in tools needed to edit and commit in its sandbox', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'qoder-develop-'));
@@ -14,9 +30,11 @@ test('develop grants only the built-in tools needed to edit and commit in its sa
   const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(),
     kill: () => true }) as unknown as ChildProcess;
   const runner = createQoderRunner({ verified: true, launch(_command, args) {
+    assert.equal(args.filter(arg => arg === '--append-system-prompt').length, 1);
     assert.equal(args[args.indexOf('--permission-mode') + 1], 'bypass_permissions');
     assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /Commit authorized changes.*Git worktree clean/);
     assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /previousResults are historical, unverified reports/);
+    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /"kind":"question"/);
     assert.equal(args[args.indexOf('--setting-sources') + 1], 'user');
     assert.deepEqual(args.slice(args.indexOf('--tools'), args.indexOf('--tools') + 9),
       ['--tools', 'Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash',

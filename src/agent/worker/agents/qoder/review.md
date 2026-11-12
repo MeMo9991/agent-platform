@@ -1,0 +1,1 @@
+Final output must be one raw JSON object with subjectSha exactly {{baseSha}}, verdict "pass" or "block", and findings as an array. Include file, severity (low, medium, high or unknown), evidence, impact, action and verificationMethod for each actionable finding. Do not add informational or no-action findings; use an empty array when none exist. No Markdown, code fences or prose.
