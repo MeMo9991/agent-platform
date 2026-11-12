@@ -1,0 +1,10 @@
+export type Gate = 'intake' | 'edit' | 'develop-complete' | 'openPr' | 'merge';
+export type Effect = 'allow' | 'require-approval' | 'deny';
+export type Decision = { effect: Effect; ruleId: string; reason: string };
+export type CheckFact = { result: string; exitCode: number | null; terminationConfirmed?: boolean };
+export type ReviewFact = { verdict: 'pass' | 'block'; findingsLength: number };
+export type PolicyContext = { gate: Gate; repoKey: string; taskId?: string; runId?: string;
+  baseSha?: string; commitSha?: string; paths?: readonly string[]; diff?: string;
+  checks?: readonly CheckFact[]; review?: ReviewFact };
+export type PolicyHook = { id: string; gates: readonly Gate[];
+  evaluate(ctx: PolicyContext, config: import('./config.js').ReviewConfig): Decision | undefined };

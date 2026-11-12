@@ -91,7 +91,8 @@ function safeRecord(record: Record<string, unknown>, evidenceRoot: string, store
     'from', 'to', 'decision', 'subjectSha', 'questionId', 'policyVersion', 'reviewedSha',
     'baseSha', 'commitSha', 'developmentRecordId', 'codeChange', 'postCheckVerified', 'postCheckError',
     'command', 'args', 'exitCode', 'terminationConfirmed', 'timeoutMs', 'startedAt', 'endedAt',
-    'reviewRecordId', 'findingIndex', 'disposition', 'reason', 'targetSha', 'changeId', 'ready'])
+    'reviewRecordId', 'findingIndex', 'disposition', 'reason', 'targetSha', 'changeId', 'ready',
+    'gate', 'ruleId', 'effect'])
     if (record[key] !== undefined) selected[key] = key === 'args' && Array.isArray(record[key])
       ? (record[key] as unknown[]).map(value => typeof value === 'string' ? safeText(value) : '')
       : ['content', 'command', 'postCheckError', 'reason'].includes(key) && typeof record[key] === 'string'
@@ -102,6 +103,7 @@ function safeRecord(record: Record<string, unknown>, evidenceRoot: string, store
     selected.request = { id: request.id, kind: request.kind, sourceSha: request.sourceSha,
       action: request.action, targetBranch: request.targetBranch, targetSha: request.targetSha,
       changeRef: request.changeRef, reviewRecordId: request.reviewRecordId, policyVersion: request.policyVersion,
+      reason: typeof request.reason === 'string' ? safeText(request.reason) : undefined,
       proposedMandate: proposed ? { allowedActions: proposed.allowedActions, maxAutoRisk: proposed.maxAutoRisk } : undefined };
   }
   if (record.kind === 'check') {

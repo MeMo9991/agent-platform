@@ -29,7 +29,7 @@ export const agentInput = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('human_answer'), questionId: id, content: z.string(), idempotencyKey: id }),
 ]);
 export const developmentEvidence = z.object({ baseSha: z.string().regex(/^[a-f0-9]{40}$/),
-  commitSha: z.string().regex(/^[a-f0-9]{40}$/), diffRef: id,
+  commitSha: z.string().regex(/^[a-f0-9]{40}$/), diffRef: id, changedPaths: z.array(id).optional(),
   postCheckVerified: z.boolean(), postCheckError: id.optional(),
   checks: z.array(z.object({ command: id, args: z.array(z.string()), timeoutMs: z.number().int().positive(),
     startedAt: timestamp, endedAt: timestamp, result: z.enum(['passed', 'failed', 'timeout', 'unavailable']),

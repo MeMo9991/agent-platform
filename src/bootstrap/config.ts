@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { isAbsolute } from 'node:path';
 import { id } from '../shared/model.js';
 import { repositoryConfig, type CodeHost } from '../repository-ci/model.js';
+import { reviewConfig } from '../authorization/policy/config.js';
 import type { ReleasePipeline } from '../repository-ci/model.js';
 import type { AgentRunner } from '../agent/worker/model.js';
 import type { PollingSource, PushSource } from '../event/model.js';
@@ -33,6 +34,7 @@ export const platformConfig = z.object({ repositories: z.array(repositoryConfig)
   agents: z.array(z.object({ kind: id, enabled: z.boolean() })),
   interaction: z.object({ actorId: id, roles: z.array(z.enum(['answer', 'route', 'approve', 'reopen', 'submit', 'command', 'configure'])),
     credentialFile: id, port: z.number().int().min(1).max(65535) }).optional(),
+  review: reviewConfig.optional(),
   releasePipelines: z.array(z.object({ repoKey: id, environment: id, configRef: id })).default([]),
   budget: z.object({ maxRunMs: z.number().int().positive(), maxConcurrentRuns: z.number().int().positive().default(2),
     perRepoConcurrentRuns: z.number().int().positive().default(2),

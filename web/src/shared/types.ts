@@ -9,12 +9,12 @@ export type Event = { id: string; title: string; body: string; status: string; r
   routing?: { reason?: string; candidates: { taskId: string; evidence?: unknown[] }[] } };
 export type Run = { id: string; stage: string; status: string; sessionId?: string;
   agentKind?: string; model?: string; commitSha?: string; skillRef?: { path: string; commitSha: string };
-  createdAt: string; endedAt?: string; reason?: string };
+  createdAt: string; endedAt?: string; reason?: string; processTerminationUnconfirmed?: boolean };
 export type EvidenceFile = { recordId: string; available: boolean; bytes?: number; sha256?: string; truncated?: boolean };
 export type RecordItem = { id: string; taskId: string; runId?: string; kind: string; at: string; status?: string; prompt?: string;
   content?: string; summary?: string; request?: { id: string; kind: string; sourceSha: string;
     action?: string; targetBranch?: string; targetSha?: string; changeRef?: string; reviewRecordId?: string;
-    policyVersion?: string;
+    policyVersion?: string; reason?: string;
     proposedMandate?: { goal: string; allowedActions: string[]; maxAutoRisk?: string } }; reason?: string; from?: string;
   to?: string; questionId?: string; decision?: string; subjectSha?: string;
   baseSha?: string; commitSha?: string; codeChange?: 'none' | 'committed'; developmentRecordId?: string;

@@ -555,3 +555,28 @@ test('retry still requires resolving an open human request', async () => {
     assert.equal(store.getTask('waiting-question')?.state, 'waiting_human');
   } finally { store.close(); }
 });
+
+test('终止未确认的暂停 Run 需要先确认进程终止才能重试', async () => {
+  const store = new SqliteStore(':memory:');
+  try {
+    const at = new Date().toISOString();
+    store.saveTask({ id: 'unconfirmed', repoKey: 'repo', title: 'Develop', scope: 'Develop',
+      mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Develop',
+        allowedActions: ['investigate'], maxAutoRisk: 'low', policyVersion: 'p1',
+        authority: { kind: 'trusted_rule', ruleRef: 'test' } },
+      state: 'waiting_human', iteration: 1, priority: 0, createdAt: at, updatedAt: at });
+    store.saveRun({ id: 'unconfirmed-run', taskId: 'unconfirmed', iteration: 1, stage: 'develop',
+      status: 'paused', priority: 0, attempt: 1, agentKind: 'qoder', processTerminationUnconfirmed: true,
+      createdAt: at });
+    const version = Number(store.db.prepare('SELECT version FROM task WHERE id=?').get('unconfirmed')?.version);
+    await assert.rejects(executeTaskCommand(store, {}, 'owner', { kind: 'retry', taskId: 'unconfirmed',
+      expectedVersion: version, idempotencyKey: 'retry-blocked', reason: '重试' }), /not ready/);
+    const confirmed = await executeTaskCommand(store, {}, 'owner', { kind: 'confirm_termination',
+      taskId: 'unconfirmed', expectedVersion: version, idempotencyKey: 'confirm-1', reason: '进程已终止' });
+    assert.equal(store.getRun('unconfirmed-run')?.processTerminationUnconfirmed, false);
+    assert.equal(store.getTask('unconfirmed')?.state, 'paused');
+    await executeTaskCommand(store, {}, 'owner', { kind: 'retry', taskId: 'unconfirmed',
+      expectedVersion: confirmed.version, idempotencyKey: 'retry-ok', reason: '重试' });
+    assert.equal(store.getTask('unconfirmed')?.state, 'queued');
+  } finally { store.close(); }
+});

@@ -19,6 +19,8 @@ import { createManualAttachmentReader } from '../event/sources/manual/attachment
 import { createRepositorySelector } from './repository-selection.js';
 import { createCodeHosts } from '../repository-ci/providers/index.js';
 import { createStage5OpenChange } from '../authorization/stage5-open-change.js';
+import { resolveReview } from '../authorization/policy/config.js';
+import { decide } from '../authorization/policy/evaluate.js';
 import { autoPrMandate, autoPrRuleRef } from '../authorization/auto-pr.js';
 import { randomUUID } from 'node:crypto';
 import { authorizationHeaders as defaultAuthorizationHeaders } from './devops-credentials.js';
@@ -48,6 +50,7 @@ const runtime = startConfiguredSchedules({
 stopRuntime = runtime.stop;
 const platform = runtime.platform;
 
+const reviewPolicy = resolveReview(platform.review, platform.policyRef);
 const sourceRepoKeys = Object.fromEntries(platform.sources.filter(source => source.projectKey)
   .map(source => [source.id, platform.projectGroups.find(group => group.projectKey === source.projectKey)!.repoKeys]));
 const trustedRepoBySource: Record<string, string | readonly string[]> = { ...sourceRepoKeys };
@@ -77,8 +80,11 @@ const coordinator = createKernelCoordinator(runtime.store, trustedRepoBySource, 
   'configured-source', agentKind, platform.repositories.map(repo => repo.repoKey),
   createTaskCandidateFinder(runtime.store), event => {
     const repo = platform.repositories.find(item => item.repoKey === event.repoKey);
-    return repo && autoPrMandate(event, repo, platform.policyRef);
-  }, sourceRepoKeys);
+    if (!repo) return undefined;
+    const policy = decide({ gate: 'intake', repoKey: repo.repoKey }, reviewPolicy);
+    if (policy?.enforced && policy.decision.effect !== 'allow') return undefined;
+    return autoPrMandate(event, repo, platform.policyRef);
+  }, sourceRepoKeys, reviewPolicy);
 let routeTimer: ReturnType<typeof setInterval> | undefined;
 let ciTimer: ReturnType<typeof setInterval> | undefined;
 let ciTick: Promise<void> | undefined;
@@ -110,7 +116,7 @@ if (stage5WritesEnabled) for (const repo of platform.repositories) {
 }
 const stage5OpenChange = createStage5OpenChange(runtime.store,
   Object.fromEntries(platform.repositories.map(repo => [repo.repoKey, repo])), codeHosts,
-  workspace, platform.policyRef);
+  workspace, platform.policyRef, undefined, reviewPolicy);
 const manager = createWorkerManager({ store: runtime.store, coordinator,
   runners,
   enabledAgents: platform.agents.filter(agent => agent.enabled).map(agent => agent.kind),
@@ -124,7 +130,7 @@ const manager = createWorkerManager({ store: runtime.store, coordinator,
     return repo && task.mandate.authority.kind === 'auto_pr' &&
       task.mandate.authority.ruleRef === autoPrRuleRef(repo, platform.policyRef) ? 'high' : 'unknown';
   } },
-  policyVersion: platform.policyRef,
+  policyVersion: platform.policyRef, reviewPolicy,
   localChecks: Object.fromEntries(platform.repositories.map(repo => [repo.repoKey, repo.localChecks])),
   attachmentReaders,
   checkLogDirectory: resolve(root, '.runtime/check-logs'),

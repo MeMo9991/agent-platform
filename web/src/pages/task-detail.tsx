@@ -152,9 +152,12 @@ export function HumanAction({ taskId, version, record, onDone }: { taskId: strin
     : record.request?.proposedMandate?.allowedActions.join('、');
   return <div className="run-row task-run task-decision">
     <div className="task-run-heading"><strong>{isQuestion ? '问题' : '审批'}</strong>
-      <Badge>{isQuestion ? '待回答' : '待审批'}</Badge>
+      <Badge tone="warn">{isQuestion ? '待回答' : '待审批'}</Badge>
       <Chip color="gray" variant="caption">{isQuestion ? 'Agent 提问'
-        : record.request?.kind === 'action' ? '动作审批' : '范围变更'}</Chip></div>
+        : record.request?.kind === 'action' ? '动作审批'
+          : record.request?.kind === 'continue' ? '继续验证审批' : '范围变更'}</Chip></div>
+    {record.request?.kind === 'continue' && record.request.reason &&
+      <p className="task-review-summary">策略要求：{record.request.reason}</p>}
     {record.prompt && <p className="task-review-summary">{record.prompt}</p>}
     {record.request && <dl className="task-run-meta">
       <div><dt>受审 SHA</dt><dd><code>{record.request.sourceSha}</code></dd></div>
@@ -190,7 +193,7 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
   const [codeChange, setCodeChange] = useState<'none' | 'committed'>('none');
   const [commitSha, setCommitSha] = useState('');
   const [takeoverKey, setTakeoverKey] = useState(() => crypto.randomUUID());
-  async function command(kind: 'pause' | 'resume' | 'retry' | 'cancel' | 'takeover') {
+  async function command(kind: 'pause' | 'resume' | 'retry' | 'cancel' | 'takeover' | 'confirm_termination') {
     setError(''); setReceipt(''); setBusy(true);
     try {
       const key = commandKeys.current[kind] ??= crypto.randomUUID();
@@ -239,6 +242,9 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
         title={(kind === 'pause' || kind === 'takeover') && !canInterrupt ? '当前状态或待处理请求不允许中断任务' : undefined}
         disabled={busy || !!detail.task.owner || ((kind === 'pause' || kind === 'takeover') && !canInterrupt)}
         onClick={() => void command(kind)}>{label}</Button>)}
+      {detail.runs.some(run => run.status === 'paused' && run.processTerminationUnconfirmed) &&
+        <Button variant="secondary" size="xs" disabled={busy || !!detail.task.owner}
+          onClick={() => void command('confirm_termination')}>确认进程终止</Button>}
       <Button variant="secondary" size="xs" disabled={busy} onClick={() => dialog.current?.showModal()}>拆分任务</Button></div>}
     {expanded && detail.task.state === 'paused' && detail.task.owner === actorId && <form onSubmit={finishTakeover} className="stack task-takeover-inline">
       <h3>提交接管结果</h3><label>处理摘要<textarea value={takeoverSummary}

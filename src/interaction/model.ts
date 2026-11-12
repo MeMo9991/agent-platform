@@ -16,6 +16,8 @@ export const routeReviewDecision = z.discriminatedUnion('choice', [
 export const approvalRequest = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('scope_change'), id, taskId: id, iteration: z.number().int().positive(),
     proposedMandate: mandate, sourceSha: id, policyVersion: id }),
+  z.object({ kind: z.literal('continue'), id, taskId: id, iteration: z.number().int().positive(),
+    sourceSha: z.string().regex(/^[a-f0-9]{40}$/), policyVersion: id, reason: id }),
   z.object({ kind: z.literal('action'), id, taskId: id, action, sourceSha: id, reviewRecordId: id.optional(),
     targetBranch: id.optional(), targetSha: id.optional(), changeRef: id.optional(), environment: id.optional(), releaseVersion: id.optional(), releaseTargetDigest: id.optional(), policyVersion: id })
     .superRefine((value, context) => { if (['open_pr', 'merge'].includes(value.action) && (!value.targetBranch || !value.targetSha || !value.reviewRecordId))

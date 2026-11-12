@@ -11,6 +11,8 @@ import type { CodeHost, repositoryConfig } from '../repository-ci/model.js';
 import type { z } from 'zod';
 import { evaluateStage5Action } from './stage5-policy.js';
 import { autoPrDiffAllowed, autoPrMandate, autoPrPathsAllowed } from './auto-pr.js';
+import { decide, policyWarning, shouldWarn, type PolicyOutcome } from './policy/evaluate.js';
+import type { ResolvedReview } from './policy/config.js';
 import { baseUrl, credential } from '../repository-ci/providers/http.js';
 import { changeRef } from '../repository-ci/model.js';
 import { checksReady } from '../repository-ci/gate.js';
@@ -37,10 +39,23 @@ async function pushBranch(repo: Repository, cwd: string, sourceSha: string, bran
 
 export function createStage5OpenChange(store: SqliteStore, repositories: Readonly<Record<string, Repository>>,
   hosts: Readonly<Record<string, CodeHost>>, workspace: WorkspaceManager, policyVersion: string,
-  push: typeof pushBranch = pushBranch) {
+  push: typeof pushBranch = pushBranch, reviewPolicy?: ResolvedReview) {
   function autoEligible(task: NonNullable<ReturnType<SqliteStore['getTask']>>, repo: Repository,
     review: NonNullable<ReturnType<SqliteStore['latestReview']>>,
     changed: readonly string[], diff: string, sourceSha: string, targetSha: string): boolean {
+    const context = { gate: 'openPr' as const, repoKey: repo.repoKey,
+      taskId: task.id, baseSha: sourceSha, commitSha: sourceSha, paths: changed, diff,
+      review: { verdict: review.verdict, findingsLength: review.findings.length } };
+    const policy: PolicyOutcome | undefined = decide(context, reviewPolicy);
+    if (shouldWarn(policy) && policy) {
+      const at = new Date().toISOString();
+      if (!store.db.prepare(`SELECT 1 FROM task_record WHERE task_id=? AND kind='policy_warning'
+        AND json_extract(payload_json,'$.ruleId')=? AND json_extract(payload_json,'$.gate')=?`)
+        .get(task.id, policy.decision.ruleId, 'openPr'))
+        store.saveRecord({ id: randomUUID(), taskId: task.id, at,
+          kind: 'policy_warning', ...policyWarning(context, policy) });
+    }
+    if (policy?.enforced && policy.decision.effect !== 'allow') return false;
     const event = store.get(task.mandate.sourceEventId);
     const expected = event && autoPrMandate(event, repo, policyVersion);
     if (task.mandate.authority.kind !== 'auto_pr' || expected?.authority.kind !== 'auto_pr' ||

@@ -8,6 +8,8 @@ import { z } from 'zod';
 import { reviewEvidence, type executionAttestation, type developmentEvidence,
   type verificationEvidence, type agentSnapshot } from './model.js';
 import type { SkillLoader } from '../../skills/model.js';
+import { decide, policyWarning, shouldWarn } from '../../authorization/policy/evaluate.js';
+import type { ResolvedReview } from '../../authorization/policy/config.js';
 import type { SqliteStore } from '../../storage/sqlite/store.js';
 import type { AttachmentReader, AttachmentRef } from '../../event/model.js';
 
@@ -56,6 +58,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
   attachmentReaders?: Readonly<Record<string, AttachmentReader>>;
   checkLogDirectory?: string;
   skillRepoPath: string; skillCommitSha: string; maxRunMs: number;
+  reviewPolicy?: ResolvedReview;
   enabledStages?: readonly Run['stage'][];
   limits: { maxConcurrentRuns: number; perRepoConcurrentRuns: number; perAgentConcurrentRuns: number;
     reservedHumanResume: number } }) {
@@ -335,6 +338,20 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
           (input.policyVersion && task.mandate.policyVersion !== input.policyVersion) ||
           risk === 'unknown' || riskRank[risk] > riskRank[task.mandate.maxAutoRisk]))
         throw new Error('Edit Mandate does not authorize this repository');
+      if (mode === 'write') {
+        const context = { gate: 'edit' as const, repoKey: task.repoKey, taskId: task.id, runId: claimed.id };
+        const policy = decide(context, input.reviewPolicy);
+        if (shouldWarn(policy) && policy) {
+          const at = new Date().toISOString();
+          if (!input.store.db.prepare(`SELECT 1 FROM task_record WHERE task_id=? AND kind='policy_warning'
+            AND json_extract(payload_json,'$.ruleId')=? AND json_extract(payload_json,'$.gate')=?`)
+            .get(task.id, policy.decision.ruleId, 'edit'))
+            input.store.saveRecord({ id: randomUUID(), taskId: task.id, runId: claimed.id, at,
+              kind: 'policy_warning', ...policyWarning(context, policy) });
+        }
+        if (policy?.enforced && policy.decision.effect === 'deny')
+          throw new Error(`Policy denied edit: ${policy.decision.reason}`);
+      }
       // 临时关闭自定义 Skill 加载：不读取 skills/<stage>/SKILL.md，也不把提示词注入 Qoder。
       // 需要恢复时取消下面注释，并同步恢复 runRequest.skill 与 system-prompt 的 {{skill}} 占位符。
       // const skill = await input.skills.load({ repoRef: input.skillRepoPath,

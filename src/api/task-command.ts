@@ -83,7 +83,7 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
   const row = store.db.prepare('SELECT version FROM task WHERE id=?').get(input.taskId);
   const task = store.getTask(input.taskId);
   if (!task || Number(row?.version) !== input.expectedVersion) throw new Error('Task version changed; reload before deciding');
-  if (task.owner && ['resume', 'retry', 'cancel'].includes(input.kind))
+  if (task.owner && ['resume', 'retry', 'cancel', 'confirm_termination'].includes(input.kind))
     throw new Error('Human takeover result is required first');
   if (!input.reason.trim()) throw new Error('Reason is required');
   const latestRunStatus = (taskId: string) => {
@@ -97,6 +97,13 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
   const retryWorkerPause = (candidate: { id: string; state: string } | undefined) => Boolean(candidate) &&
     candidate!.state === 'waiting_human' && !hasOpenHumanRequest(candidate!.id) &&
     latestRunStatus(candidate!.id) === 'paused';
+  if (input.kind === 'confirm_termination') {
+    const awaiting = store.db.prepare(`SELECT 1 FROM run WHERE task_id=? AND status='paused'
+      AND json_extract(payload_json,'$.processTerminationUnconfirmed')=1 LIMIT 1`).get(task.id);
+    if (!awaiting) throw new Error('No paused Run awaits termination confirmation');
+    if (!['waiting_human', 'paused', 'blocked'].includes(task.state))
+      throw new Error('Task is not awaiting termination confirmation');
+  }
   const latestReview = input.kind === 'retry' && task.state === 'waiting_human' ? store.latestReview(task.id) : undefined;
   const retryEmptyReview = latestReview?.verdict === 'block' && latestReview.findings.length === 0;
   if (['resume', 'retry'].includes(input.kind) && !['paused', 'failed', 'blocked'].includes(task.state) &&
@@ -147,6 +154,15 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
             .run(actorId, JSON.stringify({ ...updated, owner: actorId }), current.id);
         }
       }
+    } else if (input.kind === 'confirm_termination') {
+      const row = store.db.prepare(`SELECT id FROM run WHERE task_id=? AND status='paused'
+        AND json_extract(payload_json,'$.processTerminationUnconfirmed')=1
+        ORDER BY created_at DESC LIMIT 1`).get(current.id);
+      const pausedRun = row ? store.getRun(String(row.id)) : undefined;
+      if (!pausedRun) throw new Error('No paused Run awaits termination confirmation');
+      store.replaceRun({ ...pausedRun, processTerminationUnconfirmed: false }, 'paused');
+      if (current.state !== 'paused')
+        store.saveTransition(current.id, 'paused', input.reason, now, randomUUID(), actor);
     } else {
       if ((!['paused', 'failed', 'blocked'].includes(current.state) && !retryEmptyReview &&
           !retryWorkerPause(current)) || store.hasActiveRun(current.id))

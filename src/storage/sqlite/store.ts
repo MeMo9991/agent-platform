@@ -335,12 +335,16 @@ export class SqliteStore implements EventRepository {
     const request = approvalRequest.parse(input);
     this.transaction(() => {
       const current = this.getTask(request.taskId);
-      const stageFive = request.kind === 'action' || request.proposedMandate.allowedActions.some(action =>
-        action === 'open_pr' || action === 'merge');
+      const stageFive = request.kind === 'action' || (request.kind === 'scope_change' &&
+        request.proposedMandate.allowedActions.some(action => action === 'open_pr' || action === 'merge'));
       const reviewedSha = stageFive ? this.latestReviewedSha(request.taskId) : undefined;
+      const continueRun = request.kind === 'continue'
+        ? this.db.prepare("SELECT 1 FROM run WHERE task_id=? AND stage='develop' AND commit_sha=? LIMIT 1")
+          .get(request.taskId, request.sourceSha) : undefined;
       if (!current || current.state !== 'waiting_human' ||
-          (request.kind === 'scope_change' && current.iteration !== request.iteration) ||
-          (stageFive ? reviewedSha !== request.sourceSha : current.baseRef !== request.sourceSha) ||
+          (request.kind !== 'action' && current.iteration !== request.iteration) ||
+          (request.kind === 'continue' ? !continueRun
+            : stageFive ? reviewedSha !== request.sourceSha : current.baseRef !== request.sourceSha) ||
           current.mandate.policyVersion !== request.policyVersion)
         throw new Error('Approval request does not match current Task, policy and SHA');
       if (request.kind === 'scope_change' && (request.proposedMandate.repoKey !== current.repoKey ||
@@ -478,15 +482,20 @@ export class SqliteStore implements EventRepository {
       if (record.kind !== 'approval_request' || record.status !== 'open') throw new Error('Approval request is closed');
       const request = approvalRequest.parse(record.request);
       const current = this.getTask(record.taskId);
-      const stageFive = request.kind === 'action' || request.proposedMandate.allowedActions.some(action =>
-        action === 'open_pr' || action === 'merge');
+      const stageFive = request.kind === 'action' || (request.kind === 'scope_change' &&
+        request.proposedMandate.allowedActions.some(action => action === 'open_pr' || action === 'merge'));
+      const continueRun = request.kind === 'continue'
+        ? this.db.prepare("SELECT 1 FROM run WHERE task_id=? AND stage='develop' AND commit_sha=? LIMIT 1")
+          .get(request.taskId, request.sourceSha) : undefined;
       if (!current || current.state !== 'waiting_human' ||
-          (request.kind === 'scope_change' && current.iteration !== request.iteration) ||
-          (stageFive ? this.latestReviewedSha(current.id) !== request.sourceSha : current.baseRef !== request.sourceSha) ||
+          (request.kind !== 'action' && current.iteration !== request.iteration) ||
+          (request.kind === 'continue' ? !continueRun
+            : stageFive ? this.latestReviewedSha(current.id) !== request.sourceSha : current.baseRef !== request.sourceSha) ||
           (request.kind === 'action' && this.latestReview(current.id)?.id !== request.reviewRecordId) ||
           current.mandate.policyVersion !== request.policyVersion) throw new Error('Approval request is stale');
       this.saveRecord({ id: randomUUID(), taskId: current.id, kind: 'approval', requestId: request.id,
-        action: request.kind === 'scope_change' ? 'edit' : request.action, subjectSha: request.sourceSha,
+        action: request.kind === 'scope_change' || request.kind === 'continue' ? 'edit' : request.action,
+        subjectSha: request.sourceSha,
         policyVersion: request.policyVersion, actor: value.actor, decision: value.decision,
         idempotencyKey: value.idempotencyKey, at: value.at });
       const status = value.decision === 'approve' ? 'approved' : 'rejected';
@@ -499,7 +508,8 @@ export class SqliteStore implements EventRepository {
         if (changed.changes !== 1) throw new Error('Approval Task state changed');
         return next;
       }
-      return request.kind === 'action' && value.decision === 'approve' ? current : undefined;
+      return (request.kind === 'action' || request.kind === 'continue') && value.decision === 'approve'
+        ? current : undefined;
     });
   }
   recordAnswer(value: z.infer<typeof answer>): { task: Task; run: Run } | undefined {

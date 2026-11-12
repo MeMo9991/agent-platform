@@ -5,6 +5,8 @@ import { createEventLoop } from './event-loop.js';
 import type { Task, TaskState, TaskRecord } from '../task/model.js';
 import type { Run } from '../worker/model.js';
 import { decideAgentEvent, decideRunRecovery } from '../task/workflow.js';
+import { decide, policyWarning, shouldWarn } from '../../authorization/policy/evaluate.js';
+import type { ResolvedReview } from '../../authorization/policy/config.js';
 import type { z } from 'zod';
 import type { approvalRequest, approvalDecision, answer, routeReviewDecision } from '../../interaction/model.js';
 import { routeReviewDecision as routeReviewDecisionSchema } from '../../interaction/model.js';
@@ -49,7 +51,8 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
   policyVersion: string, ruleRef: string, agentKind: string,
   allowedRepos: readonly string[], finder: TaskCandidateFinder,
   autoMandate?: (event: SourceEvent) => Task['mandate'] | undefined,
-  sourceRepoKeys: Readonly<Record<string, readonly string[]>> = {}): KernelCoordinator & { processPending(limit?: number): number;
+  sourceRepoKeys: Readonly<Record<string, readonly string[]>> = {},
+  reviewPolicy?: ResolvedReview): KernelCoordinator & { processPending(limit?: number): number;
     resolveHumanRoute(value: z.infer<typeof routeReviewDecision>): string | undefined } {
   const eventLoop = createEventLoop(store, trustedRepoBySource, policyVersion, ruleRef, agentKind, finder, 60_000, autoMandate);
   const actor = { kind: 'system' as const, id: 'kernel' };
@@ -239,6 +242,12 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
             if (approvedRequest.kind === 'action') {
               store.saveTransition(approved.id, 'ready_to_merge', 'Approved code-host action',
                 response.value.at, randomUUID(), response.value.actor);
+            } else if (approvedRequest.kind === 'continue') {
+              store.saveTransition(approved.id, 'verifying', '策略审批通过，继续验证',
+                response.value.at, randomUUID(), response.value.actor);
+              store.saveRun({ id: randomUUID(), taskId: approved.id, iteration: approved.iteration, stage: 'verify',
+                status: 'queued', requestKey: `policy:${response.value.idempotencyKey}`, priority: approved.priority,
+                attempt: 0, agentKind, commitSha: approvedRequest.sourceSha, createdAt: response.value.at });
             } else if (approvedRequest.proposedMandate.allowedActions.includes('open_pr') ||
                 approvedRequest.proposedMandate.allowedActions.includes('merge')) {
               store.saveTransition(approved.id, 'ready_to_merge', 'Approved code-host scope',
@@ -265,6 +274,38 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
         if (!run || !task) throw new Error('Task or Run is missing');
         const previousReviewBlocks = event.kind === 'result' && run.stage === 'review'
           ? store.countReviewBlocks(task.id, task.iteration) : 0;
+        if (event.kind === 'result' && run.stage === 'develop' && event.development && reviewPolicy) {
+          const context = { gate: 'develop-complete' as const, repoKey: task.repoKey, taskId: task.id, runId: run.id,
+            baseSha: event.development.baseSha, commitSha: event.development.commitSha,
+            paths: event.development.changedPaths ?? [] };
+          const policy = decide(context, reviewPolicy);
+          if (shouldWarn(policy) && policy) {
+            store.saveRecord({ id: randomUUID(), taskId: task.id, runId: run.id,
+              at: new Date().toISOString(), kind: 'policy_warning', ...policyWarning(context, policy) });
+          }
+          if (policy?.enforced && policy.decision.effect === 'deny') {
+            const at = new Date().toISOString();
+            const reason = `策略拒绝：${policy.decision.reason}`;
+            store.saveRecord({ id: randomUUID(), taskId: task.id, runId: run.id, kind: 'agent_report',
+              status: 'failed', summary: reason, at });
+            store.replaceRun({ ...run, status: 'paused', leaseUntil: undefined, workerId: undefined, endedAt: at }, 'running');
+            if (task.state !== 'waiting_human')
+              store.saveTransition(task.id, 'waiting_human', reason, at, randomUUID(), actor);
+            return;
+          }
+          if (policy?.enforced && policy.decision.effect === 'require-approval') {
+            const at = new Date().toISOString();
+            const reason = `策略要求审批：${policy.decision.reason}`;
+            store.replaceRun({ ...run, status: 'succeeded', leaseUntil: undefined, workerId: undefined,
+              commitSha: event.development.commitSha, resultRef: event.resultRef, endedAt: at }, 'running');
+            if (task.state !== 'waiting_human')
+              store.saveTransition(task.id, 'waiting_human', reason, at, randomUUID(), actor);
+            store.saveApprovalRequest({ kind: 'continue', id: `policy-${run.id}`, taskId: task.id,
+              iteration: task.iteration, sourceSha: event.development.commitSha,
+              policyVersion: task.mandate.policyVersion, reason: policy.decision.reason });
+            return;
+          }
+        }
         const decision = decideAgentEvent(task, run, event, store.hasPendingInput(task.id), previousReviewBlocks);
         const at = new Date().toISOString();
         if (event.kind === 'input_handled') {

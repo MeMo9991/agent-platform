@@ -90,13 +90,15 @@ export function createGitWorkspaceManager(repositories: Readonly<Record<string, 
     const diff = (await exec('git', ['diff', '--binary', run.commitSha, commitSha],
       { cwd: path, maxBuffer: 10 * 1024 * 1024 })).stdout;
     if (!diff.trim()) throw new Error('Development commit has no diff');
+    const changedPaths = (await exec('git', ['diff', '--name-only', '--no-renames', run.commitSha, commitSha],
+      { cwd: path })).stdout.split('\n').map(item => item.trim()).filter(Boolean);
     if ((await exec('git', ['rev-parse', 'HEAD'], { cwd: path })).stdout.trim() !== commitSha)
       throw new Error('Development HEAD changed during verification');
     const evidenceDir = resolve(runtimeRoot, 'evidence');
     await mkdir(evidenceDir, { recursive: true, mode: 0o700 });
     const diffRef = resolve(evidenceDir, `${randomUUID()}.patch`);
     await writeFile(diffRef, diff, { mode: 0o600, flag: 'wx' });
-    return { baseSha: run.commitSha, commitSha, diffRef };
+    return { baseSha: run.commitSha, commitSha, diffRef, changedPaths };
   }, async verifyAfterChecks(run, commitSha) {
     const repo = repositories[repoForRun(run)];
     const path = clonePath(run);
