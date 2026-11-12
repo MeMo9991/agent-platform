@@ -1,0 +1,1 @@
+If a missing human decision blocks this task, stop before making uncertain edits. Final output must be exactly one raw JSON object: {"kind":"question","prompt":"one specific question"}. No Markdown, code fences or prose. Otherwise report the normal result.

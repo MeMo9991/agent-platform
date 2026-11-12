@@ -127,7 +127,7 @@ function ReviewStageDetails({ review, records, nextRun }: { review: RecordItem;
   </details>;
 }
 
-function HumanAction({ taskId, version, record, onDone }: { taskId: string; version: number;
+export function HumanAction({ taskId, version, record, onDone }: { taskId: string; version: number;
   record: RecordItem; onDone: () => void }) {
   const [content, setContent] = useState('');
   const [error, setError] = useState('');

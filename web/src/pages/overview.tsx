@@ -3,6 +3,7 @@ import { RiAlertLine, RiArrowRightUpLine, RiInbox2Line, RiLoader4Fill, RiPulseLi
 import { api } from '../app/api';
 import { Badge, Button, Card } from '../components/ui';
 import type { Detail, Event, RecordItem, Task } from '../shared/types';
+import { HumanAction } from './task-detail';
 
 type Overview = { pendingEvents: number; humanEvents: number; openRequests: number;
   failedTasks: number; runningWorkers: number; queuedRuns: number; enabledSources: number; workerCapacity: number | null };
@@ -34,7 +35,25 @@ function PrApproval({ request, onDone }: { request: RecordItem; onDone: (decisio
   </div>;
 }
 
-export function OverviewPage({ canApprove }: { canApprove: boolean }) {
+function PendingQuestion({ request, revision, onDone }: { request: RecordItem; revision: number; onDone: () => void }) {
+  const [detail, setDetail] = useState<Detail>();
+  const [error, setError] = useState('');
+  useEffect(() => { let live = true;
+    void api<Detail>(`/api/tasks/${encodeURIComponent(request.taskId)}`)
+      .then(value => { if (live) { setDetail(value); setError(''); } })
+      .catch(cause => { if (live) setError(String(cause)); });
+    return () => { live = false; };
+  }, [request.taskId, revision]);
+  const current = detail?.records.find(item => item.id === request.id && item.status === 'open');
+  return <div className="stack" key={request.id}>
+    <a href={`#/tasks/${encodeURIComponent(request.taskId)}`}>任务 {request.taskId} →</a>
+    {current && detail ? <HumanAction key={`${request.id}-${detail.task.version}`} taskId={request.taskId}
+      version={detail.task.version} record={current} onDone={onDone} />
+      : error ? <p role="alert" className="error">{error}</p> : <p className="muted">正在加载问题…</p>}
+  </div>;
+}
+
+export function OverviewPage({ canApprove, canAnswer }: { canApprove: boolean; canAnswer: boolean }) {
   const [overview, setOverview] = useState<Overview>();
   const [inbox, setInbox] = useState<Inbox>();
   const [error, setError] = useState('');
@@ -65,7 +84,10 @@ export function OverviewPage({ canApprove }: { canApprove: boolean }) {
         : <div className="empty-state"><RiInbox2Line aria-hidden /><strong>没有待处理事件</strong><span>新事件出现后会显示在这里</span></div>}</Card>
       <Card className="queue-card queue-people"><div className="card-heading"><div><span className="eyebrow">人工决定</span><h2>通知与审批</h2></div></div>
       {inbox?.requests.length ? <div className="item-list">{inbox.requests.map(request =>
-        canApprove && request.request?.kind === 'action' && request.request.action === 'open_pr'
+        canAnswer && request.kind === 'question'
+          ? <PendingQuestion key={request.id} request={request} revision={revision}
+            onDone={() => setRevision(value => value + 1)} />
+          : canApprove && request.request?.kind === 'action' && request.request.action === 'open_pr'
           ? <PrApproval key={request.id} request={request} onDone={decision => {
             setNotice(decision === 'approve' ? '已批准，平台将重新校验并创建 PR' : '已驳回，平台不会提交 PR');
             setRevision(value => value + 1);

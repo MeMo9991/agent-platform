@@ -491,6 +491,43 @@ test('a question keeps its slot until the same process has durable termination e
   }
 });
 
+test('a structured Qoder result becomes a waiting question only after durable termination', async () => {
+  const store = new SqliteStore(':memory:', { [sourceId]: [] });
+  try {
+    store.registerSource(sourceId, 'fixture', 'fixture', true);
+    store.accept(event);
+    const coordinator = createKernelCoordinator(store, { [sourceId]: 'agent-platform' }, 'p1', 'fixture', 'qoder', ['agent-platform']);
+    coordinator.processPending();
+    const runId = String(store.db.prepare('SELECT id FROM run').get()?.id);
+    const taskId = store.getRun(runId)!.taskId;
+    let finished = false;
+    const manager = createWorkerManager({ store, coordinator, enabledAgents: ['qoder'],
+      runners: { qoder: { capabilities: () => ({ start: 'supported', resume: 'unsupported', send: 'unsupported' }),
+        async start() { return { sessionId: 'question-session' }; },
+        async resume() { return { kind: 'unsupported' }; }, async send() { return { kind: 'unsupported' }; },
+        async read() { return finished ? { kind: 'finished', runId, exitCode: 0, resultRef: '/trusted/result.json' }
+          : { kind: 'running', runId }; },
+        async readDurable() { return { kind: 'finished', runId, exitCode: 0, resultRef: '/trusted/result.json' }; },
+        async resultSummary() { return '{"kind":"question","prompt":"Which service owns this behavior?"}'; },
+        async cancel() { return { kind: 'accepted' }; } } },
+      workspace: { async prepare() { return { repoKey: 'agent-platform', path: '/tmp/structured-question', baseSha: 'a'.repeat(40) }; } },
+      skills: { async load(ref) { return { ref, content: 'Investigate safely' }; } },
+      boundary: { async attest(value) { return { verified: true, runId: value.runId, repoKey: value.repoKey,
+        workspacePath: value.workspacePath, mode: 'read', adapterVersion: 'test', configDigest: 'test' }; } },
+      skillRepoPath: 'agent-platform', skillCommitSha: 'a'.repeat(40), maxRunMs: 60_000,
+      limits: { maxConcurrentRuns: 1, perRepoConcurrentRuns: 1, perAgentConcurrentRuns: 1, reservedHumanResume: 0 } });
+    assert.equal(await manager.tick(), true);
+    finished = true;
+    assert.equal(await manager.poll(), 1);
+    assert.equal(store.getRun(runId)?.status, 'waiting_human');
+    assert.equal(store.getTask(taskId)?.state, 'waiting_human');
+    const question = store.openQuestionForRun(runId);
+    assert.equal(question?.prompt, 'Which service owns this behavior?');
+    assert.equal(await manager.recover(), 0);
+    assert.equal(store.openQuestionForRun(runId)?.id, question?.id);
+  } finally { store.close(); }
+});
+
 for (const durableFinished of [true, false]) test(`restarted Run recovery ${durableFinished ? 'uses durable completion' : 'waits when completion is unknown'}`, async () => {
   const store = new SqliteStore(':memory:', { [sourceId]: [] });
   try {
