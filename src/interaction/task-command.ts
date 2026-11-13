@@ -11,6 +11,7 @@ export const taskCommand = z.discriminatedUnion('kind', [
   withReason.extend({ kind: z.literal('retry') }),
   withReason.extend({ kind: z.literal('cancel') }),
   withReason.extend({ kind: z.literal('takeover') }),
+  withReason.extend({ kind: z.literal('confirm_termination') }),
   base.extend({ kind: z.literal('split'), description: z.string().trim().min(1).max(20_000) }),
   base.extend({ kind: z.literal('takeover_result'), summary: z.string().trim().min(1).max(2000),
     disposition: z.enum(['resume', 'cancel']), codeChange: z.enum(['none', 'committed']).default('none'),

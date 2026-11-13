@@ -10,7 +10,9 @@
     "test": "node --import tsx --test tests/*.test.ts",
     "build": "tsc && npm --workspace web run build",
     "start": "node dist/bootstrap/main.js",
-    "selfcheck": "node dist/bootstrap/selfcheck.js"
+    "selfcheck": "node dist/bootstrap/selfcheck.js",
+    "prune-workspaces": "node --import tsx scripts/prune-workspaces.ts",
+    "repair-missing-development": "node --import tsx scripts/repair-missing-development.ts"
   },
   "dependencies": { "zod": "^4.1.0" },
   "devDependencies": {

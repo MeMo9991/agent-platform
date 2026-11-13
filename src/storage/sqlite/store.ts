@@ -180,9 +180,13 @@ export class SqliteStore implements EventRepository {
         this.saveRun(plan.run);
       } else {
         const owner = this.getTask(decision.taskId);
-        if (!owner || !owner.mandate.allowedActions.includes('investigate') ||
-            (event.repoKey && owner.repoKey !== event.repoKey) ||
-            ['released', 'closed', 'cancelled'].includes(owner.state)) throw new Error('Invalid route owner');
+        if (!owner) throw new Error('Route owner task was not found');
+        if (!owner.mandate.allowedActions.includes('investigate'))
+          throw new Error('Route owner task does not allow investigation');
+        if (event.repoKey && owner.repoKey !== event.repoKey)
+          throw new Error('Route owner task belongs to another repository');
+        if (['released', 'closed', 'cancelled'].includes(owner.state))
+          throw new Error('Route owner task is closed or cancelled');
         if (plan.taskId !== owner.id || plan.task) throw new Error('Route plan owner changed');
         taskId = owner.id;
       }
@@ -331,12 +335,16 @@ export class SqliteStore implements EventRepository {
     const request = approvalRequest.parse(input);
     this.transaction(() => {
       const current = this.getTask(request.taskId);
-      const stageFive = request.kind === 'action' || request.proposedMandate.allowedActions.some(action =>
-        action === 'open_pr' || action === 'merge');
+      const stageFive = request.kind === 'action' || (request.kind === 'scope_change' &&
+        request.proposedMandate.allowedActions.some(action => action === 'open_pr' || action === 'merge'));
       const reviewedSha = stageFive ? this.latestReviewedSha(request.taskId) : undefined;
+      const continueRun = request.kind === 'continue'
+        ? this.db.prepare("SELECT 1 FROM run WHERE task_id=? AND stage='develop' AND commit_sha=? LIMIT 1")
+          .get(request.taskId, request.sourceSha) : undefined;
       if (!current || current.state !== 'waiting_human' ||
-          (request.kind === 'scope_change' && current.iteration !== request.iteration) ||
-          (stageFive ? reviewedSha !== request.sourceSha : current.baseRef !== request.sourceSha) ||
+          (request.kind !== 'action' && current.iteration !== request.iteration) ||
+          (request.kind === 'continue' ? !continueRun
+            : stageFive ? reviewedSha !== request.sourceSha : current.baseRef !== request.sourceSha) ||
           current.mandate.policyVersion !== request.policyVersion)
         throw new Error('Approval request does not match current Task, policy and SHA');
       if (request.kind === 'scope_change' && (request.proposedMandate.repoKey !== current.repoKey ||
@@ -474,15 +482,20 @@ export class SqliteStore implements EventRepository {
       if (record.kind !== 'approval_request' || record.status !== 'open') throw new Error('Approval request is closed');
       const request = approvalRequest.parse(record.request);
       const current = this.getTask(record.taskId);
-      const stageFive = request.kind === 'action' || request.proposedMandate.allowedActions.some(action =>
-        action === 'open_pr' || action === 'merge');
+      const stageFive = request.kind === 'action' || (request.kind === 'scope_change' &&
+        request.proposedMandate.allowedActions.some(action => action === 'open_pr' || action === 'merge'));
+      const continueRun = request.kind === 'continue'
+        ? this.db.prepare("SELECT 1 FROM run WHERE task_id=? AND stage='develop' AND commit_sha=? LIMIT 1")
+          .get(request.taskId, request.sourceSha) : undefined;
       if (!current || current.state !== 'waiting_human' ||
-          (request.kind === 'scope_change' && current.iteration !== request.iteration) ||
-          (stageFive ? this.latestReviewedSha(current.id) !== request.sourceSha : current.baseRef !== request.sourceSha) ||
+          (request.kind !== 'action' && current.iteration !== request.iteration) ||
+          (request.kind === 'continue' ? !continueRun
+            : stageFive ? this.latestReviewedSha(current.id) !== request.sourceSha : current.baseRef !== request.sourceSha) ||
           (request.kind === 'action' && this.latestReview(current.id)?.id !== request.reviewRecordId) ||
           current.mandate.policyVersion !== request.policyVersion) throw new Error('Approval request is stale');
       this.saveRecord({ id: randomUUID(), taskId: current.id, kind: 'approval', requestId: request.id,
-        action: request.kind === 'scope_change' ? 'edit' : request.action, subjectSha: request.sourceSha,
+        action: request.kind === 'scope_change' || request.kind === 'continue' ? 'edit' : request.action,
+        subjectSha: request.sourceSha,
         policyVersion: request.policyVersion, actor: value.actor, decision: value.decision,
         idempotencyKey: value.idempotencyKey, at: value.at });
       const status = value.decision === 'approve' ? 'approved' : 'rejected';
@@ -495,7 +508,8 @@ export class SqliteStore implements EventRepository {
         if (changed.changes !== 1) throw new Error('Approval Task state changed');
         return next;
       }
-      return request.kind === 'action' && value.decision === 'approve' ? current : undefined;
+      return (request.kind === 'action' || request.kind === 'continue') && value.decision === 'approve'
+        ? current : undefined;
     });
   }
   recordAnswer(value: z.infer<typeof answer>): { task: Task; run: Run } | undefined {
@@ -597,7 +611,8 @@ export class SqliteStore implements EventRepository {
   }
   claimRun(workerId: string, at: string, leaseUntil: string, limits: {
     maxConcurrentRuns: number; perRepoConcurrentRuns: number; perAgentConcurrentRuns: number; reservedHumanResume: number;
-  }, agentKinds: readonly string[], stages: readonly Run['stage'][] = ['investigate', 'develop']): Run | undefined {
+  }, agentKinds: readonly string[], stages: readonly Run['stage'][] = ['investigate', 'develop'],
+  stageFilter?: (run: Run, task: Task) => boolean): Run | undefined {
     return this.transaction(() => {
       if (this.db.prepare(`SELECT 1 FROM run WHERE status='paused'
         AND json_extract(payload_json,'$.processTerminationUnconfirmed')=1 LIMIT 1`).get()) return undefined;
@@ -609,7 +624,9 @@ export class SqliteStore implements EventRepository {
       for (const row of queued) {
         const candidate = this.getRun(String(row.id))!;
         if (!stages.includes(candidate.stage)) continue;
-        if (this.getTask(candidate.taskId)?.state === 'waiting_human') continue;
+        const task = this.getTask(candidate.taskId);
+        if (task?.state === 'waiting_human') continue;
+        if (task && stageFilter && !stageFilter(candidate, task)) continue;
         if (!candidate.agentKind || !agentKinds.includes(candidate.agentKind) ||
             active.length >= limits.maxConcurrentRuns ||
             ((candidate.queueClass ?? 'normal') === 'normal' && active.filter(item => item.queue_class === 'normal').length >=

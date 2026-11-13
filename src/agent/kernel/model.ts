@@ -13,7 +13,8 @@ export const kernelSignal = z.discriminatedUnion('kind', [
     observation: z.discriminatedUnion('kind', [
       z.object({ kind: z.literal('unknown'), reason: id }),
       z.object({ kind: z.literal('finished'), sessionId: id, exitCode: z.number().int(),
-        resultRef: id.optional(), development: developmentEvidence.optional(), verification: verificationEvidence.optional(),
+        resultRef: id.optional(), error: z.string().max(2048).optional(),
+        development: developmentEvidence.optional(), verification: verificationEvidence.optional(),
         review: reviewEvidence.optional() }),
     ]).optional() }),
 ]);

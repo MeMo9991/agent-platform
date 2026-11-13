@@ -36,9 +36,11 @@ export function createQoderRunner(launcher: IsolatedProcessLauncher, logDirector
     if (log.runId !== runId || log.nativeSessionId !== sessionId ||
         !Number.isInteger(log.exitCode) || typeof log.closedAt !== 'string' ||
         !Number.isFinite(Date.parse(log.closedAt)) || log.terminationConfirmed !== true ||
-        typeof log.stdout !== 'string' || log.stdout.length > 10 * 1024 * 1024)
+        typeof log.stdout !== 'string' || log.stdout.length > 10 * 1024 * 1024 ||
+        (log.error !== undefined && (typeof log.error !== 'string' || log.error.length > 2048)))
       return undefined;
-    return { path, exitCode: log.exitCode as number, stdout: log.stdout };
+    return { path, exitCode: log.exitCode as number, stdout: log.stdout,
+      ...(typeof log.error === 'string' ? { error: log.error } : {}) };
   };
   const finalText = (stdout: string, sessionId: string) => {
     let result: string | undefined;
@@ -54,7 +56,7 @@ export function createQoderRunner(launcher: IsolatedProcessLauncher, logDirector
   const sessions = new Map<string, { runId: string; process: ChildProcess; terminate(): boolean;
     isTerminated?(): boolean;
     exitCode?: number; stdout: string; stderr: string;
-    resultRef?: string }>();
+    resultRef?: string; error?: string }>();
   return {
     capabilities() { return { start: launcher.verified ? 'supported' : 'unverified',
       resume: 'unsupported', send: 'unsupported', cancel: launcher.verified ? 'supported' : 'unverified',
@@ -93,7 +95,7 @@ export function createQoderRunner(launcher: IsolatedProcessLauncher, logDirector
       const state = { runId: request.runId, process: child, terminate: launched.terminate,
         isTerminated: launched.isTerminated,
         stdout: '', stderr: '', exitCode: undefined as number | undefined,
-        resultRef: undefined as string | undefined };
+        resultRef: undefined as string | undefined, error: undefined as string | undefined };
       let sessionId: string | undefined;
       let pending = '';
       let sawValidResult = false;
@@ -130,7 +132,14 @@ export function createQoderRunner(launcher: IsolatedProcessLauncher, logDirector
               typeof event.result === 'string' && event.result.trim()) {
             sawValidResult = true;
             accept();
-          } else state.exitCode = -1;
+          } else {
+            state.exitCode = -1;
+            const errors = Array.isArray(event.errors)
+              ? event.errors.filter((item): item is string => typeof item === 'string').join('; ') : '';
+            const fallback = typeof event.error_code === 'string' ? event.error_code
+              : typeof event.terminal_reason === 'string' ? event.terminal_reason : '';
+            state.error = (errors || fallback).trim().slice(0, 2048) || undefined;
+          }
         }
       };
       child.stdout?.on('data', chunk => {
@@ -167,7 +176,7 @@ export function createQoderRunner(launcher: IsolatedProcessLauncher, logDirector
           if (!logRef) throw new Error('Qoder Session ID is missing');
           writeFileSync(logRef, JSON.stringify({ runId: request.runId, stdout: state.stdout, stderr: state.stderr,
             exitCode: state.exitCode, nativeSessionId: sessionId, closedAt: new Date().toISOString(),
-            terminationConfirmed }), { mode: 0o600, flag: 'wx' });
+            terminationConfirmed, error: state.error }), { mode: 0o600, flag: 'wx' });
         } catch {
           state.exitCode = -1;
           state.resultRef = undefined;
@@ -203,13 +212,15 @@ export function createQoderRunner(launcher: IsolatedProcessLauncher, logDirector
       if (!state) return { kind: 'unknown' as const, runId: sessionId };
       if (state.exitCode === undefined) return { kind: 'running' as const, runId: state.runId };
       if (state.isTerminated?.() !== true) return { kind: 'unknown' as const, runId: state.runId };
-      return { kind: 'finished' as const, runId: state.runId, exitCode: state.exitCode, resultRef: state.resultRef };
+      return { kind: 'finished' as const, runId: state.runId, exitCode: state.exitCode,
+        resultRef: state.resultRef, error: state.error };
     },
     async readDurable(runId, sessionId) {
       const log = readLog(runId, sessionId);
       if (!log) return { kind: 'unknown' as const, runId };
       return { kind: 'finished' as const, runId, exitCode: log.exitCode,
-        resultRef: log.exitCode === 0 && finalText(log.stdout, sessionId) ? log.path : undefined };
+        resultRef: log.exitCode === 0 && finalText(log.stdout, sessionId) ? log.path : undefined,
+        error: log.error };
     },
     async resultSummary(runId, sessionId, resultRef) {
       const log = readLog(runId, sessionId);

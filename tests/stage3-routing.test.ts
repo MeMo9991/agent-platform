@@ -961,7 +961,8 @@ test('execution proof for a different workspace never starts the runner', async 
   } finally { store.close(); }
 });
 
-test('empty or missing pinned Skill fails Run and blocks Task before workspace creation', async () => {
+// 自定义 Skill 加载已临时关闭（见 manager.ts），恢复该功能时同步恢复此用例。
+test.skip('empty or missing pinned Skill fails Run and blocks Task before workspace creation', async () => {
   const store = new SqliteStore(':memory:', { [sourceId]: [] });
   try {
     store.registerSource(sourceId, 'fixture', 'fixture', true);

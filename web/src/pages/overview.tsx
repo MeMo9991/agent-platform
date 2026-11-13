@@ -2,12 +2,14 @@ import { useEffect, useState } from 'react';
 import { RiAlertLine, RiArrowRightUpLine, RiInbox2Line, RiLoader4Fill, RiPulseLine } from '@remixicon/react';
 import { api } from '../app/api';
 import { Badge, Button, Card } from '../components/ui';
+import { Checkbox } from '@/components/base/checkbox/checkbox';
 import type { Detail, Event, RecordItem, Task } from '../shared/types';
 import { HumanAction } from './task-detail';
 
 type Overview = { pendingEvents: number; humanEvents: number; openRequests: number;
   failedTasks: number; runningWorkers: number; queuedRuns: number; enabledSources: number; workerCapacity: number | null };
-type Inbox = { events: Event[]; requests: RecordItem[]; tasks: Task[] };
+type Inbox = { events: Event[]; requests: RecordItem[]; tasks: Task[];
+  notices?: { id: string; title: string; detail: string; checkedAt: string }[] };
 function PrApproval({ request, onDone }: { request: RecordItem; onDone: (decision: 'approve' | 'reject') => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -53,12 +55,15 @@ function PendingQuestion({ request, revision, onDone }: { request: RecordItem; r
   </div>;
 }
 
-export function OverviewPage({ canApprove, canAnswer }: { canApprove: boolean; canAnswer: boolean }) {
+export function OverviewPage({ canApprove, canAnswer, canRoute }: {
+  canApprove: boolean; canAnswer: boolean; canRoute: boolean }) {
   const [overview, setOverview] = useState<Overview>();
   const [inbox, setInbox] = useState<Inbox>();
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [revision, setRevision] = useState(0);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [ignoring, setIgnoring] = useState(false);
   useEffect(() => { let live = true;
     const refresh = () => Promise.all([api<Overview>('/api/overview'), api<Inbox>('/api/inbox')])
       .then(([o, i]) => { if (live) { setOverview(o); setInbox(i); setError(''); } })
@@ -66,6 +71,46 @@ export function OverviewPage({ canApprove, canAnswer }: { canApprove: boolean; c
     void refresh(); const timer = setInterval(refresh, 5000);
     return () => { live = false; clearInterval(timer); };
   }, [revision]);
+  useEffect(() => { if (!inbox) return;
+    const live = new Set(inbox.events.map(event => event.id));
+    setSelected(current => {
+      const next = new Set([...current].filter(id => live.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [inbox]);
+  const selectedCount = selected.size;
+  const allSelected = Boolean(inbox?.events.length) && selectedCount === inbox!.events.length;
+  function toggle(id: string) {
+    setSelected(current => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  async function ignoreEvents(eventIds: string[]) {
+    if (!eventIds.length || ignoring) return;
+    const reason = window.prompt('忽略原因（会写入路由审计记录）', '无效待办，批量忽略');
+    if (reason === null) return;
+    const trimmed = reason.trim();
+    if (!trimmed) { setError('忽略原因不能为空'); return; }
+    setIgnoring(true); setError(''); setNotice('');
+    try {
+      const result = await api<{ ignored: string[]; failed: { eventId: string; error: string }[] }>(
+        '/api/events/ignore', { method: 'POST',
+          body: { eventIds, reason: trimmed, batchKey: crypto.randomUUID() } });
+      const ignored = new Set(result.ignored);
+      setInbox(current => current && ignored.size
+        ? { ...current, events: current.events.filter(event => !ignored.has(event.id)) } : current);
+      setOverview(current => current && ignored.size
+        ? { ...current, humanEvents: Math.max(0, current.humanEvents - ignored.size) } : current);
+      setSelected(current => new Set([...current].filter(id => !ignored.has(id))));
+      setNotice(result.failed.length
+        ? `已忽略 ${result.ignored.length} 条，${result.failed.length} 条失败：${result.failed[0]?.error ?? ''}`
+        : `已忽略 ${result.ignored.length} 条待处理事件`);
+      setRevision(value => value + 1);
+    } catch (cause) { setError(String(cause)); }
+    finally { setIgnoring(false); }
+  }
   return <div className="stack overview"><header className="page-heading"><div><span className="eyebrow">工作台 / 任务流</span>
     <h1>待办总览</h1><p className="muted">优先处理人的决定，再查看受阻任务与运行队列。</p></div>
     <span className="live-indicator"><span /> 每 5 秒更新</span></header>
@@ -78,9 +123,31 @@ export function OverviewPage({ canApprove, canAnswer }: { canApprove: boolean; c
       <Card className="metric-card metric-queued"><div className="metric-top"><span>排队运行</span><RiLoader4Fill aria-hidden /></div><strong>{overview.queuedRuns}</strong><small>等待 Worker 处理</small></Card>
       <Card className="metric-card metric-worker"><div className="metric-top"><span>Worker 使用</span><RiPulseLine aria-hidden /></div><strong>{overview.runningWorkers}<em> / {overview.workerCapacity ?? '—'}</em></strong><small>当前运行 / 可用名额</small></Card>
     </div><div className="system-strip"><span className="system-dot" /> 系统概况 <span>来源 {overview.enabledSources} 个已启用</span><span>待路由事件 {overview.pendingEvents} 条</span></div></>}
-    <div className="overview-grid"><Card className="queue-card queue-people"><div className="card-heading"><div><span className="eyebrow">人工路由</span><h2>待处理事件</h2></div><a href="#/tasks" aria-label="查看任务列表"><RiArrowRightUpLine aria-hidden /></a></div>
-      {inbox?.events.length ? <div className="item-list">{inbox.events.map(event => <a className="item-row" key={event.id} href={`#/events/${encodeURIComponent(event.id)}`}>
-        <span className="item-icon"><RiInbox2Line aria-hidden /></span><span className="item-main"><strong>{event.title}</strong><small>{event.sourceId}</small></span><Badge tone="warn">待路由</Badge></a>)}</div>
+    <div className="overview-grid"><Card className="queue-card queue-people queue-events"><div className="card-heading"><div><span className="eyebrow">人工路由</span><h2>待处理事件</h2></div><a href="#/tasks" aria-label="查看任务列表"><RiArrowRightUpLine aria-hidden /></a></div>
+      {canRoute && inbox?.events.length ? <div className="queue-bulk">
+        <Checkbox aria-label="全选待处理事件" isSelected={allSelected}
+          isIndeterminate={!allSelected && selectedCount > 0} isDisabled={ignoring}
+          onChange={() => setSelected(allSelected ? new Set()
+            : new Set(inbox.events.map(event => event.id)))} />
+        <Button size="xs" variant="secondary" className="h-6 rounded-md px-1.5 text-body-medium" disabled={!selectedCount || ignoring}
+          onClick={() => void ignoreEvents([...selected])}>{ignoring ? '忽略中…' : '忽略所选'}</Button>
+        <span className="queue-bulk-count">{selectedCount
+          ? `已选 ${selectedCount} / ${inbox.events.length} 条` : `共 ${inbox.events.length} 条待处理`}</span>
+      </div> : null}
+      {inbox?.notices?.length ? <div className="item-list">{inbox.notices.map(notice =>
+        <div className="item-row" key={notice.id}>
+          <span className="item-icon"><RiAlertLine aria-hidden /></span>
+          <span className="item-main"><strong>{notice.title}</strong>
+            <small>{notice.detail} · 检查于 {new Date(notice.checkedAt).toLocaleString()}</small></span>
+          <Badge tone="warn">未连接</Badge>
+        </div>)}</div> : null}
+      {inbox?.events.length ? <div className="item-list">{inbox.events.map(event => <div className="item-row" key={event.id}>
+        {canRoute && <Checkbox aria-label={`选择事件：${event.title}`} isSelected={selected.has(event.id)}
+          onChange={() => toggle(event.id)} />}
+        <a className="item-link" href={`#/events/${encodeURIComponent(event.id)}`}>
+          <span className="item-icon"><RiInbox2Line aria-hidden /></span><span className="item-main"><strong>{event.title}</strong><small>{event.sourceId}</small></span></a>
+        <Badge tone="warn">待路由</Badge></div>)}</div>
+        : inbox?.notices?.length ? null
         : <div className="empty-state"><RiInbox2Line aria-hidden /><strong>没有待处理事件</strong><span>新事件出现后会显示在这里</span></div>}</Card>
       <Card className="queue-card queue-people"><div className="card-heading"><div><span className="eyebrow">人工决定</span><h2>通知与审批</h2></div></div>
       {inbox?.requests.length ? <div className="item-list">{inbox.requests.map(request =>

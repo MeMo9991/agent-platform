@@ -12,15 +12,31 @@ test('Qoder reads edited prompt text for each new session', () => {
   const directory = mkdtempSync(join(tmpdir(), 'qoder-prompt-'));
   try {
     writeFileSync(join(directory, 'system-prompt.md'), '{{mandate}}\n{{skill}}');
+    writeFileSync(join(directory, 'investigate.md'), 'Investigate only');
     writeFileSync(join(directory, 'question.md'), 'Ask first');
     const request = { stage: 'investigate', mandate: { goal: 'Investigate' },
       skill: { content: 'Read only' }, workspace: { baseSha: 'a'.repeat(40) } } as Parameters<typeof buildQoderSystemPrompt>[0];
-    assert.match(buildQoderSystemPrompt(request, directory), /Ask first$/);
+    assert.match(buildQoderSystemPrompt(request, directory), /Investigate only\nAsk first$/);
     writeFileSync(join(directory, 'question.md'), 'Ask the owner first');
     assert.match(buildQoderSystemPrompt(request, directory), /Ask the owner first$/);
     assert.throws(() => { writeFileSync(join(directory, 'system-prompt.md'), '{{skill}}');
       buildQoderSystemPrompt(request, directory); }, /required placeholder/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('investigate prompt is explicitly read-only and asks the model to stop searching', () => {
+  const prompt = buildQoderSystemPrompt({ stage: 'investigate', mandate: { goal: 'Investigate' },
+    workspace: { baseSha: 'a'.repeat(40) } } as Parameters<typeof buildQoderSystemPrompt>[0]);
+  assert.match(prompt, /strictly read-only/);
+  assert.match(prompt, /Do not repeat the same tool call/);
+});
+
+test('review prompt requires reviewer role and one raw JSON object', () => {
+  const prompt = buildQoderSystemPrompt({ stage: 'review', mandate: { goal: 'Review' },
+    workspace: { baseSha: 'a'.repeat(40) } } as Parameters<typeof buildQoderSystemPrompt>[0]);
+  assert.match(prompt, /independent reviewer/);
+  assert.match(prompt, /one raw JSON object/);
+  assert.match(prompt, /a{40}/);
 });
 
 test('develop grants only the built-in tools needed to edit and commit in its sandbox', async () => {
@@ -67,8 +83,9 @@ test('review asks for one raw JSON verdict bound to the pinned SHA', async () =>
   const sha = 'b'.repeat(40);
   const runner = createQoderRunner({ verified: true, launch(_command, args) {
     assert.equal(args[args.indexOf('--permission-mode') + 1], 'dont_ask');
-    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, new RegExp(`raw JSON object with subjectSha exactly ${sha}`));
-    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /No Markdown, code fences or prose/);
+    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /one raw JSON object/);
+    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, new RegExp(`"subjectSha":"exactly ${sha}"`));
+    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /Do not use Markdown, code fences, prose/);
     return { process: child, terminate: () => true, isTerminated: () => true };
   } }, directory);
   try {
@@ -104,7 +121,8 @@ test('Qoder confirms input only after assistant output and keeps an early exit p
     assert.equal(cwd, workspace);
     assert.equal(proof.runId, 'run-1');
     assert.equal(args[args.indexOf('--mcp-config') + 1], '{"mcpServers":{}}');
-    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /Pinned skill content/);
+    // 临时关闭自定义 Skill：即使请求里带了 skill 内容，也不再注入系统提示词。
+    assert.doesNotMatch(args[args.indexOf('--append-system-prompt') + 1]!, /Pinned skill content/);
     assert.doesNotMatch(args[args.indexOf('--append-system-prompt') + 1]!, /Bug/);
     assert.match(args.at(-1)!, /Bug/);
     assert.equal(args[args.indexOf('--output-format') + 1], 'stream-json');

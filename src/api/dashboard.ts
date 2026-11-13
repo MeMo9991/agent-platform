@@ -9,7 +9,9 @@ import type { AttachmentReader } from '../event/model.js';
 import { createEventIngress } from '../event/ingress.js';
 import { answer, approvalDecision, routeReviewDecision } from '../interaction/model.js';
 import type { AgentRunner } from '../agent/worker/model.js';
+import type { AgentLinkStatus } from '../bootstrap/startup-tasks.js';
 import { isBlockingReview } from '../agent/task/workflow.js';
+import { id } from '../shared/model.js';
 import { completeTakeover, executeTaskCommand, type TakeoverEvidencePorts } from './task-command.js';
 import { taskCommand } from '../interaction/task-command.js';
 import { readSettings, saveSettings, settingsGroup, type SettingsPaths } from './settings.js';
@@ -90,7 +92,8 @@ function safeRecord(record: Record<string, unknown>, evidenceRoot: string, store
     'from', 'to', 'decision', 'subjectSha', 'questionId', 'policyVersion', 'reviewedSha',
     'baseSha', 'commitSha', 'developmentRecordId', 'codeChange', 'postCheckVerified', 'postCheckError',
     'command', 'args', 'exitCode', 'terminationConfirmed', 'timeoutMs', 'startedAt', 'endedAt',
-    'reviewRecordId', 'findingIndex', 'disposition', 'reason', 'targetSha', 'changeId', 'ready'])
+    'reviewRecordId', 'findingIndex', 'disposition', 'reason', 'targetSha', 'changeId', 'ready',
+    'gate', 'ruleId', 'effect'])
     if (record[key] !== undefined) selected[key] = key === 'args' && Array.isArray(record[key])
       ? (record[key] as unknown[]).map(value => typeof value === 'string' ? safeText(value) : '')
       : ['content', 'command', 'postCheckError', 'reason'].includes(key) && typeof record[key] === 'string'
@@ -101,6 +104,7 @@ function safeRecord(record: Record<string, unknown>, evidenceRoot: string, store
     selected.request = { id: request.id, kind: request.kind, sourceSha: request.sourceSha,
       action: request.action, targetBranch: request.targetBranch, targetSha: request.targetSha,
       changeRef: request.changeRef, reviewRecordId: request.reviewRecordId, policyVersion: request.policyVersion,
+      reason: typeof request.reason === 'string' ? safeText(request.reason) : undefined,
       proposedMandate: proposed ? { allowedActions: proposed.allowedActions, maxAutoRisk: proposed.maxAutoRisk } : undefined };
   }
   if (record.kind === 'check') {
@@ -206,6 +210,7 @@ export type DashboardOptions = { actorId: string; repoKeys: readonly string[];
   imageDirectory: string; attachmentReaders: Readonly<Record<string, AttachmentReader>>;
   runners?: Readonly<Record<string, AgentRunner | undefined>>; workerCapacity?: number;
   evidenceRoot?: string; takeoverEvidence?: TakeoverEvidencePorts; settingsPaths?: SettingsPaths;
+  agentLinks?: readonly AgentLinkStatus[];
   stage5OpenChange?: { prepare(taskId: string, expectedVersion: number): Promise<{
     kind: 'scope_request' | 'action_request' | 'ready'; requestId?: string;
     sourceSha: string; targetSha: string }>;
@@ -259,7 +264,10 @@ export async function handleDashboard(request: IncomingMessage, response: Server
         .all(limit, offset).map(row => safeRecord(JSON.parse(String(row.payload_json)), options.evidenceRoot ?? '', store));
       const tasks = store.db.prepare("SELECT id FROM task WHERE state IN ('failed','blocked','paused','waiting_human') ORDER BY updated_at DESC,id LIMIT ? OFFSET ?")
         .all(limit, offset).map(row => safeTask(store, String(row.id)));
-      send(response, 200, { events, requests, tasks }); return true;
+      const notices = (options.agentLinks ?? []).filter(agent => !agent.linked).map(agent => ({
+        id: `agent-link:${agent.kind}`, kind: 'agent', title: `智能体 ${agent.kind} 未连接`,
+        detail: agent.detail, checkedAt: agent.checkedAt }));
+      send(response, 200, { events, requests, tasks, notices }); return true;
     }
     if (request.method === 'GET' && path === '/api/tasks') {
       const { limit, offset } = page(url);
@@ -296,7 +304,14 @@ export async function handleDashboard(request: IncomingMessage, response: Server
       if (!task) { send(response, 404, { error: 'Task not found' }); return true; }
       const rawRuns = store.db.prepare('SELECT payload_json FROM run WHERE task_id=? ORDER BY created_at,id').all(id)
         .map(row => JSON.parse(String(row.payload_json)) as Record<string, unknown>);
-      const runs = rawRuns.map(safeRun);
+      const failureReasons = new Map<string, string>();
+      for (const row of store.db.prepare(`SELECT payload_json FROM task_record WHERE task_id=? AND kind='agent_report'
+        AND json_extract(payload_json,'$.status')='failed' ORDER BY at,id`).all(id)) {
+        const record = JSON.parse(String(row.payload_json)) as { runId?: unknown; summary?: unknown };
+        if (typeof record.runId === 'string' && typeof record.summary === 'string' && record.summary)
+          failureReasons.set(record.runId, safeText(record.summary));
+      }
+      const runs = rawRuns.map(run => ({ ...safeRun(run), reason: failureReasons.get(String(run.id)) }));
       const records = store.db.prepare('SELECT payload_json FROM task_record WHERE task_id=? ORDER BY at,id').all(id)
         .map(row => safeRecord(JSON.parse(String(row.payload_json)), options.evidenceRoot ?? '', store));
       const events = store.db.prepare('SELECT DISTINCT event_id FROM task_record WHERE task_id=? AND event_id IS NOT NULL UNION SELECT origin_event_id FROM task WHERE id=? AND origin_event_id IS NOT NULL')
@@ -391,6 +406,27 @@ export async function handleDashboard(request: IncomingMessage, response: Server
       const event = safeEvent(store, eventId, options.sourceRepoKeys);
       send(response, 200, { ok: true, event, taskId: event?.taskId });
       return true;
+    }
+    if (request.method === 'POST' && path === '/api/events/ignore') {
+      if (!roles.includes('route')) throw new Error('Route role required');
+      const input = z.object({ eventIds: z.array(id).min(1).max(100),
+        reason: z.string().trim().min(1).max(500), batchKey: id }).strict()
+        .parse(await readBody(request, 65_536));
+      const at = new Date().toISOString();
+      const actor = { kind: 'human' as const, id: options.actorId };
+      const ignored: string[] = [];
+      const failed: { eventId: string; error: string }[] = [];
+      for (const eventId of [...new Set(input.eventIds)]) {
+        try {
+          await coordinator.onSignal({ kind: 'human_response', response: { kind: 'route_decision',
+            value: { choice: 'ignored', eventId, actor, at, reason: input.reason,
+              idempotencyKey: `${input.batchKey}:${eventId}` } } });
+          ignored.push(eventId);
+        } catch (error) {
+          failed.push({ eventId, error: error instanceof Error ? error.message : 'Ignore failed' });
+        }
+      }
+      send(response, 200, { ok: failed.length === 0, ignored, failed }); return true;
     }
     const imageMatch = /^\/api\/events\/([^/]+)\/images\/([^/]+)$/.exec(path);
     if (request.method === 'GET' && imageMatch) {

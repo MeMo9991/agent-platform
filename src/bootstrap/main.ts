@@ -7,6 +7,7 @@ import { createKernelCoordinator } from '../agent/kernel/coordinator.js';
 import { createTaskCandidateFinder } from '../agent/router/candidate-finder.js';
 import { startLocalApi } from '../api/local.js';
 import { createWorkerManager } from '../agent/worker/manager.js';
+import type { Run } from '../agent/worker/model.js';
 import { createQoderRunner, unavailableQoderLauncher } from '../agent/worker/agents/qoder.js';
 import { createMacQoderRuntime } from '../agent/worker/mac-sandbox.js';
 import { createGitWorkspaceManager } from '../agent/worker/workspace.js';
@@ -14,11 +15,14 @@ import { createGitSkillLoader } from '../skills/git-loader.js';
 import { execFileSync } from 'node:child_process';
 import { createDevopsAttachmentReader } from '../event/sources/devops/attachment.js';
 import { startWorkerLoop } from './worker-loop.js';
+import { runStartupTasks } from './startup-tasks.js';
 import { acquireInstanceLock } from './instance-lock.js';
 import { createManualAttachmentReader } from '../event/sources/manual/attachment.js';
 import { createRepositorySelector } from './repository-selection.js';
 import { createCodeHosts } from '../repository-ci/providers/index.js';
 import { createStage5OpenChange } from '../authorization/stage5-open-change.js';
+import { resolveReview } from '../authorization/policy/config.js';
+import { decide } from '../authorization/policy/evaluate.js';
 import { autoPrMandate, autoPrRuleRef } from '../authorization/auto-pr.js';
 import { randomUUID } from 'node:crypto';
 import { authorizationHeaders as defaultAuthorizationHeaders } from './devops-credentials.js';
@@ -48,6 +52,7 @@ const runtime = startConfiguredSchedules({
 stopRuntime = runtime.stop;
 const platform = runtime.platform;
 
+const reviewPolicy = resolveReview(platform.review, platform.policyRef);
 const sourceRepoKeys = Object.fromEntries(platform.sources.filter(source => source.projectKey)
   .map(source => [source.id, platform.projectGroups.find(group => group.projectKey === source.projectKey)!.repoKeys]));
 const trustedRepoBySource: Record<string, string | readonly string[]> = { ...sourceRepoKeys };
@@ -59,12 +64,14 @@ await mkdir(imageDirectory, { recursive: true, mode: 0o700 });
 for (const repo of platform.repositories) attachmentReaders[`manual:${repo.repoKey}`] =
   createManualAttachmentReader(`manual:${repo.repoKey}`, imageDirectory);
 const root = process.cwd();
+const qoderPath = resolve(homedir(), '.local/bin/qoderclicn');
 const cloneRoot = resolve(root, '.runtime/clones');
+const cacheRoot = resolve(root, platform.cache?.root ?? '.runtime/caches');
 const qoderRuntime = platform.agents.some(agent => agent.kind === 'qoder' && agent.enabled)
   ? await (async () => {
     await mkdir(cloneRoot, { recursive: true, mode: 0o700 });
     return createMacQoderRuntime({ cloneRoot, profileRoot: resolve(root, '.runtime/sandbox-profiles'),
-      qoderPath: resolve(homedir(), '.local/bin/qoderclicn'),
+      qoderPath,
       writeEnabled: process.env.AGENT_PLATFORM_QODER_WRITE_ENABLED === '1' });
   })() : undefined;
 const runners = { qoder: createQoderRunner(qoderRuntime?.launcher ?? unavailableQoderLauncher,
@@ -77,15 +84,19 @@ const coordinator = createKernelCoordinator(runtime.store, trustedRepoBySource, 
   'configured-source', agentKind, platform.repositories.map(repo => repo.repoKey),
   createTaskCandidateFinder(runtime.store), event => {
     const repo = platform.repositories.find(item => item.repoKey === event.repoKey);
-    return repo && autoPrMandate(event, repo, platform.policyRef);
-  }, sourceRepoKeys);
+    if (!repo) return undefined;
+    const policy = decide({ gate: 'intake', repoKey: repo.repoKey }, reviewPolicy);
+    if (policy?.enforced && policy.decision.effect !== 'allow') return undefined;
+    return autoPrMandate(event, repo, platform.policyRef);
+  }, sourceRepoKeys, reviewPolicy);
 let routeTimer: ReturnType<typeof setInterval> | undefined;
 let ciTimer: ReturnType<typeof setInterval> | undefined;
 let ciTick: Promise<void> | undefined;
 const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
 const skills = createGitSkillLoader({ 'agent-platform': root });
-if (stage5WorkerEnabled) for (const stage of ['verify', 'review'] as const)
-  await skills.load({ repoRef: 'agent-platform', path: `skills/${stage}/SKILL.md`, commitSha: head, stage });
+// 临时关闭自定义 Skill：启动时不再预加载 skills/verify、skills/review 的 SKILL.md。
+// if (stage5WorkerEnabled) for (const stage of ['verify', 'review'] as const)
+//   await skills.load({ repoRef: 'agent-platform', path: `skills/${stage}/SKILL.md`, commitSha: head, stage });
 const workspace = createGitWorkspaceManager(Object.fromEntries(platform.repositories.filter(repo => repo.localPath)
   .map(repo => [repo.repoKey, { path: resolve(repo.localPath!),
     remote: `${repo.hostUrl}/${repo.projectRef}.git` }])), resolve(root, '.runtime'),
@@ -97,7 +108,12 @@ const workspace = createGitWorkspaceManager(Object.fromEntries(platform.reposito
     const source = row ? runtime.store.getRun(String(row.run_id)) : undefined;
     return source?.stage === 'develop' && source.status === 'succeeded' &&
       source.commitSha === run.commitSha ? source.workspaceRef : undefined;
-  });
+  }, run => {
+    const row = runtime.store.db.prepare(`SELECT workspace_ref FROM run WHERE task_id=? AND iteration=?
+      AND stage='investigate' AND status='succeeded' AND workspace_ref IS NOT NULL
+      ORDER BY ended_at DESC LIMIT 1`).get(run.taskId, run.iteration);
+    return row?.workspace_ref ? String(row.workspace_ref) : undefined;
+  }, run => runtime.store.getTask(run.taskId)?.baseRef);
 const codeHosts = createCodeHosts(platform);
 const stage5WritesEnabled = process.env.AGENT_PLATFORM_STAGE5_WRITES_ENABLED === '1';
 if (stage5WritesEnabled) for (const repo of platform.repositories) {
@@ -109,11 +125,15 @@ if (stage5WritesEnabled) for (const repo of platform.repositories) {
 }
 const stage5OpenChange = createStage5OpenChange(runtime.store,
   Object.fromEntries(platform.repositories.map(repo => [repo.repoKey, repo])), codeHosts,
-  workspace, platform.policyRef);
+  workspace, platform.policyRef, undefined, reviewPolicy);
+const platformVerifyEnabled = platform.repositories.some(repo => repo.verify?.mode === 'platform');
+const enabledStages: readonly Run['stage'][] | undefined = stage5WorkerEnabled
+  ? ['investigate', 'develop', 'verify', 'review']
+  : platformVerifyEnabled ? ['investigate', 'develop', 'verify'] : undefined;
 const manager = createWorkerManager({ store: runtime.store, coordinator,
   runners,
   enabledAgents: platform.agents.filter(agent => agent.enabled).map(agent => agent.kind),
-  enabledStages: stage5WorkerEnabled ? ['investigate', 'develop', 'verify', 'review'] : undefined,
+  enabledStages,
   workspace, skills,
   boundary: qoderRuntime?.boundary ?? { async attest() { return undefined; } },
   skillRepoPath: 'agent-platform', skillCommitSha: head,
@@ -123,13 +143,27 @@ const manager = createWorkerManager({ store: runtime.store, coordinator,
     return repo && task.mandate.authority.kind === 'auto_pr' &&
       task.mandate.authority.ruleRef === autoPrRuleRef(repo, platform.policyRef) ? 'high' : 'unknown';
   } },
-  policyVersion: platform.policyRef,
+  policyVersion: platform.policyRef, reviewPolicy,
   localChecks: Object.fromEntries(platform.repositories.map(repo => [repo.repoKey, repo.localChecks])),
+  verifyPlans: Object.fromEntries(platform.repositories.map(repo => [repo.repoKey, repo.verify])),
+  cacheRoot, agentVerifyEnabled: stage5WorkerEnabled,
   attachmentReaders,
   checkLogDirectory: resolve(root, '.runtime/check-logs'),
   maxRunMs: platform.budget.maxRunMs, limits: platform.budget });
 try { await manager.recover(); }
 catch (error) { await runtime.stop(); throw error; }
+const retentionDays = Number(process.env.AGENT_PLATFORM_WORKSPACE_RETENTION_DAYS ?? '7');
+const orphanHours = Number(process.env.AGENT_PLATFORM_WORKSPACE_ORPHAN_HOURS ?? '24');
+const workspaceRetentionMs = (Number.isFinite(retentionDays) && retentionDays >= 0 ? retentionDays : 7) * 86_400_000;
+const workspaceOrphanGraceMs = (Number.isFinite(orphanHours) && orphanHours >= 0 ? orphanHours : 24) * 3_600_000;
+const startup = await runStartupTasks({ platform, store: runtime.store, runtimeRoot: resolve(root, '.runtime'),
+  qoderPath, retentionMs: workspaceRetentionMs, orphanGraceMs: workspaceOrphanGraceMs,
+  onError: (task, error) => console.error(`Startup task ${task} failed`, error) });
+if (startup.prune && (startup.prune.clonesDeleted || startup.prune.checkWorkspacesDeleted))
+  console.log(`Pruned ${startup.prune.clonesDeleted} Run clones and ${startup.prune.checkWorkspacesDeleted} check workspaces`);
+for (const agent of startup.agents) if (!agent.linked)
+  console.warn(`Agent ${agent.kind} is not linked: ${agent.detail}`);
+const agentLinks = startup.agents;
 const workerLoop = startWorkerLoop(manager, 1000, error => console.error('Worker loop failed', error));
 let api: Awaited<ReturnType<typeof startLocalApi>> | undefined;
 try {
@@ -146,6 +180,7 @@ try {
       evidenceRoot: resolve(root, '.runtime'),
       stage5OpenChange,
       stage5WritesEnabled,
+      agentLinks,
       settingsPaths: { platform: process.env.AGENT_PLATFORM_CONFIG ?? 'config/platform.json',
         schedules: process.env.AGENT_PLATFORM_SCHEDULES ?? 'config/schedules.json' },
       takeoverEvidence: { workspace, boundary: qoderRuntime?.boundary ?? { async attest() { return undefined; } },

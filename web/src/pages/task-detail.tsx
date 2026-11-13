@@ -145,19 +145,37 @@ export function HumanAction({ taskId, version, record, onDone }: { taskId: strin
     } catch (cause) { setError(String(cause)); }
     finally { setBusy(false); }
   }
-  return <div className="action-box"><p><strong>{isQuestion ? '待回答' : '待审批'}</strong> · {record.prompt ?? record.request?.kind ?? '题目待审查'}</p>
-    {record.request && <p className="muted">受审 SHA：{record.request.sourceSha} · 拟议动作：{record.request.action ?? record.request.proposedMandate?.allowedActions.join(', ')}
-      {record.request.targetBranch && <> · 目标分支：{record.request.targetBranch}</>}
-      {record.request.proposedMandate?.maxAutoRisk && <> · 自动执行风险上限：{record.request.proposedMandate.maxAutoRisk}</>}
-      {record.request.targetSha && <> · 目标 SHA：{record.request.targetSha}</>}
-      {record.request.changeRef && <> · 变更请求：{record.request.changeRef}</>}
-      {record.request.reviewRecordId && <> · 审查记录：{record.request.reviewRecordId}</>}
-      {record.request.policyVersion && <> · 策略版本：{record.request.policyVersion}</>}</p>}
+  const actionLabels: Record<string, string> = { open_pr: '提交 PR', merge: '合并',
+    release: '发布', rollback: '回滚' };
+  const action = record.request?.action;
+  const actionText = action ? actionLabels[action] ?? action
+    : record.request?.proposedMandate?.allowedActions.join('、');
+  return <div className="run-row task-run task-decision">
+    <div className="task-run-heading"><strong>{isQuestion ? '问题' : '审批'}</strong>
+      <Badge tone="warn">{isQuestion ? '待回答' : '待审批'}</Badge>
+      <Chip color="gray" variant="caption">{isQuestion ? 'Agent 提问'
+        : record.request?.kind === 'action' ? '动作审批'
+          : record.request?.kind === 'continue' ? '继续验证审批' : '范围变更'}</Chip></div>
+    {record.request?.kind === 'continue' && record.request.reason &&
+      <p className="task-review-summary">策略要求：{record.request.reason}</p>}
+    {record.prompt && <p className="task-review-summary">{record.prompt}</p>}
+    {record.request && <dl className="task-run-meta">
+      <div><dt>受审 SHA</dt><dd><code>{record.request.sourceSha}</code></dd></div>
+      <div><dt>拟议动作</dt><dd>{actionText ?? '—'}</dd></div>
+      {record.request.targetBranch && <div><dt>目标分支</dt><dd>{record.request.targetBranch}</dd></div>}
+      {record.request.targetSha && <div><dt>目标 SHA</dt><dd><code>{record.request.targetSha}</code></dd></div>}
+      {record.request.changeRef && <div><dt>变更请求</dt><dd>{record.request.changeRef}</dd></div>}
+      {record.request.reviewRecordId && <div><dt>审查记录</dt><dd>{record.request.reviewRecordId}</dd></div>}
+      {record.request.proposedMandate?.maxAutoRisk && <div><dt>风险上限</dt><dd>{record.request.proposedMandate.maxAutoRisk}</dd></div>}
+      {record.request.policyVersion && <div><dt>策略版本</dt><dd>{record.request.policyVersion}</dd></div>}
+    </dl>}
     {isQuestion && !record.prompt && <QuestionReview taskId={taskId} version={version} targetId={record.id} onDone={onDone} />}
-    {isQuestion ? record.prompt && <form onSubmit={submit} className="stack"><label>回答<textarea value={content} onChange={event => { setContent(event.target.value); setDecisionKey(crypto.randomUUID()); }} required /></label>
-      <Button type="submit" disabled={busy}>提交回答</Button></form> : <div className="actions">
-      <Button variant="primary" disabled={busy} onClick={event => void submit(event, 'approve')}>批准</Button>
-      <Button disabled={busy} onClick={event => void submit(event, 'reject')}>驳回</Button></div>}
+    {isQuestion ? record.prompt && <form onSubmit={submit} className="task-decision-form">
+      <label>回答<textarea value={content} onChange={event => { setContent(event.target.value); setDecisionKey(crypto.randomUUID()); }} required /></label>
+      <div className="actions"><Button type="submit" disabled={busy}>提交回答</Button></div></form>
+      : <div className="actions">
+        <Button variant="primary" disabled={busy} onClick={event => void submit(event, 'approve')}>批准</Button>
+        <Button disabled={busy} onClick={event => void submit(event, 'reject')}>驳回</Button></div>}
     {error && <p role="alert" className="error">{error.includes('version') ? '任务已更新，请刷新后重新决定' : error}</p>}</div>;
 }
 
@@ -175,7 +193,7 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
   const [codeChange, setCodeChange] = useState<'none' | 'committed'>('none');
   const [commitSha, setCommitSha] = useState('');
   const [takeoverKey, setTakeoverKey] = useState(() => crypto.randomUUID());
-  async function command(kind: 'pause' | 'resume' | 'retry' | 'cancel' | 'takeover') {
+  async function command(kind: 'pause' | 'resume' | 'retry' | 'cancel' | 'takeover' | 'confirm_termination') {
     setError(''); setReceipt(''); setBusy(true);
     try {
       const key = commandKeys.current[kind] ??= crypto.randomUUID();
@@ -224,6 +242,9 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
         title={(kind === 'pause' || kind === 'takeover') && !canInterrupt ? '当前状态或待处理请求不允许中断任务' : undefined}
         disabled={busy || !!detail.task.owner || ((kind === 'pause' || kind === 'takeover') && !canInterrupt)}
         onClick={() => void command(kind)}>{label}</Button>)}
+      {detail.runs.some(run => run.status === 'paused' && run.processTerminationUnconfirmed) &&
+        <Button variant="secondary" size="xs" disabled={busy || !!detail.task.owner}
+          onClick={() => void command('confirm_termination')}>确认进程终止</Button>}
       <Button variant="secondary" size="xs" disabled={busy} onClick={() => dialog.current?.showModal()}>拆分任务</Button></div>}
     {expanded && detail.task.state === 'paused' && detail.task.owner === actorId && <form onSubmit={finishTakeover} className="stack task-takeover-inline">
       <h3>提交接管结果</h3><label>处理摘要<textarea value={takeoverSummary}
@@ -390,16 +411,17 @@ export function TaskDetailPage({ id, actorId, roles }: { id: string; actorId: st
         <TabPanel id="execution" shouldForceMount className="stack task-tab-panel">
       <Card><h2>运行与会话</h2>{detail.runs.length ? detail.runs.map((run, index) => {
         const review = run.stage === 'review' ? detail.records.find(item => item.kind === 'review' && item.runId === run.id) : undefined;
+        const failureReason = run.status === 'succeeded' ? undefined : run.reason;
         return <div className="run-row task-run" key={run.id}>
         <div className="task-run-heading"><strong>{run.stage}</strong><Badge>{run.status}</Badge>
           <Chip color="gray" variant="caption">{run.agentKind ?? 'Agent 待定'}</Chip></div>
-        {(run.sessionId || run.commitSha || run.skillRef) && <dl className="task-run-meta">
+        {(run.sessionId || run.commitSha || failureReason) && <dl className="task-run-meta">
           {run.sessionId && <div><dt>Session</dt><dd><code>{run.sessionId}</code>
             <Button variant="secondary" size="xs" iconOnly leadingIcon={RiFileCopyLine} className="task-quiet-icon-button"
               aria-label={`复制 Session ${run.sessionId}`} title="复制 Session ID"
               onClick={() => void navigator.clipboard.writeText(run.sessionId!)} /></dd></div>}
           {run.commitSha && <div><dt>提交 SHA</dt><dd><code>{run.commitSha}</code></dd></div>}
-          {run.skillRef && <div className="task-run-skill"><dt>Skill</dt><dd><code>{run.skillRef.path}@{run.skillRef.commitSha}</code></dd></div>}
+          {failureReason && <div className="task-run-reason"><dt>原因</dt><dd title={failureReason}><code>{failureReason}</code></dd></div>}
         </dl>}
         {review && <ReviewStageDetails review={review} records={detail.records} nextRun={detail.runs[index + 1]} />}
       </div>; }) : <p className="muted">尚无运行</p>}

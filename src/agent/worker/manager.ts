@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import type { KernelCoordinator } from '../kernel/model.js';
@@ -8,10 +8,21 @@ import { z } from 'zod';
 import { reviewEvidence, type executionAttestation, type developmentEvidence,
   type verificationEvidence, type agentSnapshot } from './model.js';
 import type { SkillLoader } from '../../skills/model.js';
+import { decide, policyWarning, shouldWarn } from '../../authorization/policy/evaluate.js';
+import type { ResolvedReview } from '../../authorization/policy/config.js';
 import type { SqliteStore } from '../../storage/sqlite/store.js';
 import type { AttachmentReader, AttachmentRef } from '../../event/model.js';
 
 export type ExecutionAttestation = z.infer<typeof executionAttestation>;
+type CheckReceipt = z.infer<typeof verificationEvidence>['checks'][number];
+export interface VerifyPlan {
+  mode: 'agent' | 'platform';
+  workspace: 'clone' | 'copy';
+  prepare: readonly { command: string; args: readonly string[]; timeoutMs: number }[];
+  env: Readonly<Record<string, string>>;
+  cacheKeyFiles: readonly string[];
+}
+const defaultVerifyPlan: VerifyPlan = { mode: 'agent', workspace: 'clone', prepare: [], env: {}, cacheKeyFiles: [] };
 const questionOutput = z.object({ kind: z.literal('question'), prompt: z.string().trim().min(1).max(2000) }).strict();
 function parseQuestionOutput(summary: string): string | undefined {
   try { return questionOutput.safeParse(JSON.parse(summary)).data?.prompt; }
@@ -34,9 +45,10 @@ export function parseReviewOutput(summary: string): z.infer<typeof reviewEvidenc
 }
 export interface ExecutionBoundary {
   attest(input: { runId: string; repoKey: string; workspacePath: string; mode: 'read' | 'write';
-    mandate: TaskMandate }): Promise<ExecutionAttestation | undefined>;
+    mandate: TaskMandate; agentRequired?: boolean; checkWorkspacePath?: string;
+    cachePaths?: readonly string[] }): Promise<ExecutionAttestation | undefined>;
   runCheck?(input: { proof: ExecutionAttestation; command: string; args: readonly string[];
-    timeoutMs: number; cwd: string; signal: AbortSignal }): {
+    timeoutMs: number; cwd: string; signal: AbortSignal; env?: Readonly<Record<string, string>> }): {
       completion: Promise<{ result: 'passed' | 'failed' | 'timeout' | 'unavailable';
         exitCode: number | null; logRef: string; terminationConfirmed: boolean }>;
       terminate(): Promise<{ terminated: boolean; logRef?: string }>;
@@ -53,9 +65,13 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
   riskPolicy?: { assess(task: Task, run: Run): 'low' | 'medium' | 'high' | 'unknown' };
   policyVersion?: string;
   localChecks?: Readonly<Record<string, readonly { command: string; args: readonly string[]; timeoutMs: number }[]>>;
+  verifyPlans?: Readonly<Record<string, VerifyPlan | undefined>>;
+  cacheRoot?: string;
+  agentVerifyEnabled?: boolean;
   attachmentReaders?: Readonly<Record<string, AttachmentReader>>;
   checkLogDirectory?: string;
   skillRepoPath: string; skillCommitSha: string; maxRunMs: number;
+  reviewPolicy?: ResolvedReview;
   enabledStages?: readonly Run['stage'][];
   limits: { maxConcurrentRuns: number; perRepoConcurrentRuns: number; perAgentConcurrentRuns: number;
     reservedHumanResume: number } }) {
@@ -83,6 +99,189 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
   async function terminateCheck(handle: ReturnType<NonNullable<ExecutionBoundary['runCheck']>>) {
     try { return await bounded(Promise.resolve().then(() => handle.terminate()), 5000); }
     catch { return undefined; }
+  }
+  const verifyPlanFor = (repoKey: string): VerifyPlan => input.verifyPlans?.[repoKey] ?? defaultVerifyPlan;
+  function resolveCheckEnv(plan: VerifyPlan, cachePath: string, checkWorkspace: string): Record<string, string> {
+    const values = { CACHE: cachePath, CHECK_WORKSPACE: checkWorkspace } as const;
+    const result: Record<string, string> = {};
+    for (const [key, raw] of Object.entries(plan.env)) {
+      if (!key || /(?:token|secret|password|credential|key|qodercn|agent_platform)/i.test(key) ||
+          key.includes('=') || key.includes('\0') || raw.includes('\0'))
+        throw new Error(`Check environment variable ${key || '(empty)'} is not allowed`);
+      result[key] = raw.replace(/\$\{(CACHE|CHECK_WORKSPACE)\}/g, (_, name: keyof typeof values) => values[name]);
+    }
+    return result;
+  }
+  async function prepareCache(plan: VerifyPlan, repoKey: string, workspacePath: string):
+    Promise<{ path: string; key: string } | undefined> {
+    if (!input.cacheRoot || !plan.cacheKeyFiles.length) return undefined;
+    const workspaceRoot = resolve(workspacePath);
+    const hash = createHash('sha256');
+    for (const file of plan.cacheKeyFiles) {
+      const path = resolve(workspaceRoot, file);
+      if (!path.startsWith(`${workspaceRoot}/`)) throw new Error('Cache key file is outside the workspace');
+      let data: Buffer;
+      try {
+        const info = await stat(path);
+        if (!info.isFile() || info.size > 2 * 1024 * 1024) throw new Error('Cache key file is not a regular file');
+        data = await readFile(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw error;
+      }
+      hash.update(file); hash.update('\0'); hash.update(data);
+    }
+    const key = hash.digest('hex').slice(0, 32);
+    const cacheRoot = resolve(input.cacheRoot, repoKey);
+    if (cacheRoot === workspaceRoot || cacheRoot.startsWith(`${workspaceRoot}/`) ||
+        workspaceRoot.startsWith(`${cacheRoot}/`))
+      throw new Error('Dependency cache overlaps the Run workspace');
+    await mkdir(cacheRoot, { recursive: true, mode: 0o700 });
+    const path = resolve(cacheRoot, key);
+    await mkdir(path, { recursive: true, mode: 0o700 });
+    const canonical = await realpath(path);
+    const canonicalRoot = await realpath(cacheRoot);
+    if (!canonical.startsWith(`${canonicalRoot}/`) || canonical === canonicalRoot)
+      throw new Error('Dependency cache escaped its repository root');
+    return { path: canonical, key };
+  }
+  async function runPlatformCheck(command: { command: string; args: readonly string[];
+    timeoutMs: number }, cwd: string, env: Readonly<Record<string, string>>,
+    proof: ExecutionAttestation): Promise<CheckReceipt> {
+    const startedAt = new Date().toISOString();
+    const controller = new AbortController();
+    let handle: ReturnType<NonNullable<ExecutionBoundary['runCheck']>> | undefined;
+    let receipt: { result: 'passed' | 'failed' | 'timeout' | 'unavailable';
+      exitCode: number | null; logRef: string; terminationConfirmed: boolean };
+    try {
+      if (!input.boundary.runCheck) {
+        receipt = { result: 'unavailable', exitCode: null, logRef: await unavailableLog(),
+          terminationConfirmed: true };
+      } else {
+        handle = input.boundary.runCheck({ proof, command: command.command, args: [...command.args],
+          timeoutMs: command.timeoutMs, cwd, signal: controller.signal, env });
+        const completed = await bounded(handle.completion, command.timeoutMs);
+        if (!completed) {
+          controller.abort();
+          const stopped = await terminateCheck(handle);
+          receipt = { result: stopped?.terminated ? 'timeout' : 'unavailable', exitCode: null,
+            logRef: await checkedLogRef(stopped?.logRef), terminationConfirmed: stopped?.terminated === true };
+        } else receipt = completed;
+      }
+      if (!isAbsolute(receipt.logRef) || !(await stat(receipt.logRef)).isFile() ||
+          (receipt.result === 'passed' && receipt.exitCode !== 0) ||
+          (receipt.result === 'failed' && (receipt.exitCode === null || receipt.exitCode === 0)) ||
+          (['timeout', 'unavailable'].includes(receipt.result) && receipt.exitCode !== null) ||
+          (receipt.result === 'passed' && !receipt.terminationConfirmed))
+        throw new Error('Platform check returned inconsistent evidence');
+    } catch {
+      controller.abort();
+      const stopped = handle ? await terminateCheck(handle) : undefined;
+      receipt = { result: 'unavailable', exitCode: null, logRef: await checkedLogRef(stopped?.logRef),
+        terminationConfirmed: stopped?.terminated === true };
+    }
+    return { command: command.command, args: [...command.args], timeoutMs: command.timeoutMs,
+      startedAt, endedAt: new Date().toISOString(), ...receipt };
+  }
+  async function runPlatformVerification(run: Run, task: Task, plan: VerifyPlan):
+    Promise<z.infer<typeof verificationEvidence>> {
+    if (!run.execution || run.execution.mode !== 'read' || !run.commitSha || !run.workspaceRef ||
+        !run.checkWorkspaceRef)
+      throw new Error('Platform verification workspace or isolation proof is missing');
+    const checkWorkspace = run.checkWorkspaceRef;
+    let explicitCache: string | undefined;
+    if (run.cacheKey && input.cacheRoot) {
+      try { explicitCache = await realpath(resolve(input.cacheRoot, task.repoKey, run.cacheKey)); }
+      catch { explicitCache = undefined; }
+    }
+    const cachePath = explicitCache ?? resolve(checkWorkspace, '.agent-cache');
+    await mkdir(cachePath, { recursive: true, mode: 0o700 });
+    const env = resolveCheckEnv(plan, cachePath, checkWorkspace);
+    const checks: CheckReceipt[] = [];
+    let prepareFailed = false;
+    let checkCount = 0;
+    for (const command of plan.prepare) {
+      const receipt = await runPlatformCheck(command, checkWorkspace, env, run.execution);
+      checks.push(receipt);
+      if (receipt.result !== 'passed' || receipt.exitCode !== 0 || !receipt.terminationConfirmed) {
+        prepareFailed = true;
+        break;
+      }
+    }
+    if (!prepareFailed) for (const command of input.localChecks?.[task.repoKey] ?? []) {
+      checkCount++;
+      checks.push(await runPlatformCheck(command, checkWorkspace, env, run.execution));
+    }
+    const terminationUnconfirmed = checks.some(check => !check.terminationConfirmed);
+    let postCheckError: string | undefined;
+    if (terminationUnconfirmed) postCheckError = 'Local check process termination is unconfirmed';
+    else if (prepareFailed) postCheckError = 'Dependency preparation failed';
+    else if (!checkCount) postCheckError = 'No verification checks are configured';
+    else {
+      try {
+        if (!input.workspace.verifyAfterChecks) throw new Error('Post-check Git verifier is unavailable');
+        await input.workspace.verifyAfterChecks(run, run.commitSha);
+      } catch (error) { postCheckError = error instanceof Error ? error.message : String(error); }
+    }
+    return { subjectSha: run.commitSha, checks, postCheckVerified: !postCheckError,
+      ...(postCheckError ? { postCheckError } : {}),
+      ...(explicitCache && run.cacheKey ? { cacheKey: run.cacheKey } : {}) };
+  }
+  async function startPlatformVerify(claimed: Run, task: Task, plan: VerifyPlan): Promise<boolean> {
+    let proof: ExecutionAttestation | undefined;
+    let checkCopy: string | undefined;
+    let copiedCheckWorkspace = false;
+    try {
+      const workspace = await input.workspace.prepare(claimed);
+      if (workspace.repoKey !== task.repoKey) throw new Error('Workspace repository mismatch');
+      if (plan.workspace === 'copy') {
+        if (!input.workspace.prepareCheckCopy) throw new Error('Check workspace copy is unavailable');
+        await input.workspace.cleanupCheckCopy?.(claimed);
+        checkCopy = (await input.workspace.prepareCheckCopy(claimed)).path;
+        copiedCheckWorkspace = true;
+      } else checkCopy = workspace.path;
+      const cache = await prepareCache(plan, task.repoKey, workspace.path);
+      proof = await input.boundary.attest({ runId: claimed.id, repoKey: task.repoKey,
+        workspacePath: workspace.path, mode: 'read', mandate: task.mandate, agentRequired: false,
+        ...(copiedCheckWorkspace ? { checkWorkspacePath: checkCopy } : {}),
+        cachePaths: cache ? [cache.path] : [] });
+      if (!proof || !proof.verified || proof.runId !== claimed.id || proof.repoKey !== task.repoKey ||
+          proof.workspacePath !== workspace.path || proof.mode !== 'read' || !proof.adapterVersion ||
+          !proof.configDigest)
+        throw new Error('Platform verification isolation is unverified');
+      input.store.replaceRun({ ...claimed, status: 'running', workspaceRef: workspace.path,
+        checkWorkspaceRef: checkCopy, cacheKey: cache?.key, commitSha: workspace.baseSha,
+        execution: proof, startedAt: new Date().toISOString() }, 'running');
+      return true;
+    } catch (error) {
+      if (copiedCheckWorkspace)
+        await input.workspace.cleanupCheckCopy?.(claimed).catch(() => {});
+      if (proof) await input.boundary.release?.(proof).catch(() => {});
+      input.coordinator.onWorkerFailure(claimed.id, error instanceof Error
+        ? error.message : 'Platform verification preflight failed', 'pause');
+      return true;
+    }
+  }
+  async function finishPlatformVerify(run: Run, task: Task, plan: VerifyPlan): Promise<void> {
+    let verification: z.infer<typeof verificationEvidence>;
+    try {
+      verification = await runPlatformVerification(run, task, plan);
+    } catch (error) {
+      if (run.checkWorkspaceRef && run.checkWorkspaceRef !== run.workspaceRef)
+        await input.workspace.cleanupCheckCopy?.(run).catch(() => {});
+      if (run.execution) await input.boundary.release?.(run.execution).catch(() => {});
+      input.coordinator.onWorkerFailure(run.id, error instanceof Error
+        ? error.message : 'Platform verification failed', 'pause');
+      return;
+    }
+    try {
+      await input.coordinator.onSignal({ kind: 'agent_event', taskId: task.id,
+        event: { kind: 'result', runId: run.id, status: 'succeeded', exitCode: 0, verification } });
+    } finally {
+      if (run.checkWorkspaceRef && run.checkWorkspaceRef !== run.workspaceRef)
+        await input.workspace.cleanupCheckCopy?.(run).catch(() => {});
+      if (run.execution) await input.boundary.release?.(run.execution).catch(() => {});
+    }
   }
   async function stageImage(workspacePath: string, sourceId: string, ref: AttachmentRef,
     remainingBytes: number): Promise<{ path: string; bytes: number }> {
@@ -227,10 +426,11 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
     try {
       if (recovered) await input.coordinator.onSignal({ kind: 'recovery', taskId: run.taskId, runId: run.id,
         observation: { kind: 'finished', sessionId: run.sessionId!, exitCode: snapshot.exitCode,
-          resultRef: snapshot.resultRef, development, verification, review } });
+          resultRef: snapshot.resultRef, error: snapshot.error, development, verification, review } });
       else await input.coordinator.onSignal({ kind: 'agent_event', taskId: run.taskId,
         event: { kind: 'result', runId: run.id, status: snapshot.exitCode === 0 ? 'succeeded' : 'failed',
-          exitCode: snapshot.exitCode, resultRef: snapshot.resultRef, development, verification, review } });
+          exitCode: snapshot.exitCode, resultRef: snapshot.resultRef, error: snapshot.error,
+          development, verification, review } });
     } finally {
       if (run.workspaceRef) await rm(resolve(run.workspaceRef, '.git', 'agent-input'), { recursive: true, force: true });
       if (run.execution) await input.boundary.release?.(run.execution);
@@ -296,17 +496,21 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
           runId: run.id, observation: { kind: 'unknown', reason: 'Run recovery requires manual process inspection' } });
       } else if (run.status === 'paused') await input.coordinator.onSignal({ kind: 'recovery', taskId: run.taskId,
         runId: run.id, observation: { kind: 'finished', sessionId: run.sessionId!, exitCode: snapshot.exitCode,
-          resultRef: snapshot.resultRef } });
+          resultRef: snapshot.resultRef, error: snapshot.error } });
       else await settleFinishedRun(run, runner, snapshot, true);
     }
     return rows.length;
   }, async tick(): Promise<boolean> {
     const at = new Date();
     const claimed = input.store.claimRun(workerId, at.toISOString(),
-      new Date(at.getTime() + input.maxRunMs + 60_000).toISOString(), input.limits, Object.keys(input.runners), input.enabledStages);
+      new Date(at.getTime() + input.maxRunMs + 60_000).toISOString(), input.limits, Object.keys(input.runners),
+      input.enabledStages, (run, task) => run.stage !== 'verify' ||
+        verifyPlanFor(task.repoKey).mode === 'platform' || input.agentVerifyEnabled !== false);
     if (!claimed) return false;
     const task = input.store.getTask(claimed.taskId);
     if (!task) { input.coordinator.onWorkerFailure(claimed.id, 'Task is missing', 'pause'); return true; }
+    const verifyPlan = claimed.stage === 'verify' ? verifyPlanFor(task.repoKey) : undefined;
+    if (verifyPlan?.mode === 'platform') return await startPlatformVerify(claimed, task, verifyPlan);
     let launchedSession: string | undefined;
     let launchedRunner: AgentRunner | undefined;
     let attemptedNewSession = false;
@@ -335,14 +539,24 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
           (input.policyVersion && task.mandate.policyVersion !== input.policyVersion) ||
           risk === 'unknown' || riskRank[risk] > riskRank[task.mandate.maxAutoRisk]))
         throw new Error('Edit Mandate does not authorize this repository');
-      let skill;
-      try { skill = await input.skills.load({ repoRef: input.skillRepoPath,
-        path: `skills/${claimed.stage}/SKILL.md`, commitSha: input.skillCommitSha, stage: claimed.stage }); }
-      catch (error) {
-        input.coordinator.onWorkerFailure(claimed.id,
-          `Skill is unavailable: ${error instanceof Error ? error.message : String(error)}`, 'missing_skill');
-        return true;
+      if (mode === 'write') {
+        const context = { gate: 'edit' as const, repoKey: task.repoKey, taskId: task.id, runId: claimed.id };
+        const policy = decide(context, input.reviewPolicy);
+        if (shouldWarn(policy) && policy) {
+          const at = new Date().toISOString();
+          if (!input.store.db.prepare(`SELECT 1 FROM task_record WHERE task_id=? AND kind='policy_warning'
+            AND json_extract(payload_json,'$.ruleId')=? AND json_extract(payload_json,'$.gate')=?`)
+            .get(task.id, policy.decision.ruleId, 'edit'))
+            input.store.saveRecord({ id: randomUUID(), taskId: task.id, runId: claimed.id, at,
+              kind: 'policy_warning', ...policyWarning(context, policy) });
+        }
+        if (policy?.enforced && policy.decision.effect === 'deny')
+          throw new Error(`Policy denied edit: ${policy.decision.reason}`);
       }
+      // 临时关闭自定义 Skill 加载：不读取 skills/<stage>/SKILL.md，也不把提示词注入 Qoder。
+      // 需要恢复时取消下面注释，并同步恢复 runRequest.skill 与 system-prompt 的 {{skill}} 占位符。
+      // const skill = await input.skills.load({ repoRef: input.skillRepoPath,
+      //   path: `skills/${claimed.stage}/SKILL.md`, commitSha: input.skillCommitSha, stage: claimed.stage });
       const workspace = await input.workspace.prepare(claimed);
       if (workspace.repoKey !== task.repoKey) throw new Error('Workspace repository mismatch');
       if (claimed.stage === 'investigate' || claimed.stage === 'develop')
@@ -485,10 +699,13 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
         scope: task.scope, baseSha: task.baseRef ?? workspace.baseSha, previousResults, parentTaskFacts,
         reopenEvidence: claimed.stage === 'review' ? undefined : reopenEvidence, reviewEvidence: reviewEvidenceFacts,
         events: eventFacts, answers: answeredFacts };
+      const reviewContract = claimed.stage === 'review'
+        ? `${JSON.stringify(facts)}\n\nYou are the independent reviewer, not the implementer. Do not implement, modify files, run tests, or summarize the change. Return exactly one raw JSON object and nothing else: {"subjectSha":"${claimed.commitSha}","verdict":"pass" or "block","findings":[...]}. If evidence is missing, use verdict "block".`
+        : JSON.stringify(facts);
       const request = { taskId: task.id, runId: claimed.id, stage: claimed.stage,
         mandate: latest.mandate, repoKey: latest.repoKey, workspace,
-        input: { kind: 'task' as const, runId: claimed.id, prompt: JSON.stringify(facts),
-          sourceEventIds: initialEventIds }, skill, execution: attestation,
+        input: { kind: 'task' as const, runId: claimed.id, prompt: reviewContract,
+          sourceEventIds: initialEventIds }, execution: attestation,
         attachmentPaths, timeoutMs: input.maxRunMs };
       let started: { sessionId: string } | { kind: 'unsupported' };
       if (humanResume && claimed.sessionId && runner.capabilities().resume === 'supported' &&
@@ -505,7 +722,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
       launchedSession = started.sessionId;
       launchedRunner = runner;
       input.store.replaceRun({ ...claimed, sessionId: started.sessionId, workspaceRef: workspace.path,
-        skillRef: skill.ref, commitSha: workspace.baseSha, execution: attestation }, 'running');
+        commitSha: workspace.baseSha, execution: attestation }, 'running');
       if (humanResume && claimed.sessionId && started.sessionId !== claimed.sessionId)
         input.store.saveRecord({ id: randomUUID(), taskId: task.id, runId: claimed.id,
           kind: 'session_handoff', fromSessionId: claimed.sessionId, toSessionId: started.sessionId,
@@ -551,6 +768,14 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
     let finished = 0;
     for (const row of rows) {
       const run = input.store.getRun(String(row.id))!;
+      const task = input.store.getTask(run.taskId);
+      const plan = run.stage === 'verify' && task ? verifyPlanFor(task.repoKey) : undefined;
+      if (plan?.mode === 'platform' && !run.sessionId) {
+        if (!task) { input.coordinator.onWorkerFailure(run.id, 'Task is missing', 'pause'); continue; }
+        await finishPlatformVerify(run, task, plan);
+        finished++;
+        continue;
+      }
       const runner = run.agentKind && input.runners[run.agentKind];
       if (!runner || !run.sessionId) { input.coordinator.onWorkerFailure(run.id,
         'Agent session is unavailable', 'pause', true); continue; }

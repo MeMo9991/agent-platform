@@ -83,12 +83,31 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
   const row = store.db.prepare('SELECT version FROM task WHERE id=?').get(input.taskId);
   const task = store.getTask(input.taskId);
   if (!task || Number(row?.version) !== input.expectedVersion) throw new Error('Task version changed; reload before deciding');
-  if (task.owner && ['resume', 'retry', 'cancel'].includes(input.kind))
+  if (task.owner && ['resume', 'retry', 'cancel', 'confirm_termination'].includes(input.kind))
     throw new Error('Human takeover result is required first');
   if (!input.reason.trim()) throw new Error('Reason is required');
+  const latestRunStatus = (taskId: string) => {
+    const row = store.db.prepare('SELECT id FROM run WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT 1').get(taskId);
+    return row ? store.getRun(String(row.id))?.status : undefined;
+  };
+  const hasOpenHumanRequest = (taskId: string) => Boolean(store.db.prepare(`SELECT 1 FROM task_record
+    WHERE task_id=? AND kind IN ('question','approval_request') AND status='open' LIMIT 1`).get(taskId));
+  // Worker 故障（如隔离预检失败）会把任务停在 waiting_human、Run 停在 paused；
+  // 只要没有待人工请求，就允许直接重试，不必先手动暂停再重试。
+  const retryWorkerPause = (candidate: { id: string; state: string } | undefined) => Boolean(candidate) &&
+    candidate!.state === 'waiting_human' && !hasOpenHumanRequest(candidate!.id) &&
+    latestRunStatus(candidate!.id) === 'paused';
+  if (input.kind === 'confirm_termination') {
+    const awaiting = store.db.prepare(`SELECT 1 FROM run WHERE task_id=? AND status='paused'
+      AND json_extract(payload_json,'$.processTerminationUnconfirmed')=1 LIMIT 1`).get(task.id);
+    if (!awaiting) throw new Error('No paused Run awaits termination confirmation');
+    if (!['waiting_human', 'paused', 'blocked'].includes(task.state))
+      throw new Error('Task is not awaiting termination confirmation');
+  }
   const latestReview = input.kind === 'retry' && task.state === 'waiting_human' ? store.latestReview(task.id) : undefined;
   const retryEmptyReview = latestReview?.verdict === 'block' && latestReview.findings.length === 0;
-  if (['resume', 'retry'].includes(input.kind) && !['paused', 'failed', 'blocked'].includes(task.state) && !retryEmptyReview)
+  if (['resume', 'retry'].includes(input.kind) && !['paused', 'failed', 'blocked'].includes(task.state) &&
+      !retryEmptyReview && !retryWorkerPause(task))
     throw new Error('Task is not ready to resume or retry');
   if (['pause', 'takeover'].includes(input.kind) && !['queued', 'investigating', 'developing', 'waiting_human'].includes(task.state))
     throw new Error('Task cannot be paused or taken over now');
@@ -135,8 +154,18 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
             .run(actorId, JSON.stringify({ ...updated, owner: actorId }), current.id);
         }
       }
+    } else if (input.kind === 'confirm_termination') {
+      const row = store.db.prepare(`SELECT id FROM run WHERE task_id=? AND status='paused'
+        AND json_extract(payload_json,'$.processTerminationUnconfirmed')=1
+        ORDER BY created_at DESC LIMIT 1`).get(current.id);
+      const pausedRun = row ? store.getRun(String(row.id)) : undefined;
+      if (!pausedRun) throw new Error('No paused Run awaits termination confirmation');
+      store.replaceRun({ ...pausedRun, processTerminationUnconfirmed: false }, 'paused');
+      if (current.state !== 'paused')
+        store.saveTransition(current.id, 'paused', input.reason, now, randomUUID(), actor);
     } else {
-      if ((!['paused', 'failed', 'blocked'].includes(current.state) && !retryEmptyReview) || store.hasActiveRun(current.id))
+      if ((!['paused', 'failed', 'blocked'].includes(current.state) && !retryEmptyReview &&
+          !retryWorkerPause(current)) || store.hasActiveRun(current.id))
         throw new Error('Task is not ready to resume or retry');
       const last = store.db.prepare('SELECT id FROM run WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT 1').get(current.id);
       const previous = last ? store.getRun(String(last.id)) : undefined;
@@ -154,12 +183,12 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
           priority: current.priority, attempt: previous.attempt + 1, agentKind: previous.agentKind,
           commitSha: previous.commitSha, createdAt: now });
       } else {
-        const retryVerify = previous?.stage === 'verify' && previous.status === 'failed' &&
+        const retryVerify = previous?.stage === 'verify' && ['failed', 'paused'].includes(previous.status) &&
           previous.commitSha && /^[a-f0-9]{40}$/.test(previous.commitSha) &&
           store.db.prepare(`SELECT 1 FROM task_record WHERE task_id=? AND kind='development'
             AND json_extract(payload_json,'$.commitSha')=? AND json_extract(payload_json,'$.postCheckVerified')=1
             LIMIT 1`).get(current.id, previous.commitSha);
-        const retryReview = previous?.stage === 'review' && previous.status === 'failed' &&
+        const retryReview = previous?.stage === 'review' && ['failed', 'paused'].includes(previous.status) &&
           previous.commitSha && /^[a-f0-9]{40}$/.test(previous.commitSha) &&
           store.db.prepare("SELECT 1 FROM run WHERE task_id=? AND stage='verify' AND status='succeeded' AND commit_sha=? LIMIT 1")
             .get(current.id, previous.commitSha) &&

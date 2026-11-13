@@ -447,3 +447,136 @@ test('human committed code needs verified diff and isolated passing checks befor
       /Idempotency key belongs/);
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
+
+test('dashboard ignores pending events in a batch and audits the reason', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-platform-ignore-'));
+  const images = join(directory, 'images');
+  const store = new SqliteStore(':memory:', { 'manual:repo': ['contentDigest'] });
+  store.registerSource('manual:repo', 'manual', 'repo', true);
+  const coordinator = createKernelCoordinator(store, { 'manual:repo': 'repo' }, 'p1', 'manual',
+    'qoder', ['repo'], createTaskCandidateFinder(store));
+  const dashboard = { actorId: 'owner', repoKeys: ['repo'], imageDirectory: images,
+    attachmentReaders: { 'manual:repo': createManualAttachmentReader('manual:repo', images) } };
+  let server: Awaited<ReturnType<typeof startLocalApi>> | undefined;
+  let guest: Awaited<ReturnType<typeof startLocalApi>> | undefined;
+  try {
+    server = await startLocalApi(store, coordinator, { credentialFile: join(directory, 'token'),
+      actorId: 'owner', roles: ['route', 'submit'], dashboard });
+    guest = await startLocalApi(store, coordinator, { credentialFile: join(directory, 'guest-token'),
+      actorId: 'guest', roles: ['submit'], dashboard: { ...dashboard, actorId: 'guest' } });
+    const token = readFileSync(join(directory, 'token'), 'utf8');
+    const post = async (path: string, body: unknown) => {
+      const response = await fetch(`http://127.0.0.1:${server!.port}${path}`, { method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify(body) });
+      return { status: response.status, body: await response.json() as Record<string, any> };
+    };
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO/a6p0AAAAASUVORK5CYII=';
+    const eventId = async (key: string, body: string) =>
+      String((await post('/api/events', { repoKey: 'repo', body, idempotencyKey: key,
+        images: [{ data: png, mimeType: 'image/png' }] })).body.eventId);
+    const first = await eventId('ignore-1', '重复缺陷 A');
+    const second = await eventId('ignore-2', '重复缺陷 B');
+    coordinator.processPending();
+    assert.equal(store.get(first)?.status, 'needs_human');
+    assert.equal(store.get(second)?.status, 'needs_human');
+    const ignored = await post('/api/events/ignore', { eventIds: [first, second],
+      reason: '重复缺陷，无需建单', batchKey: 'batch-1' });
+    assert.equal(ignored.status, 200, JSON.stringify(ignored.body));
+    assert.deepEqual(ignored.body.ignored, [first, second]);
+    assert.deepEqual(ignored.body.failed, []);
+    for (const id of [first, second]) {
+      assert.equal(store.get(id)?.status, 'done');
+      assert.equal((store.get(id)?.routingData as { humanDecision?: { reason?: string } }).humanDecision?.reason,
+        '重复缺陷，无需建单');
+    }
+    const repeated = await post('/api/events/ignore', { eventIds: [first, second],
+      reason: '重复缺陷，无需建单', batchKey: 'batch-1' });
+    assert.equal(repeated.status, 200);
+    assert.deepEqual(repeated.body.failed, []);
+    const conflict = await post('/api/events/ignore', { eventIds: [first], reason: '另一个原因', batchKey: 'batch-2' });
+    assert.equal(conflict.status, 200);
+    assert.equal(conflict.body.failed.length, 1);
+    assert.match(String(conflict.body.failed[0].error), /Route review is no longer open/);
+    const denied = await fetch(`http://127.0.0.1:${guest.port}/api/events/ignore`, { method: 'POST',
+      headers: { authorization: `Bearer ${readFileSync(join(directory, 'guest-token'), 'utf8')}`,
+        'content-type': 'application/json' },
+      body: JSON.stringify({ eventIds: [first], reason: '无权限', batchKey: 'batch-3' }) });
+    assert.equal(denied.status, 409);
+    assert.equal(store.get(first)?.status, 'done');
+  } finally {
+    await server?.stop(); await guest?.stop(); store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a Task paused by a worker failure can retry directly from waiting_human', async () => {
+  const store = new SqliteStore(':memory:');
+  try {
+    const at = new Date().toISOString();
+    store.saveTask({ id: 'paused-worker', repoKey: 'repo', title: 'Develop', scope: 'Develop',
+      mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Develop',
+        allowedActions: ['investigate'], maxAutoRisk: 'low', policyVersion: 'p1',
+        authority: { kind: 'trusted_rule', ruleRef: 'test' } },
+      state: 'waiting_human', iteration: 1, priority: 0, createdAt: at, updatedAt: at });
+    store.saveRun({ id: 'worker-run', taskId: 'paused-worker', iteration: 1, stage: 'develop',
+      status: 'paused', priority: 0, attempt: 1, agentKind: 'qoder', createdAt: at });
+    const version = Number(store.db.prepare('SELECT version FROM task WHERE id=?').get('paused-worker')?.version);
+    await executeTaskCommand(store, {}, 'owner', { kind: 'retry', taskId: 'paused-worker',
+      expectedVersion: version, idempotencyKey: 'retry-worker-pause', reason: '重新执行 develop' });
+    assert.equal(store.getTask('paused-worker')?.state, 'queued');
+    const runs = store.db.prepare("SELECT stage, status, attempt FROM run WHERE task_id='paused-worker'")
+      .all() as { stage: string; status: string; attempt: number }[];
+    assert.equal(runs.length, 2);
+    assert.deepEqual(runs.map(run => run.status).sort(), ['paused', 'queued']);
+    const queued = runs.find(run => run.status === 'queued');
+    assert.equal(queued?.stage, 'develop');
+    assert.equal(queued?.attempt, 2);
+  } finally { store.close(); }
+});
+
+test('retry still requires resolving an open human request', async () => {
+  const store = new SqliteStore(':memory:');
+  try {
+    const at = new Date().toISOString();
+    store.saveTask({ id: 'waiting-question', repoKey: 'repo', title: 'Question', scope: 'Investigate',
+      mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Investigate',
+        allowedActions: ['investigate'], maxAutoRisk: 'low', policyVersion: 'p1',
+        authority: { kind: 'trusted_rule', ruleRef: 'test' } },
+      state: 'waiting_human', iteration: 1, priority: 0, createdAt: at, updatedAt: at });
+    store.saveRun({ id: 'question-run', taskId: 'waiting-question', iteration: 1, stage: 'investigate',
+      status: 'waiting_human', priority: 0, attempt: 1, agentKind: 'qoder', createdAt: at });
+    store.saveRecord({ id: 'open-question', taskId: 'waiting-question', runId: 'question-run',
+      kind: 'question', prompt: 'Need details?', status: 'open', at });
+    const version = Number(store.db.prepare('SELECT version FROM task WHERE id=?').get('waiting-question')?.version);
+    await assert.rejects(executeTaskCommand(store, {}, 'owner', { kind: 'retry', taskId: 'waiting-question',
+      expectedVersion: version, idempotencyKey: 'retry-question', reason: '跳过问题' }),
+      /not ready to resume or retry/);
+    assert.equal(store.getTask('waiting-question')?.state, 'waiting_human');
+  } finally { store.close(); }
+});
+
+test('终止未确认的暂停 Run 需要先确认进程终止才能重试', async () => {
+  const store = new SqliteStore(':memory:');
+  try {
+    const at = new Date().toISOString();
+    store.saveTask({ id: 'unconfirmed', repoKey: 'repo', title: 'Develop', scope: 'Develop',
+      mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Develop',
+        allowedActions: ['investigate'], maxAutoRisk: 'low', policyVersion: 'p1',
+        authority: { kind: 'trusted_rule', ruleRef: 'test' } },
+      state: 'waiting_human', iteration: 1, priority: 0, createdAt: at, updatedAt: at });
+    store.saveRun({ id: 'unconfirmed-run', taskId: 'unconfirmed', iteration: 1, stage: 'develop',
+      status: 'paused', priority: 0, attempt: 1, agentKind: 'qoder', processTerminationUnconfirmed: true,
+      createdAt: at });
+    const version = Number(store.db.prepare('SELECT version FROM task WHERE id=?').get('unconfirmed')?.version);
+    await assert.rejects(executeTaskCommand(store, {}, 'owner', { kind: 'retry', taskId: 'unconfirmed',
+      expectedVersion: version, idempotencyKey: 'retry-blocked', reason: '重试' }), /not ready/);
+    const confirmed = await executeTaskCommand(store, {}, 'owner', { kind: 'confirm_termination',
+      taskId: 'unconfirmed', expectedVersion: version, idempotencyKey: 'confirm-1', reason: '进程已终止' });
+    assert.equal(store.getRun('unconfirmed-run')?.processTerminationUnconfirmed, false);
+    assert.equal(store.getTask('unconfirmed')?.state, 'paused');
+    await executeTaskCommand(store, {}, 'owner', { kind: 'retry', taskId: 'unconfirmed',
+      expectedVersion: confirmed.version, idempotencyKey: 'retry-ok', reason: '重试' });
+    assert.equal(store.getTask('unconfirmed')?.state, 'queued');
+  } finally { store.close(); }
+});
