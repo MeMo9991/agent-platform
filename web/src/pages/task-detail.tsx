@@ -193,12 +193,13 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
   const [codeChange, setCodeChange] = useState<'none' | 'committed'>('none');
   const [commitSha, setCommitSha] = useState('');
   const [takeoverKey, setTakeoverKey] = useState(() => crypto.randomUUID());
-  async function command(kind: 'pause' | 'resume' | 'retry' | 'cancel' | 'takeover' | 'confirm_termination') {
+  async function command(kind: 'pause' | 'resume' | 'retry' | 'cancel' | 'takeover' | 'confirm_termination', reason?: string) {
     setError(''); setReceipt(''); setBusy(true);
     try {
       const key = commandKeys.current[kind] ??= crypto.randomUUID();
       const result = await api<{ version: number }>(`/api/tasks/${encodeURIComponent(detail.task.id)}/commands`,
-        { method: 'POST', body: { kind, expectedVersion: detail.task.version, idempotencyKey: key } });
+        { method: 'POST', body: { kind, expectedVersion: detail.task.version, idempotencyKey: key,
+          ...(reason ? { reason } : {}) } });
       delete commandKeys.current[kind];
       setReceipt(`命令已记录，任务版本 ${result.version}`); onDone();
     } catch (cause) { setError(String(cause)); }
@@ -245,6 +246,9 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
       {detail.runs.some(run => run.status === 'paused' && run.processTerminationUnconfirmed) &&
         <Button variant="secondary" size="xs" disabled={busy || !!detail.task.owner}
           onClick={() => void command('confirm_termination')}>确认进程终止</Button>}
+      {['blocked', 'failed'].includes(detail.task.state) &&
+        <Button variant="secondary" size="xs" disabled={busy || !!detail.task.owner}
+          onClick={() => void command('cancel', '手动标记完成')}>标记完成</Button>}
       <Button variant="secondary" size="xs" disabled={busy} onClick={() => dialog.current?.showModal()}>拆分任务</Button></div>}
     {expanded && detail.task.state === 'paused' && detail.task.owner === actorId && <form onSubmit={finishTakeover} className="stack task-takeover-inline">
       <h3>提交接管结果</h3><label>处理摘要<textarea value={takeoverSummary}
