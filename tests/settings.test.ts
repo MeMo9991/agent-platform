@@ -98,3 +98,28 @@ test('settings API requires a separately configured role', async () => {
     assert.equal(JSON.stringify(allowed.body).includes('local-api.token'), false);
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
+
+test('review policy is readable and savable through the settings API', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-platform-review-'));
+  const paths = { platform: join(directory, 'platform.json'), schedules: join(directory, 'schedules.json') };
+  const platform = JSON.parse(readFileSync('config/platform.json', 'utf8')) as Record<string, any>;
+  delete platform.review;
+  writeFileSync(paths.platform, JSON.stringify(platform, null, 2));
+  writeFileSync(paths.schedules, readFileSync('config/schedules.json'));
+  try {
+    const before = readSettings(paths);
+    assert.equal((before.groups.review as { mode: string }).mode, 'shadow');
+    const saved = saveSettings(paths, 'review', before.revision,
+      { mode: 'warn', limits: { maxFiles: 5, maxChangedLines: 100 } });
+    const persisted = JSON.parse(readFileSync(paths.platform, 'utf8')) as Record<string, any>;
+    assert.equal(persisted.review.mode, 'warn');
+    assert.equal(persisted.review.limits.maxFiles, 5);
+    assert.equal(persisted.review.gates.merge, 'human');
+    assert.equal((readSettings(paths).groups.review as { mode: string }).mode, 'warn');
+    assert.throws(() => saveSettings(paths, 'review', saved.revision, { mode: 'bogus' }), /invalid|Invalid|option/i);
+    const latest = readSettings(paths);
+    const removed = saveSettings(paths, 'review', latest.revision, null);
+    assert.ok(removed.revision);
+    assert.equal((JSON.parse(readFileSync(paths.platform, 'utf8')) as Record<string, any>).review, undefined);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});

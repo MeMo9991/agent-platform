@@ -15,7 +15,7 @@ import { createGitSkillLoader } from '../skills/git-loader.js';
 import { execFileSync } from 'node:child_process';
 import { createDevopsAttachmentReader } from '../event/sources/devops/attachment.js';
 import { startWorkerLoop } from './worker-loop.js';
-import { pruneWorkspaces } from './prune-workspaces.js';
+import { runStartupTasks } from './startup-tasks.js';
 import { acquireInstanceLock } from './instance-lock.js';
 import { createManualAttachmentReader } from '../event/sources/manual/attachment.js';
 import { createRepositorySelector } from './repository-selection.js';
@@ -64,13 +64,14 @@ await mkdir(imageDirectory, { recursive: true, mode: 0o700 });
 for (const repo of platform.repositories) attachmentReaders[`manual:${repo.repoKey}`] =
   createManualAttachmentReader(`manual:${repo.repoKey}`, imageDirectory);
 const root = process.cwd();
+const qoderPath = resolve(homedir(), '.local/bin/qoderclicn');
 const cloneRoot = resolve(root, '.runtime/clones');
 const cacheRoot = resolve(root, platform.cache?.root ?? '.runtime/caches');
 const qoderRuntime = platform.agents.some(agent => agent.kind === 'qoder' && agent.enabled)
   ? await (async () => {
     await mkdir(cloneRoot, { recursive: true, mode: 0o700 });
     return createMacQoderRuntime({ cloneRoot, profileRoot: resolve(root, '.runtime/sandbox-profiles'),
-      qoderPath: resolve(homedir(), '.local/bin/qoderclicn'),
+      qoderPath,
       writeEnabled: process.env.AGENT_PLATFORM_QODER_WRITE_ENABLED === '1' });
   })() : undefined;
 const runners = { qoder: createQoderRunner(qoderRuntime?.launcher ?? unavailableQoderLauncher,
@@ -107,7 +108,12 @@ const workspace = createGitWorkspaceManager(Object.fromEntries(platform.reposito
     const source = row ? runtime.store.getRun(String(row.run_id)) : undefined;
     return source?.stage === 'develop' && source.status === 'succeeded' &&
       source.commitSha === run.commitSha ? source.workspaceRef : undefined;
-  });
+  }, run => {
+    const row = runtime.store.db.prepare(`SELECT workspace_ref FROM run WHERE task_id=? AND iteration=?
+      AND stage='investigate' AND status='succeeded' AND workspace_ref IS NOT NULL
+      ORDER BY ended_at DESC LIMIT 1`).get(run.taskId, run.iteration);
+    return row?.workspace_ref ? String(row.workspace_ref) : undefined;
+  }, run => runtime.store.getTask(run.taskId)?.baseRef);
 const codeHosts = createCodeHosts(platform);
 const stage5WritesEnabled = process.env.AGENT_PLATFORM_STAGE5_WRITES_ENABLED === '1';
 if (stage5WritesEnabled) for (const repo of platform.repositories) {
@@ -150,13 +156,14 @@ const retentionDays = Number(process.env.AGENT_PLATFORM_WORKSPACE_RETENTION_DAYS
 const orphanHours = Number(process.env.AGENT_PLATFORM_WORKSPACE_ORPHAN_HOURS ?? '24');
 const workspaceRetentionMs = (Number.isFinite(retentionDays) && retentionDays >= 0 ? retentionDays : 7) * 86_400_000;
 const workspaceOrphanGraceMs = (Number.isFinite(orphanHours) && orphanHours >= 0 ? orphanHours : 24) * 3_600_000;
-try {
-  const pruned = await pruneWorkspaces({ store: runtime.store, runtimeRoot: resolve(root, '.runtime'),
-    retentionMs: workspaceRetentionMs, orphanGraceMs: workspaceOrphanGraceMs,
-    onError: (path, error) => console.error(`Workspace prune failed for ${path}`, error) });
-  if (pruned.clonesDeleted || pruned.checkWorkspacesDeleted)
-    console.log(`Pruned ${pruned.clonesDeleted} Run clones and ${pruned.checkWorkspacesDeleted} check workspaces`);
-} catch (error) { console.error('Workspace prune failed', error); }
+const startup = await runStartupTasks({ platform, store: runtime.store, runtimeRoot: resolve(root, '.runtime'),
+  qoderPath, retentionMs: workspaceRetentionMs, orphanGraceMs: workspaceOrphanGraceMs,
+  onError: (task, error) => console.error(`Startup task ${task} failed`, error) });
+if (startup.prune && (startup.prune.clonesDeleted || startup.prune.checkWorkspacesDeleted))
+  console.log(`Pruned ${startup.prune.clonesDeleted} Run clones and ${startup.prune.checkWorkspacesDeleted} check workspaces`);
+for (const agent of startup.agents) if (!agent.linked)
+  console.warn(`Agent ${agent.kind} is not linked: ${agent.detail}`);
+const agentLinks = startup.agents;
 const workerLoop = startWorkerLoop(manager, 1000, error => console.error('Worker loop failed', error));
 let api: Awaited<ReturnType<typeof startLocalApi>> | undefined;
 try {
@@ -173,6 +180,7 @@ try {
       evidenceRoot: resolve(root, '.runtime'),
       stage5OpenChange,
       stage5WritesEnabled,
+      agentLinks,
       settingsPaths: { platform: process.env.AGENT_PLATFORM_CONFIG ?? 'config/platform.json',
         schedules: process.env.AGENT_PLATFORM_SCHEDULES ?? 'config/schedules.json' },
       takeoverEvidence: { workspace, boundary: qoderRuntime?.boundary ?? { async attest() { return undefined; } },

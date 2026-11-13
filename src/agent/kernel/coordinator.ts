@@ -210,6 +210,7 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
         await this.onSignal({ kind: 'agent_event', taskId: task.id,
           event: { kind: 'result', runId: run.id, status: signal.observation.exitCode === 0 ? 'succeeded' : 'failed',
             exitCode: signal.observation.exitCode, resultRef: signal.observation.resultRef,
+            error: signal.observation.error,
             development: signal.observation.development, verification: signal.observation.verification,
             review: signal.observation.review } });
         return;
@@ -345,7 +346,8 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
         if (event.kind === 'result') {
           store.saveRecord({ id: randomUUID(), taskId: task.id, runId: run.id, kind: 'agent_report',
             status: decision.state === 'blocked' ? 'failed' : event.status,
-            summary: decision.reason ?? event.resultRef ?? `Exit code ${event.exitCode ?? 'unknown'}`, at });
+            summary: decision.reason ?? event.error ?? event.resultRef ?? `Exit code ${event.exitCode ?? 'unknown'}`,
+            at });
           saveDevelopmentEvidence(at);
           if (event.verification) for (const check of event.verification.checks)
             store.saveRecord({ id: randomUUID(), taskId: task.id, runId: run.id, kind: 'check',

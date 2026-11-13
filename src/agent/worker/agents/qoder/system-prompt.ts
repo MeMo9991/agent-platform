@@ -18,6 +18,7 @@ export function buildQoderSystemPrompt(request: z.infer<typeof runRequest>, dire
     return text.replace(/\{\{(mandate|baseSha)\}\}/g, (_, key: keyof typeof values) => values[key]);
   };
   return [read('system-prompt'),
+    ...(request.stage === 'investigate' ? [read('investigate')] : []),
     ...(request.stage === 'develop' ? [read('develop')] : []),
     ...(['investigate', 'develop'].includes(request.stage) ? [read('question')] : []),
     ...(request.stage === 'review' ? [read('review')] : [])].join('\n');

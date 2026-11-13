@@ -6,8 +6,9 @@ import { platformConfig, type PlatformConfig } from '../bootstrap/config.js';
 import { scheduleConfig, type ScheduleConfig } from '../bootstrap/scheduler.js';
 import { validateScheduledSources } from '../bootstrap/start-schedules.js';
 import { devopsCredentials, readCredentials, writeCredentials, credentialsExist } from '../bootstrap/devops-credentials.js';
+import { reviewConfig } from '../authorization/policy/config.js';
 
-export const settingsGroup = z.enum(['projectGroups', 'schedules', 'agents', 'budget', 'policyRef', 'releasePipelines', 'port', 'devopsCredentials']);
+export const settingsGroup = z.enum(['projectGroups', 'schedules', 'agents', 'budget', 'policyRef', 'releasePipelines', 'port', 'review', 'devopsCredentials']);
 export type SettingsGroup = z.infer<typeof settingsGroup>;
 export type SettingsPaths = { platform: string; schedules: string };
 
@@ -50,6 +51,7 @@ export function readSettings(paths: SettingsPaths) {
     groups: { projectGroups: publicProjectGroups(platform), schedules: schedules.tasks,
       agents: platform.agents, budget: platform.budget, policyRef: platform.policyRef,
       releasePipelines: platform.releasePipelines, port: platform.interaction?.port,
+      review: platform.review ?? reviewConfig.parse({}),
       devopsCredentials: creds ? { authorization: '(已配置，留空保持不变)', cookie: '(已配置，留空保持不变)' }
         : { authorization: '', cookie: '' } },
     protected: { actorId: platform.interaction?.actorId, roles: platform.interaction?.roles,
@@ -124,6 +126,10 @@ export function saveSettings(paths: SettingsPaths, group: SettingsGroup, expecte
     });
     if (renames.size) nextSchedules.tasks = current.schedules.tasks.map(task => ({ ...task,
       projectKey: renames.get(task.projectKey) ?? task.projectKey }));
+  }
+  else if (group === 'review') {
+    if (value === null) delete nextPlatform.review;
+    else nextPlatform.review = reviewConfig.parse(value);
   }
   else if (group === 'port') {
     if (!nextPlatform.interaction || typeof nextPlatform.interaction !== 'object') throw new Error('Interaction is not configured');

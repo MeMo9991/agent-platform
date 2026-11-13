@@ -426,10 +426,11 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
     try {
       if (recovered) await input.coordinator.onSignal({ kind: 'recovery', taskId: run.taskId, runId: run.id,
         observation: { kind: 'finished', sessionId: run.sessionId!, exitCode: snapshot.exitCode,
-          resultRef: snapshot.resultRef, development, verification, review } });
+          resultRef: snapshot.resultRef, error: snapshot.error, development, verification, review } });
       else await input.coordinator.onSignal({ kind: 'agent_event', taskId: run.taskId,
         event: { kind: 'result', runId: run.id, status: snapshot.exitCode === 0 ? 'succeeded' : 'failed',
-          exitCode: snapshot.exitCode, resultRef: snapshot.resultRef, development, verification, review } });
+          exitCode: snapshot.exitCode, resultRef: snapshot.resultRef, error: snapshot.error,
+          development, verification, review } });
     } finally {
       if (run.workspaceRef) await rm(resolve(run.workspaceRef, '.git', 'agent-input'), { recursive: true, force: true });
       if (run.execution) await input.boundary.release?.(run.execution);
@@ -495,7 +496,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
           runId: run.id, observation: { kind: 'unknown', reason: 'Run recovery requires manual process inspection' } });
       } else if (run.status === 'paused') await input.coordinator.onSignal({ kind: 'recovery', taskId: run.taskId,
         runId: run.id, observation: { kind: 'finished', sessionId: run.sessionId!, exitCode: snapshot.exitCode,
-          resultRef: snapshot.resultRef } });
+          resultRef: snapshot.resultRef, error: snapshot.error } });
       else await settleFinishedRun(run, runner, snapshot, true);
     }
     return rows.length;

@@ -8,7 +8,8 @@ import { HumanAction } from './task-detail';
 
 type Overview = { pendingEvents: number; humanEvents: number; openRequests: number;
   failedTasks: number; runningWorkers: number; queuedRuns: number; enabledSources: number; workerCapacity: number | null };
-type Inbox = { events: Event[]; requests: RecordItem[]; tasks: Task[] };
+type Inbox = { events: Event[]; requests: RecordItem[]; tasks: Task[];
+  notices?: { id: string; title: string; detail: string; checkedAt: string }[] };
 function PrApproval({ request, onDone }: { request: RecordItem; onDone: (decision: 'approve' | 'reject') => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -133,12 +134,20 @@ export function OverviewPage({ canApprove, canAnswer, canRoute }: {
         <span className="queue-bulk-count">{selectedCount
           ? `已选 ${selectedCount} / ${inbox.events.length} 条` : `共 ${inbox.events.length} 条待处理`}</span>
       </div> : null}
+      {inbox?.notices?.length ? <div className="item-list">{inbox.notices.map(notice =>
+        <div className="item-row" key={notice.id}>
+          <span className="item-icon"><RiAlertLine aria-hidden /></span>
+          <span className="item-main"><strong>{notice.title}</strong>
+            <small>{notice.detail} · 检查于 {new Date(notice.checkedAt).toLocaleString()}</small></span>
+          <Badge tone="warn">未连接</Badge>
+        </div>)}</div> : null}
       {inbox?.events.length ? <div className="item-list">{inbox.events.map(event => <div className="item-row" key={event.id}>
         {canRoute && <Checkbox aria-label={`选择事件：${event.title}`} isSelected={selected.has(event.id)}
           onChange={() => toggle(event.id)} />}
         <a className="item-link" href={`#/events/${encodeURIComponent(event.id)}`}>
           <span className="item-icon"><RiInbox2Line aria-hidden /></span><span className="item-main"><strong>{event.title}</strong><small>{event.sourceId}</small></span></a>
         <Badge tone="warn">待路由</Badge></div>)}</div>
+        : inbox?.notices?.length ? null
         : <div className="empty-state"><RiInbox2Line aria-hidden /><strong>没有待处理事件</strong><span>新事件出现后会显示在这里</span></div>}</Card>
       <Card className="queue-card queue-people"><div className="card-heading"><div><span className="eyebrow">人工决定</span><h2>通知与审批</h2></div></div>
       {inbox?.requests.length ? <div className="item-list">{inbox.requests.map(request =>

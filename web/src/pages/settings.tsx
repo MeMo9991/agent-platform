@@ -5,7 +5,7 @@ import { Textarea } from '@/components/base/textarea/textarea';
 import { Card } from '../components/ui';
 import { cx } from '@/utils/cx';
 
-type Group = 'projectGroups' | 'schedules' | 'agents' | 'budget' | 'policyRef' | 'releasePipelines' | 'port' | 'devopsCredentials';
+type Group = 'projectGroups' | 'schedules' | 'agents' | 'budget' | 'policyRef' | 'releasePipelines' | 'port' | 'review' | 'devopsCredentials';
 type Settings = { revision: string; restartRequired: boolean; groups: Record<Group, unknown>;
   protected: { actorId?: string; roles?: string[]; credentialFileConfigured: boolean; devopsCredentialsConfigured: boolean } };
 const categories: { id: string; title: string; groups: { id: Group; title: string; hint: string }[] }[] = [
@@ -19,6 +19,8 @@ const categories: { id: string; title: string; groups: { id: Group; title: strin
     { id: 'agents', title: 'Agent', hint: '当前阶段仅支持 Qoder。' },
     { id: 'budget', title: '运行预算', hint: '运行时长、并发上限及人工恢复保留名额。' },
     { id: 'policyRef', title: '策略引用', hint: '任务采用的策略版本引用。' }] },
+  { id: 'review', title: '校验策略', groups: [
+    { id: 'review', title: 'review 校验策略', hint: 'mode：off/shadow/warn/enforce；gates：edit/openPr/merge；limits：maxFiles/maxChangedLines；contentDeny 为追加的禁止内容。通用层不含仓库路径规则；保存后重启生效。' }] },
   { id: 'release', title: '发布映射', groups: [
     { id: 'releasePipelines', title: '发布流水线', hint: '仓库、环境与流水线配置引用。' }] },
   { id: 'service', title: '服务与权限', groups: [

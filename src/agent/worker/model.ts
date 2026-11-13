@@ -47,13 +47,15 @@ export const agentEvent = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('input_handled'), runId: id, eventId: id }),
   z.object({ kind: z.literal('handback'), runId: id, eventId: id, reason: id }),
   z.object({ kind: z.literal('result'), runId: id, status: z.enum(['succeeded', 'failed']), exitCode: z.number().int().nullable(),
-    resultRef: id.optional(), development: developmentEvidence.optional(), verification: verificationEvidence.optional(),
+    resultRef: id.optional(), error: z.string().max(2048).optional(),
+    development: developmentEvidence.optional(), verification: verificationEvidence.optional(),
     review: reviewEvidence.optional() }),
   z.object({ kind: z.literal('usage'), runId: id, usage: agentUsage }),
 ]);
 export const agentSnapshot = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('running'), runId: id }),
   z.object({ kind: z.literal('finished'), runId: id, exitCode: z.number().int(), resultRef: id.optional(),
+    error: z.string().max(2048).optional(),
     development: developmentEvidence.optional(), verification: verificationEvidence.optional(), review: reviewEvidence.optional() }),
   z.object({ kind: z.literal('unknown'), runId: id }),
 ]);

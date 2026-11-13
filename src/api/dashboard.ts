@@ -9,6 +9,7 @@ import type { AttachmentReader } from '../event/model.js';
 import { createEventIngress } from '../event/ingress.js';
 import { answer, approvalDecision, routeReviewDecision } from '../interaction/model.js';
 import type { AgentRunner } from '../agent/worker/model.js';
+import type { AgentLinkStatus } from '../bootstrap/startup-tasks.js';
 import { isBlockingReview } from '../agent/task/workflow.js';
 import { id } from '../shared/model.js';
 import { completeTakeover, executeTaskCommand, type TakeoverEvidencePorts } from './task-command.js';
@@ -209,6 +210,7 @@ export type DashboardOptions = { actorId: string; repoKeys: readonly string[];
   imageDirectory: string; attachmentReaders: Readonly<Record<string, AttachmentReader>>;
   runners?: Readonly<Record<string, AgentRunner | undefined>>; workerCapacity?: number;
   evidenceRoot?: string; takeoverEvidence?: TakeoverEvidencePorts; settingsPaths?: SettingsPaths;
+  agentLinks?: readonly AgentLinkStatus[];
   stage5OpenChange?: { prepare(taskId: string, expectedVersion: number): Promise<{
     kind: 'scope_request' | 'action_request' | 'ready'; requestId?: string;
     sourceSha: string; targetSha: string }>;
@@ -262,7 +264,10 @@ export async function handleDashboard(request: IncomingMessage, response: Server
         .all(limit, offset).map(row => safeRecord(JSON.parse(String(row.payload_json)), options.evidenceRoot ?? '', store));
       const tasks = store.db.prepare("SELECT id FROM task WHERE state IN ('failed','blocked','paused','waiting_human') ORDER BY updated_at DESC,id LIMIT ? OFFSET ?")
         .all(limit, offset).map(row => safeTask(store, String(row.id)));
-      send(response, 200, { events, requests, tasks }); return true;
+      const notices = (options.agentLinks ?? []).filter(agent => !agent.linked).map(agent => ({
+        id: `agent-link:${agent.kind}`, kind: 'agent', title: `智能体 ${agent.kind} 未连接`,
+        detail: agent.detail, checkedAt: agent.checkedAt }));
+      send(response, 200, { events, requests, tasks, notices }); return true;
     }
     if (request.method === 'GET' && path === '/api/tasks') {
       const { limit, offset } = page(url);

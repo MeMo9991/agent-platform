@@ -28,6 +28,7 @@ test('automatic development requires explicit code-change intent and the first t
   assert.equal(autoPrMandate({ ...event, body: '不要修改现有文件' }, repo, 'v1'), undefined);
   assert.equal(autoPrMandate({ ...event, body: '只读，修改 src/feature.ts' }, repo, 'v1'), undefined);
   assert.equal(autoPrMandate({ ...event, body: '仅新增 src/feature.ts，不要修改任何现有文件' }, repo, 'v1')?.authority.kind, 'auto_pr');
+  assert.equal(autoPrMandate({ ...event, body: '配置内的服务与权限标签去掉' }, repo, 'v1')?.authority.kind, 'auto_pr');
   assert.equal(autoPrMandate({ ...event, sourceId: 'external' }, repo, 'v1'), undefined);
   assert.equal(autoPrMandate(event, { ...repo, repoKey: 'other' }, 'v1'), undefined);
   assert.equal(autoPrMandate(event, { ...repo, autoPr: { ...repo.autoPr, enabled: false } }, 'v1'), undefined);
