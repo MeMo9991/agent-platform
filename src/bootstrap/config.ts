@@ -35,6 +35,7 @@ export const platformConfig = z.object({ repositories: z.array(repositoryConfig)
   interaction: z.object({ actorId: id, roles: z.array(z.enum(['answer', 'route', 'approve', 'reopen', 'submit', 'command', 'configure'])),
     credentialFile: id, port: z.number().int().min(1).max(65535) }).optional(),
   review: reviewConfig.optional(),
+  cache: z.object({ root: id.default('.runtime/caches') }).optional(),
   releasePipelines: z.array(z.object({ repoKey: id, environment: id, configRef: id })).default([]),
   budget: z.object({ maxRunMs: z.number().int().positive(), maxConcurrentRuns: z.number().int().positive().default(2),
     perRepoConcurrentRuns: z.number().int().positive().default(2),

@@ -7,6 +7,7 @@ import { createKernelCoordinator } from '../agent/kernel/coordinator.js';
 import { createTaskCandidateFinder } from '../agent/router/candidate-finder.js';
 import { startLocalApi } from '../api/local.js';
 import { createWorkerManager } from '../agent/worker/manager.js';
+import type { Run } from '../agent/worker/model.js';
 import { createQoderRunner, unavailableQoderLauncher } from '../agent/worker/agents/qoder.js';
 import { createMacQoderRuntime } from '../agent/worker/mac-sandbox.js';
 import { createGitWorkspaceManager } from '../agent/worker/workspace.js';
@@ -14,6 +15,7 @@ import { createGitSkillLoader } from '../skills/git-loader.js';
 import { execFileSync } from 'node:child_process';
 import { createDevopsAttachmentReader } from '../event/sources/devops/attachment.js';
 import { startWorkerLoop } from './worker-loop.js';
+import { pruneWorkspaces } from './prune-workspaces.js';
 import { acquireInstanceLock } from './instance-lock.js';
 import { createManualAttachmentReader } from '../event/sources/manual/attachment.js';
 import { createRepositorySelector } from './repository-selection.js';
@@ -63,6 +65,7 @@ for (const repo of platform.repositories) attachmentReaders[`manual:${repo.repoK
   createManualAttachmentReader(`manual:${repo.repoKey}`, imageDirectory);
 const root = process.cwd();
 const cloneRoot = resolve(root, '.runtime/clones');
+const cacheRoot = resolve(root, platform.cache?.root ?? '.runtime/caches');
 const qoderRuntime = platform.agents.some(agent => agent.kind === 'qoder' && agent.enabled)
   ? await (async () => {
     await mkdir(cloneRoot, { recursive: true, mode: 0o700 });
@@ -117,10 +120,14 @@ if (stage5WritesEnabled) for (const repo of platform.repositories) {
 const stage5OpenChange = createStage5OpenChange(runtime.store,
   Object.fromEntries(platform.repositories.map(repo => [repo.repoKey, repo])), codeHosts,
   workspace, platform.policyRef, undefined, reviewPolicy);
+const platformVerifyEnabled = platform.repositories.some(repo => repo.verify?.mode === 'platform');
+const enabledStages: readonly Run['stage'][] | undefined = stage5WorkerEnabled
+  ? ['investigate', 'develop', 'verify', 'review']
+  : platformVerifyEnabled ? ['investigate', 'develop', 'verify'] : undefined;
 const manager = createWorkerManager({ store: runtime.store, coordinator,
   runners,
   enabledAgents: platform.agents.filter(agent => agent.enabled).map(agent => agent.kind),
-  enabledStages: stage5WorkerEnabled ? ['investigate', 'develop', 'verify', 'review'] : undefined,
+  enabledStages,
   workspace, skills,
   boundary: qoderRuntime?.boundary ?? { async attest() { return undefined; } },
   skillRepoPath: 'agent-platform', skillCommitSha: head,
@@ -132,11 +139,24 @@ const manager = createWorkerManager({ store: runtime.store, coordinator,
   } },
   policyVersion: platform.policyRef, reviewPolicy,
   localChecks: Object.fromEntries(platform.repositories.map(repo => [repo.repoKey, repo.localChecks])),
+  verifyPlans: Object.fromEntries(platform.repositories.map(repo => [repo.repoKey, repo.verify])),
+  cacheRoot, agentVerifyEnabled: stage5WorkerEnabled,
   attachmentReaders,
   checkLogDirectory: resolve(root, '.runtime/check-logs'),
   maxRunMs: platform.budget.maxRunMs, limits: platform.budget });
 try { await manager.recover(); }
 catch (error) { await runtime.stop(); throw error; }
+const retentionDays = Number(process.env.AGENT_PLATFORM_WORKSPACE_RETENTION_DAYS ?? '7');
+const orphanHours = Number(process.env.AGENT_PLATFORM_WORKSPACE_ORPHAN_HOURS ?? '24');
+const workspaceRetentionMs = (Number.isFinite(retentionDays) && retentionDays >= 0 ? retentionDays : 7) * 86_400_000;
+const workspaceOrphanGraceMs = (Number.isFinite(orphanHours) && orphanHours >= 0 ? orphanHours : 24) * 3_600_000;
+try {
+  const pruned = await pruneWorkspaces({ store: runtime.store, runtimeRoot: resolve(root, '.runtime'),
+    retentionMs: workspaceRetentionMs, orphanGraceMs: workspaceOrphanGraceMs,
+    onError: (path, error) => console.error(`Workspace prune failed for ${path}`, error) });
+  if (pruned.clonesDeleted || pruned.checkWorkspacesDeleted)
+    console.log(`Pruned ${pruned.clonesDeleted} Run clones and ${pruned.checkWorkspacesDeleted} check workspaces`);
+} catch (error) { console.error('Workspace prune failed', error); }
 const workerLoop = startWorkerLoop(manager, 1000, error => console.error('Worker loop failed', error));
 let api: Awaited<ReturnType<typeof startLocalApi>> | undefined;
 try {

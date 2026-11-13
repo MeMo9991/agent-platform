@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createGitWorkspaceManager } from '../src/agent/worker/workspace.js';
@@ -45,6 +45,46 @@ test('verify and review clone the unpushed development commit at a fixed SHA', a
     await assert.rejects(manager.prepare({ id: 'wrong', taskId: 'task', iteration: 1,
       stage: 'verify', status: 'running', priority: 0, attempt: 1,
       commitSha: git(repo, 'rev-parse', 'HEAD'), createdAt: at }), /Pinned source clone changed/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('check workspace copy is writable and leaves the pinned source clone untouched', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-stage5-check-copy-'));
+  const repo = join(directory, 'repo');
+  mkdirSync(repo);
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  try {
+    git(repo, 'init', '-q');
+    git(repo, 'config', 'user.email', 'test@example.test');
+    git(repo, 'config', 'user.name', 'Test');
+    git(repo, 'remote', 'add', 'origin', 'https://example.test/team/repo.git');
+    writeFileSync(join(repo, 'file.txt'), 'base\n');
+    git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'base');
+    const runtime = join(directory, 'runtime');
+    const manager = createGitWorkspaceManager({ repo: { path: repo,
+      remote: 'https://example.test/team/repo.git' } }, runtime, () => 'repo',
+    () => join(runtime, 'clones', 'develop'));
+    const at = new Date().toISOString();
+    const development = await manager.prepare({ id: 'develop', taskId: 'task', iteration: 1,
+      stage: 'develop', status: 'running', priority: 0, attempt: 1, createdAt: at });
+    git(development.path, 'config', 'user.email', 'test@example.test');
+    git(development.path, 'config', 'user.name', 'Test');
+    writeFileSync(join(development.path, 'file.txt'), 'fixed\n');
+    git(development.path, 'add', '.'); git(development.path, 'commit', '-qm', 'fix');
+    const sha = git(development.path, 'rev-parse', 'HEAD');
+    const run = { id: 'verify-copy', taskId: 'task', iteration: 1, stage: 'verify' as const,
+      status: 'running' as const, priority: 0, attempt: 1, commitSha: sha, createdAt: at };
+    const source = await manager.prepare(run);
+    const copy = await manager.prepareCheckCopy!(run);
+    assert.notEqual(copy.path, source.path);
+    assert.equal(copy.baseSha, sha);
+    assert.equal(git(copy.path, 'rev-parse', 'HEAD'), sha);
+    writeFileSync(join(copy.path, 'file.txt'), 'check artifact\n');
+    writeFileSync(join(copy.path, 'build-output.txt'), 'artifact\n');
+    assert.equal(git(source.path, 'status', '--porcelain'), '');
+    assert.equal(readFileSync(join(source.path, 'file.txt'), 'utf8'), 'fixed\n');
+    await manager.cleanupCheckCopy!(run);
+    assert.equal(existsSync(copy.path), false);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

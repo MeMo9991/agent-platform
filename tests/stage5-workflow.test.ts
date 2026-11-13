@@ -20,6 +20,9 @@ test('verify advances only with checks on its pinned SHA', () => {
     exitCode: 0, resultRef: 'result', verification: { subjectSha: sha,
       postCheckVerified: true, checks: [check] } };
   assert.deepEqual(decideAgentEvent(task, run, result), { state: 'reviewing', queueStage: 'review' });
+  const platformResult = { kind: 'result' as const, runId: run.id, status: 'succeeded' as const,
+    exitCode: 0, verification: result.verification };
+  assert.deepEqual(decideAgentEvent(task, run, platformResult), { state: 'reviewing', queueStage: 'review' });
   assert.equal(decideAgentEvent(task, run, { ...result, verification: { ...result.verification,
     subjectSha: 'c'.repeat(40) } }).state, 'blocked');
   assert.equal(decideAgentEvent(task, run, { ...result, verification: { ...result.verification,

@@ -23,6 +23,14 @@ test('Qoder reads edited prompt text for each new session', () => {
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('review prompt requires reviewer role and one raw JSON object', () => {
+  const prompt = buildQoderSystemPrompt({ stage: 'review', mandate: { goal: 'Review' },
+    workspace: { baseSha: 'a'.repeat(40) } } as Parameters<typeof buildQoderSystemPrompt>[0]);
+  assert.match(prompt, /independent reviewer/);
+  assert.match(prompt, /one raw JSON object/);
+  assert.match(prompt, /a{40}/);
+});
+
 test('develop grants only the built-in tools needed to edit and commit in its sandbox', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'qoder-develop-'));
   const workspace = join(directory, 'clone');
@@ -67,8 +75,9 @@ test('review asks for one raw JSON verdict bound to the pinned SHA', async () =>
   const sha = 'b'.repeat(40);
   const runner = createQoderRunner({ verified: true, launch(_command, args) {
     assert.equal(args[args.indexOf('--permission-mode') + 1], 'dont_ask');
-    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, new RegExp(`raw JSON object with subjectSha exactly ${sha}`));
-    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /No Markdown, code fences or prose/);
+    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /one raw JSON object/);
+    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, new RegExp(`"subjectSha":"exactly ${sha}"`));
+    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /Do not use Markdown, code fences, prose/);
     return { process: child, terminate: () => true, isTerminated: () => true };
   } }, directory);
   try {

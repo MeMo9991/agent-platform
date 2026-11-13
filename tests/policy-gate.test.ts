@@ -62,6 +62,11 @@ test('策略审批通过后继续验证并排队 verify', async () => {
         actor: { kind: 'human', id: 'owner' }, decision: 'approve',
         at: new Date().toISOString(), idempotencyKey: 'approve-1' } } });
     assert.equal(store.getTask('task')?.state, 'verifying');
+    const developmentRecord = store.db.prepare(
+      "SELECT payload_json FROM task_record WHERE kind='development'").get();
+    assert.ok(developmentRecord);
+    assert.equal(JSON.parse(String(developmentRecord?.payload_json)).commitSha, commit);
+    assert.equal(store.db.prepare("SELECT count(*) AS n FROM task_record WHERE kind='check'").get()?.n, 1);
     const verify = store.db.prepare("SELECT status, commit_sha FROM run WHERE stage='verify'").get();
     assert.equal(verify?.status, 'queued');
     assert.equal(verify?.commit_sha, commit);

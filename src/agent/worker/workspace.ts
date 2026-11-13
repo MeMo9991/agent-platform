@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { chmod, lstat, mkdir, realpath, writeFile } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -69,6 +69,44 @@ export function createGitWorkspaceManager(repositories: Readonly<Record<string, 
     await exec('git', ['checkout', '--detach', baseSha], { cwd: path });
     await verifyClone(path, repo.remote);
     return { repoKey, path, baseSha };
+  }, async prepareCheckCopy(run) {
+    const repo = repositories[repoForRun(run)];
+    const source = clonePath(run);
+    if (!repo || !run.commitSha || !/^[a-f0-9]{40}$/.test(run.commitSha))
+      throw new Error('Check copy source has no pinned commit');
+    await verifyClone(source, repo.remote);
+    const head = (await exec('git', ['rev-parse', 'HEAD'], { cwd: source })).stdout.trim();
+    if (head !== run.commitSha) throw new Error('Check copy source HEAD changed');
+    if ((await exec('git', ['status', '--porcelain=v1', '--untracked-files=all'], { cwd: source })).stdout.trim())
+      throw new Error('Check copy source has uncommitted changes');
+    const root = resolve(runtimeRoot, 'check-workspaces');
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    await chmod(root, 0o700);
+    const path = resolve(root, run.id);
+    try { await lstat(path); throw new Error('Check workspace path already exists'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    // APFS clonefile keeps the check copy cheap; fall back to a regular copy elsewhere.
+    if (process.platform === 'darwin') {
+      try { await exec('cp', ['-cR', source, path]); }
+      catch { await rm(path, { recursive: true, force: true });
+        await cp(source, path, { recursive: true, errorOnExist: true, force: false }); }
+    } else await cp(source, path, { recursive: true, errorOnExist: true, force: false });
+    try {
+      await chmod(path, 0o700);
+      await verifyClone(path, repo.remote);
+      const copiedHead = (await exec('git', ['rev-parse', 'HEAD'], { cwd: path })).stdout.trim();
+      if (copiedHead !== run.commitSha) throw new Error('Check copy HEAD changed');
+      return { path, baseSha: run.commitSha };
+    } catch (error) {
+      await rm(path, { recursive: true, force: true });
+      throw error;
+    }
+  }, async cleanupCheckCopy(run) {
+    if (!/^[A-Za-z0-9_-]+$/.test(run.id)) throw new Error('Run ID is not a safe check workspace name');
+    const root = resolve(runtimeRoot, 'check-workspaces');
+    const path = resolve(root, run.id);
+    if (!path.startsWith(`${root}/`)) throw new Error('Check workspace is outside the runtime check root');
+    await rm(path, { recursive: true, force: true });
   }, async verifyDevelopment(run) {
     const repoKey = repoForRun(run);
     const repo = repositories[repoKey];

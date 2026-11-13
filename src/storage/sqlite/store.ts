@@ -611,7 +611,8 @@ export class SqliteStore implements EventRepository {
   }
   claimRun(workerId: string, at: string, leaseUntil: string, limits: {
     maxConcurrentRuns: number; perRepoConcurrentRuns: number; perAgentConcurrentRuns: number; reservedHumanResume: number;
-  }, agentKinds: readonly string[], stages: readonly Run['stage'][] = ['investigate', 'develop']): Run | undefined {
+  }, agentKinds: readonly string[], stages: readonly Run['stage'][] = ['investigate', 'develop'],
+  stageFilter?: (run: Run, task: Task) => boolean): Run | undefined {
     return this.transaction(() => {
       if (this.db.prepare(`SELECT 1 FROM run WHERE status='paused'
         AND json_extract(payload_json,'$.processTerminationUnconfirmed')=1 LIMIT 1`).get()) return undefined;
@@ -623,7 +624,9 @@ export class SqliteStore implements EventRepository {
       for (const row of queued) {
         const candidate = this.getRun(String(row.id))!;
         if (!stages.includes(candidate.stage)) continue;
-        if (this.getTask(candidate.taskId)?.state === 'waiting_human') continue;
+        const task = this.getTask(candidate.taskId);
+        if (task?.state === 'waiting_human') continue;
+        if (task && stageFilter && !stageFilter(candidate, task)) continue;
         if (!candidate.agentKind || !agentKinds.includes(candidate.agentKind) ||
             active.length >= limits.maxConcurrentRuns ||
             ((candidate.queueClass ?? 'normal') === 'normal' && active.filter(item => item.queue_class === 'normal').length >=

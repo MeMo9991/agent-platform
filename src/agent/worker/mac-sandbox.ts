@@ -9,15 +9,25 @@ import type { ExecutionBoundary } from './manager.js';
 import type { IsolatedProcessLauncher } from './agents/qoder.js';
 
 export async function createMacSandboxProfile(input: { workspacePath: string; temporaryPath: string;
-  qoderConfigPath: string; qoderLinkDirectory: string; homePath: string; mode: 'read' | 'write' }) {
+  qoderConfigPath: string; qoderLinkDirectory: string; homePath: string; mode: 'read' | 'write';
+  extraReadPaths?: readonly string[]; extraWritePaths?: readonly string[] }) {
   const [workspace, temporary, qoderConfig, qoderLink, home] = await Promise.all([
     input.workspacePath, input.temporaryPath, input.qoderConfigPath, input.qoderLinkDirectory, input.homePath,
   ].map(path => realpath(resolve(path))));
+  const resolveAll = async (paths: readonly string[] = []) =>
+    [...new Set(await Promise.all(paths.map(path => realpath(resolve(path)))))];
+  const extraReads = await resolveAll(input.extraReadPaths);
+  const extraWrites = await resolveAll(input.extraWritePaths);
+  const extras = [...new Set([...extraReads, ...extraWrites])];
   if (workspace === home || temporary === home || workspace === temporary ||
       workspace.startsWith(`${qoderConfig}/`) || temporary.startsWith(`${qoderConfig}/`) ||
       qoderConfig.startsWith(`${workspace}/`) || qoderLink.startsWith(`${workspace}/`) ||
       (input.mode === 'write' && (qoderLink === qoderConfig || qoderLink.startsWith(`${qoderConfig}/`) ||
-        qoderConfig.startsWith(`${qoderLink}/`))))
+        qoderConfig.startsWith(`${qoderLink}/`))) ||
+      extras.some(path => path === home || path === workspace || path === temporary ||
+        path === qoderConfig || path === qoderLink || path.startsWith(`${qoderConfig}/`) ||
+        qoderConfig.startsWith(`${path}/`) || path.startsWith(`${workspace}/`) ||
+        workspace.startsWith(`${path}/`)))
     throw new Error('Mac sandbox paths overlap protected runtime directories');
   const quoted = (path: string) => JSON.stringify(path);
   const except = (paths: string[]) => paths.map(path => `(require-not (subpath ${quoted(path)}))`).join(' ');
@@ -27,7 +37,8 @@ export async function createMacSandboxProfile(input: { workspacePath: string; te
       parents.add(parent);
     return `${except(paths)} ${[...parents].map(path => `(require-not (literal ${quoted(path)}))`).join(' ')}`;
   };
-  const homeReads = [...(input.mode === 'read' ? [qoderConfig] : []), qoderLink, workspace, temporary];
+  const homeReads = [...(input.mode === 'read' ? [qoderConfig] : []), qoderLink, workspace, temporary,
+    ...extraReads, ...extraWrites];
   const tmpReads = homeReads;
   const profile = [
     '(version 1)', '(allow default)',
@@ -37,7 +48,7 @@ export async function createMacSandboxProfile(input: { workspacePath: string; te
     `(deny file-read-metadata (require-all (subpath "/private/tmp") ${exceptMetadata(tmpReads)}))`,
     `(deny file-write* (require-all ${except([
       ...(input.mode === 'read' ? [qoderConfig] : []), temporary,
-      ...(input.mode === 'write' ? [workspace] : []),
+      ...(input.mode === 'write' ? [workspace] : []), ...extraWrites,
     ])} (require-not (literal "/dev/null"))))`,
   ].join('\n') + '\n';
   return { profile, digest: createHash('sha256').update(profile).digest('hex') };
@@ -69,7 +80,8 @@ export async function createMacQoderRuntime(input: { cloneRoot: string; profileR
   const proofs = new Map<string, { repoKey: string; workspace: string; temporary: string;
     profilePath: string; checkProfilePath: string; digest: string; checkDigest: string;
     mode: 'read' | 'write'; launched: boolean;
-    agentClosed: boolean; checking: boolean }>();
+    agentClosed: boolean; checking: boolean; agentRequired: boolean;
+    checkWorkspace?: string; cachePaths: string[] }>();
   const matchProof = (proof: { verified: true; runId: string; repoKey: string; workspacePath: string;
     mode: 'read' | 'write'; adapterVersion: string; configDigest: string }, cwd: string) => {
     const saved = proofs.get(proof.runId);
@@ -85,7 +97,8 @@ export async function createMacQoderRuntime(input: { cloneRoot: string; profileR
     try { process.kill(-pid, 0); return false; }
     catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
   };
-  const boundary: ExecutionBoundary = { async attest({ runId, repoKey, workspacePath, mode, mandate }) {
+  const boundary: ExecutionBoundary = { async attest({ runId, repoKey, workspacePath, mode, mandate,
+    agentRequired = true, checkWorkspacePath, cachePaths = [] }) {
     if (!/^[A-Za-z0-9_-]+$/.test(runId) || (mode === 'write' &&
         (!input.writeEnabled || mandate.repoKey !== repoKey || !mandate.allowedActions.includes('edit') ||
           !['human_approval', 'auto_pr'].includes(mandate.authority.kind) ||
@@ -94,6 +107,11 @@ export async function createMacQoderRuntime(input: { cloneRoot: string; profileR
     const workspace = await realpath(workspacePath);
     if (workspace !== resolve(cloneRoot, runId) || !(await lstat(resolve(workspace, '.git'))).isDirectory())
       throw new Error('Qoder workspace is not an independent Run clone');
+    const checkWorkspace = checkWorkspacePath ? await realpath(resolve(checkWorkspacePath)) : undefined;
+    const caches = [...new Set(await Promise.all(cachePaths.map(path => realpath(resolve(path)))))];
+    if (checkWorkspace && (checkWorkspace === workspace || checkWorkspace.startsWith(`${workspace}/`) ||
+        workspace.startsWith(`${checkWorkspace}/`)))
+      throw new Error('Check workspace overlaps the Run clone');
     const temporary = await mkdtemp('/private/tmp/agent-platform-qoder-');
     if (mode === 'write') {
       const config = resolve(temporary, 'qoder-config');
@@ -101,15 +119,19 @@ export async function createMacQoderRuntime(input: { cloneRoot: string; profileR
       await writeFile(resolve(config, 'settings.json'),
         JSON.stringify({ permissions: { trustDirectories: [workspace] } }), { mode: 0o600, flag: 'wx' });
     }
-    const { profile, digest } = await createMacSandboxProfile({ workspacePath: workspace,
+    const base = await createMacSandboxProfile({ workspacePath: workspace,
       temporaryPath: temporary, qoderConfigPath: qoderConfig, qoderLinkDirectory: qoderLink,
       homePath: home, mode });
+    const checked = await createMacSandboxProfile({ workspacePath: workspace,
+      temporaryPath: temporary, qoderConfigPath: qoderConfig, qoderLinkDirectory: qoderLink,
+      homePath: home, mode, extraReadPaths: [...(checkWorkspace ? [checkWorkspace] : []), ...caches],
+      extraWritePaths: [...(checkWorkspace ? [checkWorkspace] : []), ...caches] });
     // shortcut: a crashed process may leave its old profile; persist profile paths before automatic crash cleanup.
     const profilePath = resolve(profileRoot, `${runId}-${randomUUID()}.sb`);
     const checkProfilePath = resolve(profileRoot, `${runId}-${randomUUID()}-check.sb`);
-    const checkProfile = `${profile}(deny file-read* (subpath ${JSON.stringify(qoderConfig)}))\n`;
+    const checkProfile = `${checked.profile}(deny file-read* (subpath ${JSON.stringify(qoderConfig)}))\n`;
     const checkDigest = createHash('sha256').update(checkProfile).digest('hex');
-    await writeFile(profilePath, profile, { mode: 0o600, flag: 'wx' });
+    await writeFile(profilePath, base.profile, { mode: 0o600, flag: 'wx' });
     try { await writeFile(checkProfilePath, checkProfile, { mode: 0o600, flag: 'wx' }); }
     catch (error) { await rm(profilePath, { force: true }); await rm(temporary, { recursive: true, force: true }); throw error; }
     if (mode === 'write') {
@@ -136,26 +158,36 @@ export async function createMacQoderRuntime(input: { cloneRoot: string; profileR
         if (outside) await rm(outside, { recursive: true, force: true });
       }
     }
-    proofs.set(runId, { repoKey, workspace, temporary, profilePath, checkProfilePath, digest, checkDigest, mode,
-      launched: false, agentClosed: false, checking: false });
+    proofs.set(runId, { repoKey, workspace, temporary, profilePath, checkProfilePath,
+      digest: base.digest, checkDigest, mode, launched: false, agentClosed: false, checking: false,
+      agentRequired, ...(checkWorkspace ? { checkWorkspace } : {}), cachePaths: caches });
     return { verified: true, runId, repoKey, workspacePath: workspace,
-      mode, adapterVersion: 'mac-sandbox-1', configDigest: digest };
-  }, runCheck({ proof, command, args, cwd }) {
+      mode, adapterVersion: 'mac-sandbox-1', configDigest: base.digest };
+  }, runCheck({ proof, command, args, cwd, env }) {
     const saved = matchProof(proof, proof.workspacePath);
-    if (cwd !== saved.workspace && !cwd.startsWith(`${saved.temporary}/`))
+    if (cwd !== saved.workspace && cwd !== saved.checkWorkspace &&
+        !(saved.checkWorkspace && cwd.startsWith(`${saved.checkWorkspace}/`)) &&
+        !cwd.startsWith(`${saved.temporary}/`))
       throw new Error('Isolated check directory is outside the Run');
     if (createHash('sha256').update(readFileSync(saved.checkProfilePath)).digest('hex') !== saved.checkDigest)
       throw new Error('Trusted-check profile changed');
-    if (!saved.launched || !saved.agentClosed || saved.checking || !command || command.includes('\0') ||
-        args.some(arg => arg.includes('\0')))
+    if ((saved.agentRequired && (!saved.launched || !saved.agentClosed)) || saved.checking ||
+        !command || command.includes('\0') || args.some(arg => arg.includes('\0')))
       throw new Error('Isolated check is not ready');
+    const extraEnv: Record<string, string> = {};
+    for (const [key, value] of Object.entries(env ?? {})) {
+      if (!key || key.includes('=') || key.includes('\0') || value.includes('\0') ||
+          ['HOME', 'TMPDIR', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM'].includes(key))
+        throw new Error('Isolated check environment is invalid');
+      extraEnv[key] = value;
+    }
     saved.checking = true;
     const logRef = resolve(profileRoot, `${proof.runId}-check-${randomUUID()}.log`);
     const child = spawn('/usr/bin/sandbox-exec', ['-f', saved.checkProfilePath, command, ...args], {
       cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
       env: { HOME: saved.temporary, USER: process.env.USER ?? '', LANG: process.env.LANG ?? 'en_US.UTF-8',
         PATH: `${dirname(process.execPath)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
-        TMPDIR: saved.temporary, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
+        TMPDIR: saved.temporary, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', ...extraEnv },
     });
     let output = '';
     let exited = false;
@@ -189,7 +221,7 @@ export async function createMacQoderRuntime(input: { cloneRoot: string; profileR
     } };
   }, async prepareDependencies({ proof, cwd }) {
     const saved = matchProof(proof, cwd);
-    if (!saved.launched || !saved.agentClosed || saved.checking)
+    if (!saved.agentRequired || !saved.launched || !saved.agentClosed || saved.checking)
       throw new Error('Dependency preparation is not ready');
     const installRoot = resolve(saved.temporary, 'dependency-install');
     await mkdir(installRoot, { recursive: true, mode: 0o700 });
@@ -229,7 +261,8 @@ export async function createMacQoderRuntime(input: { cloneRoot: string; profileR
   }, async release(proof) {
     if (!proofs.has(proof.runId)) return;
     const saved = matchProof(proof, proof.workspacePath);
-    if (saved.checking || (saved.launched && !saved.agentClosed)) throw new Error('Cannot release active isolation');
+    if (saved.checking || (saved.agentRequired && saved.launched && !saved.agentClosed))
+      throw new Error('Cannot release active isolation');
     proofs.delete(proof.runId);
     await rm(saved.profilePath, { force: true });
     await rm(saved.checkProfilePath, { force: true });

@@ -13,7 +13,7 @@ export const run = z.object({ id, taskId: id, iteration: z.number().int().positi
   requestKey: id.optional(), priority: z.number().int(), attempt: z.number().int().nonnegative(), leaseUntil: timestamp.optional(),
   queueClass: z.enum(['normal', 'human_resume']).optional(), workerId: id.optional(),
   agentKind: id.optional(), model: id.optional(), sessionId: id.optional(), workspaceRef: id.optional(), skillRef: skillRef.optional(),
-  commitSha: id.optional(), execution: executionAttestation.optional(),
+  commitSha: id.optional(), execution: executionAttestation.optional(), checkWorkspaceRef: id.optional(), cacheKey: id.optional(),
   processTerminationUnconfirmed: z.boolean().optional(),
   questionTerminationVerified: z.boolean().optional(),
   usage: agentUsage.optional(), resultRef: id.optional(), createdAt: timestamp,
@@ -35,7 +35,8 @@ export const developmentEvidence = z.object({ baseSha: z.string().regex(/^[a-f0-
     startedAt: timestamp, endedAt: timestamp, result: z.enum(['passed', 'failed', 'timeout', 'unavailable']),
     exitCode: z.number().int().nullable(), logRef: id, terminationConfirmed: z.boolean() })) });
 export const verificationEvidence = z.object({ subjectSha: z.string().regex(/^[a-f0-9]{40}$/),
-  postCheckVerified: z.boolean(), postCheckError: id.optional(), checks: developmentEvidence.shape.checks });
+  postCheckVerified: z.boolean(), postCheckError: id.optional(), checks: developmentEvidence.shape.checks,
+  cacheKey: id.optional() });
 export const reviewEvidence = z.object({ subjectSha: z.string().regex(/^[a-f0-9]{40}$/),
   verdict: z.enum(['pass', 'block']), findings: z.array(z.object({ file: id, line: z.number().int().positive().optional(),
     severity: z.enum(['low', 'medium', 'high', 'unknown']), evidence: id, impact: id,
@@ -78,4 +79,6 @@ export interface WorkspaceManager {
   prepare(run: Run): Promise<z.infer<typeof workspaceRef>>;
   verifyDevelopment?(run: Run): Promise<{ baseSha: string; commitSha: string; diffRef: string }>;
   verifyAfterChecks?(run: Run, commitSha: string): Promise<void>;
+  prepareCheckCopy?(run: Run): Promise<{ path: string; baseSha: string }>;
+  cleanupCheckCopy?(run: Run): Promise<void>;
 }

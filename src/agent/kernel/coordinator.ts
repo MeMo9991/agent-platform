@@ -272,8 +272,18 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
         const run = store.getRun(event.runId);
         let task = store.getTask(signal.taskId);
         if (!run || !task) throw new Error('Task or Run is missing');
+        const taskId = task.id;
         const previousReviewBlocks = event.kind === 'result' && run.stage === 'review'
           ? store.countReviewBlocks(task.id, task.iteration) : 0;
+        const saveDevelopmentEvidence = (at: string) => {
+          const development = event.kind === 'result' ? event.development : undefined;
+          if (!development) return;
+          store.saveRecord({ id: randomUUID(), taskId, runId: run.id, kind: 'development',
+            baseSha: development.baseSha, commitSha: development.commitSha, diffRef: development.diffRef,
+            postCheckVerified: development.postCheckVerified, postCheckError: development.postCheckError, at });
+          for (const check of development.checks) store.saveRecord({ id: randomUUID(), taskId,
+            runId: run.id, kind: 'check', subjectSha: development.commitSha, ...check, at });
+        };
         if (event.kind === 'result' && run.stage === 'develop' && event.development && reviewPolicy) {
           const context = { gate: 'develop-complete' as const, repoKey: task.repoKey, taskId: task.id, runId: run.id,
             baseSha: event.development.baseSha, commitSha: event.development.commitSha,
@@ -298,6 +308,7 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
             const reason = `策略要求审批：${policy.decision.reason}`;
             store.replaceRun({ ...run, status: 'succeeded', leaseUntil: undefined, workerId: undefined,
               commitSha: event.development.commitSha, resultRef: event.resultRef, endedAt: at }, 'running');
+            saveDevelopmentEvidence(at);
             if (task.state !== 'waiting_human')
               store.saveTransition(task.id, 'waiting_human', reason, at, randomUUID(), actor);
             store.saveApprovalRequest({ kind: 'continue', id: `policy-${run.id}`, taskId: task.id,
@@ -335,14 +346,7 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
           store.saveRecord({ id: randomUUID(), taskId: task.id, runId: run.id, kind: 'agent_report',
             status: decision.state === 'blocked' ? 'failed' : event.status,
             summary: decision.reason ?? event.resultRef ?? `Exit code ${event.exitCode ?? 'unknown'}`, at });
-          if (event.development) {
-            store.saveRecord({ id: randomUUID(), taskId: task.id, runId: run.id, kind: 'development',
-              baseSha: event.development.baseSha, commitSha: event.development.commitSha,
-              diffRef: event.development.diffRef, postCheckVerified: event.development.postCheckVerified,
-              postCheckError: event.development.postCheckError, at });
-            for (const check of event.development.checks) store.saveRecord({ id: randomUUID(), taskId: task.id,
-              runId: run.id, kind: 'check', subjectSha: event.development.commitSha, ...check, at });
-          }
+          saveDevelopmentEvidence(at);
           if (event.verification) for (const check of event.verification.checks)
             store.saveRecord({ id: randomUUID(), taskId: task.id, runId: run.id, kind: 'check',
               subjectSha: event.verification.subjectSha, ...check, at });

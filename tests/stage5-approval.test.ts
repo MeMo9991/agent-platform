@@ -77,6 +77,27 @@ test('failed verify can be retried on the same reviewed development SHA', async 
   } finally { store.close(); }
 });
 
+test('paused verify preflight failure can be retried on the same reviewed development SHA', async () => {
+  const store = new SqliteStore(':memory:');
+  const at = new Date().toISOString();
+  const sha = 'a'.repeat(40);
+  try {
+    saveApprovedTask(store, 'blocked', at);
+    store.saveRecord({ id: 'development', taskId: 'task', runId: 'develop-run', kind: 'development',
+      baseSha: 'c'.repeat(40), commitSha: sha, diffRef: '/tmp/diff.patch', postCheckVerified: true, at });
+    store.saveRun({ id: 'verify-run', taskId: 'task', iteration: 1, stage: 'verify', status: 'paused',
+      priority: 0, attempt: 1, agentKind: 'qoder', commitSha: sha, createdAt: at });
+    const version = Number(store.db.prepare('SELECT version FROM task WHERE id=?').get('task')?.version);
+    await executeTaskCommand(store, {}, 'owner', { kind: 'retry', taskId: 'task', expectedVersion: version,
+      reason: 'Retry after verify preflight isolation failed', idempotencyKey: 'verify-paused-retry' });
+    const row = store.db.prepare("SELECT id FROM run WHERE task_id=? AND status='queued'").get('task');
+    const retry = store.getRun(String(row?.id))!;
+    assert.equal(retry.stage, 'verify');
+    assert.equal(retry.commitSha, sha);
+    assert.equal(store.getTask('task')?.state, 'queued');
+  } finally { store.close(); }
+});
+
 test('failed review output can be retried on its verified SHA without accepting prose', async () => {
   const store = new SqliteStore(':memory:');
   const at = new Date().toISOString();

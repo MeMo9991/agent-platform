@@ -183,12 +183,12 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
           priority: current.priority, attempt: previous.attempt + 1, agentKind: previous.agentKind,
           commitSha: previous.commitSha, createdAt: now });
       } else {
-        const retryVerify = previous?.stage === 'verify' && previous.status === 'failed' &&
+        const retryVerify = previous?.stage === 'verify' && ['failed', 'paused'].includes(previous.status) &&
           previous.commitSha && /^[a-f0-9]{40}$/.test(previous.commitSha) &&
           store.db.prepare(`SELECT 1 FROM task_record WHERE task_id=? AND kind='development'
             AND json_extract(payload_json,'$.commitSha')=? AND json_extract(payload_json,'$.postCheckVerified')=1
             LIMIT 1`).get(current.id, previous.commitSha);
-        const retryReview = previous?.stage === 'review' && previous.status === 'failed' &&
+        const retryReview = previous?.stage === 'review' && ['failed', 'paused'].includes(previous.status) &&
           previous.commitSha && /^[a-f0-9]{40}$/.test(previous.commitSha) &&
           store.db.prepare("SELECT 1 FROM run WHERE task_id=? AND stage='verify' AND status='succeeded' AND commit_sha=? LIMIT 1")
             .get(current.id, previous.commitSha) &&

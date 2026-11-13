@@ -24,7 +24,8 @@ export function decideAgentEvent(task: Task, run: Run, event: AgentEvent, hasPen
   if (event.kind === 'question') return {};
   if (event.kind !== 'result') return {};
   if (event.status === 'failed' || event.exitCode !== 0) return { state: 'failed' };
-  if (!event.resultRef) return { state: 'blocked', reason: 'Successful Agent result has no verified result reference' };
+  if (!event.resultRef && !(run.stage === 'verify' && event.verification))
+    return { state: 'blocked', reason: 'Successful Agent result has no verified result reference' };
   if (run.stage === 'develop') {
     const proof = event.development;
     if (!proof || proof.baseSha !== task.baseRef || proof.commitSha === proof.baseSha ||

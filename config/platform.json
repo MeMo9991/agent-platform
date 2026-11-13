@@ -42,7 +42,30 @@
             }
           ],
           "credentialsRef": "env:AGENT_PLATFORM_GITHUB_TOKEN",
-          "localPath": "."
+          "localPath": ".",
+          "verify": {
+            "mode": "platform",
+            "workspace": "copy",
+            "prepare": [
+              {
+                "command": "npm",
+                "args": [
+                  "ci",
+                  "--ignore-scripts",
+                  "--no-audit",
+                  "--no-fund"
+                ],
+                "timeoutMs": 300000
+              }
+            ],
+            "env": {
+              "npm_config_cache": "${CACHE}/npm"
+            },
+            "cacheKeyFiles": [
+              "package-lock.json",
+              "package.json"
+            ]
+          }
         }
       ]
     },
@@ -78,5 +101,8 @@
     "perAgentConcurrentRuns": 2,
     "reservedHumanResume": 1
   },
-  "policyRef": "default"
+  "policyRef": "default",
+  "cache": {
+    "root": ".runtime/caches"
+  }
 }
