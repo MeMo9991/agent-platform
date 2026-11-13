@@ -112,7 +112,8 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
   if (['pause', 'takeover'].includes(input.kind) && !['queued', 'investigating', 'developing', 'waiting_human'].includes(task.state))
     throw new Error('Task cannot be paused or taken over now');
   if (input.kind === 'cancel' && !['new', 'triaged', 'queued', 'investigating', 'developing', 'waiting_human',
-    'paused', 'blocked', 'failed'].includes(task.state)) throw new Error('Task cannot be cancelled now');
+    'paused', 'blocked', 'failed', 'verifying', 'reviewing', 'ready_to_merge'].includes(task.state))
+    throw new Error('Task cannot be cancelled now');
   const active = store.db.prepare("SELECT id FROM run WHERE task_id=? AND status IN ('running','queued','waiting_human') ORDER BY created_at DESC LIMIT 1")
     .get(task.id);
   const run = active ? store.getRun(String(active.id)) : undefined;

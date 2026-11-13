@@ -246,9 +246,8 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
       {detail.runs.some(run => run.status === 'paused' && run.processTerminationUnconfirmed) &&
         <Button variant="secondary" size="xs" disabled={busy || !!detail.task.owner}
           onClick={() => void command('confirm_termination')}>确认进程终止</Button>}
-      {['blocked', 'failed'].includes(detail.task.state) &&
-        <Button variant="secondary" size="xs" disabled={busy || !!detail.task.owner}
-          onClick={() => void command('cancel', '手动标记完成')}>标记完成</Button>}
+      <Button variant="secondary" size="xs" disabled={busy || !!detail.task.owner}
+          onClick={() => void command('cancel', '手动标记完成')}>标记完成</Button>
       <Button variant="secondary" size="xs" disabled={busy} onClick={() => dialog.current?.showModal()}>拆分任务</Button></div>}
     {expanded && detail.task.state === 'paused' && detail.task.owner === actorId && <form onSubmit={finishTakeover} className="stack task-takeover-inline">
       <h3>提交接管结果</h3><label>处理摘要<textarea value={takeoverSummary}
