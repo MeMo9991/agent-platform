@@ -5,9 +5,8 @@ import { Textarea } from '@/components/base/textarea/textarea';
 import { Card } from '../components/ui';
 import { cx } from '@/utils/cx';
 
-type Group = 'projectGroups' | 'schedules' | 'agents' | 'budget' | 'policyRef' | 'releasePipelines' | 'port' | 'review' | 'devopsCredentials';
-type Settings = { revision: string; restartRequired: boolean; groups: Record<Group, unknown>;
-  protected: { actorId?: string; roles?: string[]; credentialFileConfigured: boolean; devopsCredentialsConfigured: boolean } };
+type Group = 'projectGroups' | 'schedules' | 'agents' | 'budget' | 'policyRef' | 'releasePipelines' | 'review' | 'devopsCredentials';
+type Settings = { revision: string; restartRequired: boolean; groups: Record<Group, unknown> };
 const categories: { id: string; title: string; groups: { id: Group; title: string; hint: string }[] }[] = [
   { id: 'projects', title: '项目组', groups: [
     { id: 'projectGroups', title: '项目组与仓库', hint: '每个项目组直接包含仓库；人工提交默认开放。仓库各自设置合并目标分支 targetBranch。绝对路径和凭据引用不回显；路径留空保留原值，填 null 可清除。' }] },
@@ -23,8 +22,6 @@ const categories: { id: string; title: string; groups: { id: Group; title: strin
     { id: 'review', title: 'review 校验策略', hint: 'mode：off/shadow/warn/enforce；gates：edit/openPr/merge；limits：maxFiles/maxChangedLines；contentDeny 为追加的禁止内容。通用层不含仓库路径规则；保存后重启生效。' }] },
   { id: 'release', title: '发布映射', groups: [
     { id: 'releasePipelines', title: '发布流水线', hint: '仓库、环境与流水线配置引用。' }] },
-  { id: 'service', title: '服务与权限', groups: [
-    { id: 'port', title: 'API 端口', hint: '本机 API 监听端口，重启后生效。' }] },
 ];
 
 export function SettingsPage() {
@@ -52,7 +49,7 @@ export function SettingsPage() {
   }
   const active = categories.find(item => item.id === category)!;
   return <div className="stack settings-page"><header className="page-heading"><div><span className="eyebrow">工作台 / 本机配置</span>
-    <h1>配置</h1><p className="muted">维护项目组、定时扫描、Agent、预算与服务参数 · 每组单独保存，重启服务后生效</p></div></header>
+    <h1>配置</h1><p className="muted">维护项目组、定时扫描、Agent、预算与校验策略 · 每组单独保存，重启服务后生效</p></div></header>
     <div className="settings-layout"><nav className="settings-nav" aria-label="配置分类">{categories.map(item =>
       <button key={item.id} type="button" className={cx('settings-nav-item', category === item.id && 'active')}
         aria-current={category === item.id ? 'page' : undefined} onClick={() => { setCategory(item.id); setError(''); setNotice(''); }}>{item.title}</button>)}</nav>
@@ -67,8 +64,6 @@ export function SettingsPage() {
           <Textarea aria-label={`${group.title} JSON`} value={drafts[group.id] ?? ''} onChange={value => setDrafts(current => ({ ...current, [group.id]: value }))}
             rows={Math.min(18, Math.max(4, (drafts[group.id]?.split('\n').length ?? 4) + 1))} resize="vertical" className="font-mono"
             fieldClassName="bg-background-primary-default border border-separator-border" />
-        </Card>)}{category === 'service' && <Card className="settings-card"><h3>受保护的信任根</h3>
-          <p className="muted">身份：{settings.protected.actorId ?? '未配置'} · 角色：{settings.protected.roles?.join('、') || '无'} · 凭据文件：{settings.protected.credentialFileConfigured ? '已配置' : '未配置'} · DevOps 凭据：{settings.protected.devopsCredentialsConfigured ? '已配置' : '未配置'}</p>
-          <p className="muted">这些字段只能在受信配置文件中维护，API 不返回凭据内容或文件路径。</p></Card>}</>}
+        </Card>)}</>}
       </div></div></div>;
 }
