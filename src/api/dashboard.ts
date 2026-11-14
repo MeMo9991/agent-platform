@@ -631,8 +631,12 @@ export async function handleDashboard(request: IncomingMessage, response: Server
     }
     send(response, 404, { error: 'Unknown endpoint' }); return true;
   } catch (error) {
-    send(response, error instanceof z.ZodError ? 400 : 409,
-      { error: error instanceof Error ? error.message : 'Request rejected' });
+    if (error instanceof z.ZodError) {
+      send(response, 400, { error: error.issues
+        .map(issue => `${issue.path.join('.') || 'value'}: ${issue.message}`).join('; ') });
+      return true;
+    }
+    send(response, 409, { error: error instanceof Error ? error.message : 'Request rejected' });
     return true;
   }
 }
