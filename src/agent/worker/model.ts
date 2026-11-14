@@ -4,7 +4,7 @@ import { mandate } from '../task/model.js';
 import { loadedSkill, skillRef } from '../../skills/model.js';
 
 export const runStage = z.enum(['investigate', 'develop', 'verify', 'review', 'release_prepare']);
-export const runStatus = z.enum(['queued', 'running', 'waiting_human', 'paused', 'succeeded', 'failed', 'cancelled']);
+export const runStatus = z.enum(['queued', 'running', 'waiting_human', 'paused', 'succeeded', 'failed', 'cancelled', 'completed']);
 export const agentUsage = z.discriminatedUnion('kind', [z.object({ kind: z.literal('unknown') }), z.object({ kind: z.literal('actual'), inputTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative() })]);
 export const executionAttestation = z.object({ verified: z.literal(true), runId: id,
   repoKey: id, workspacePath: id, mode: z.enum(['read', 'write']),

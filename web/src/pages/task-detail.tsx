@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { RiCloseLine, RiEditLine, RiFileCopyLine, RiPauseLine, RiPlayLine, RiRefreshLine, RiRestartLine, RiUserLine } from '@remixicon/react';
+import { RiCheckLine, RiCloseLine, RiEditLine, RiFileCopyLine, RiPauseLine, RiPlayLine, RiRefreshLine, RiRestartLine, RiUserLine } from '@remixicon/react';
 import { api } from '../app/api';
 import { Badge, Button, Card } from '../components/ui';
 import { Chip } from '@/components/base/badges/chip';
@@ -193,7 +193,7 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
   const [codeChange, setCodeChange] = useState<'none' | 'committed'>('none');
   const [commitSha, setCommitSha] = useState('');
   const [takeoverKey, setTakeoverKey] = useState(() => crypto.randomUUID());
-  async function command(kind: 'pause' | 'resume' | 'retry' | 'cancel' | 'takeover' | 'confirm_termination', reason?: string) {
+  async function command(kind: 'pause' | 'resume' | 'retry' | 'cancel' | 'takeover' | 'confirm_termination' | 'complete', reason?: string) {
     setError(''); setReceipt(''); setBusy(true);
     try {
       const key = commandKeys.current[kind] ??= crypto.randomUUID();
@@ -237,6 +237,7 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
       { kind: 'resume', label: '恢复', icon: RiPlayLine },
       { kind: 'retry', label: '重试', icon: RiRestartLine },
       { kind: 'cancel', label: '取消', icon: RiCloseLine },
+      { kind: 'complete', label: '标记完成', icon: RiCheckLine },
       { kind: 'takeover', label: '人工接管', icon: RiUserLine },
     ] as const).map(({ kind, label, icon }) =>
       <Button key={kind} variant="secondary" size="xs" leadingIcon={icon}
@@ -246,8 +247,6 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
       {detail.runs.some(run => run.status === 'paused' && run.processTerminationUnconfirmed) &&
         <Button variant="secondary" size="xs" disabled={busy || !!detail.task.owner}
           onClick={() => void command('confirm_termination')}>确认进程终止</Button>}
-      <Button variant="secondary" size="xs" disabled={busy || !!detail.task.owner}
-          onClick={() => void command('cancel', '手动标记完成')}>标记完成</Button>
       <Button variant="secondary" size="xs" disabled={busy} onClick={() => dialog.current?.showModal()}>拆分任务</Button></div>}
     {expanded && detail.task.state === 'paused' && detail.task.owner === actorId && <form onSubmit={finishTakeover} className="stack task-takeover-inline">
       <h3>提交接管结果</h3><label>处理摘要<textarea value={takeoverSummary}
@@ -414,7 +413,7 @@ export function TaskDetailPage({ id, actorId, roles }: { id: string; actorId: st
         <TabPanel id="execution" shouldForceMount className="stack task-tab-panel">
       <Card><h2>运行与会话</h2>{detail.runs.length ? detail.runs.map((run, index) => {
         const review = run.stage === 'review' ? detail.records.find(item => item.kind === 'review' && item.runId === run.id) : undefined;
-        const failureReason = run.status === 'succeeded' ? undefined : run.reason;
+        const failureReason = ['succeeded', 'completed'].includes(run.status) ? undefined : run.reason;
         return <div className="run-row task-run" key={run.id}>
         <div className="task-run-heading"><strong>{run.stage}</strong><Badge>{run.status}</Badge>
           <Chip color="gray" variant="caption">{run.agentKind ?? 'Agent 待定'}</Chip></div>

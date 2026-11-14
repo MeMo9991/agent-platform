@@ -3,15 +3,18 @@ import type { z } from 'zod';
 import type { actorRef } from '../../shared/model.js';
 
 const next: Partial<Record<TaskState, TaskState[]>> = {
-  new: ['triaged', 'cancelled'], triaged: ['queued', 'waiting_human', 'cancelled'],
-  queued: ['investigating', 'developing', 'verifying', 'reviewing', 'waiting_human', 'paused', 'blocked', 'cancelled'], investigating: ['developing', 'waiting_human', 'blocked', 'failed', 'cancelled'],
-  developing: ['verifying', 'waiting_human', 'blocked', 'failed', 'cancelled'],
-  verifying: ['reviewing', 'developing', 'blocked', 'failed'], reviewing: ['ready_to_merge', 'developing', 'waiting_human', 'blocked'],
-  ready_to_merge: ['merging', 'waiting_human', 'blocked'], merging: ['merged', 'blocked', 'failed'],
-  merged: ['release_pending'], release_pending: ['releasing', 'waiting_human'],
-  releasing: ['released', 'blocked', 'failed'], released: ['closed'],
-  waiting_human: ['queued', 'investigating', 'developing', 'verifying', 'reviewing', 'ready_to_merge', 'release_pending', 'paused', 'blocked', 'cancelled'],
-  paused: ['queued', 'verifying', 'cancelled'], blocked: ['queued', 'cancelled'], failed: ['queued', 'cancelled'],
+  new: ['triaged', 'cancelled', 'closed'], triaged: ['queued', 'waiting_human', 'cancelled', 'closed'],
+  queued: ['investigating', 'developing', 'verifying', 'reviewing', 'waiting_human', 'paused', 'blocked', 'cancelled', 'closed'],
+  investigating: ['developing', 'waiting_human', 'blocked', 'failed', 'cancelled', 'closed'],
+  developing: ['verifying', 'waiting_human', 'blocked', 'failed', 'cancelled', 'closed'],
+  verifying: ['reviewing', 'developing', 'blocked', 'failed', 'closed'],
+  reviewing: ['ready_to_merge', 'developing', 'waiting_human', 'blocked', 'closed'],
+  ready_to_merge: ['merging', 'waiting_human', 'blocked', 'closed'],
+  merging: ['merged', 'blocked', 'failed', 'closed'],
+  merged: ['release_pending', 'closed'], release_pending: ['releasing', 'waiting_human', 'closed'],
+  releasing: ['released', 'blocked', 'failed', 'closed'], released: ['closed'],
+  waiting_human: ['queued', 'investigating', 'developing', 'verifying', 'reviewing', 'ready_to_merge', 'release_pending', 'paused', 'blocked', 'cancelled', 'closed'],
+  paused: ['queued', 'verifying', 'cancelled', 'closed'], blocked: ['queued', 'cancelled', 'closed'], failed: ['queued', 'cancelled', 'closed'],
 };
 export type TaskTransitionResult = { task: Task; record: Extract<TaskRecord, { kind: 'state_change' }> };
 export function transitionTask(value: Task, to: TaskState, reason: string, at: string, recordId: string,

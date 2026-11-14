@@ -307,6 +307,29 @@ test('cancelling a human-waiting Task closes the request and Run', async () => {
   } finally { store.close(); }
 });
 
+test('marking a task complete closes the Task and marks its active Run completed', async () => {
+  const store = new SqliteStore(':memory:');
+  try {
+    const at = new Date().toISOString();
+    store.saveTask({ id: 'complete-task', repoKey: 'repo', title: 'Question', scope: 'Investigate',
+      mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Investigate',
+        allowedActions: ['investigate'], maxAutoRisk: 'low', policyVersion: 'p1',
+        authority: { kind: 'trusted_rule', ruleRef: 'test' } },
+      state: 'waiting_human', iteration: 1, priority: 0, createdAt: at, updatedAt: at });
+    store.saveRun({ id: 'complete-run', taskId: 'complete-task', iteration: 1, stage: 'investigate',
+      status: 'waiting_human', priority: 0, attempt: 1, agentKind: 'qoder', createdAt: at });
+    store.saveRecord({ id: 'complete-question', taskId: 'complete-task', runId: 'complete-run',
+      kind: 'question', prompt: 'Need details?', status: 'open', at });
+    const version = Number(store.db.prepare('SELECT version FROM task WHERE id=?').get('complete-task')?.version);
+    await executeTaskCommand(store, {}, 'owner', { kind: 'complete', taskId: 'complete-task',
+      expectedVersion: version, idempotencyKey: 'complete-task', reason: '手动完成' });
+    assert.equal(store.getTask('complete-task')?.state, 'closed');
+    assert.equal(store.getRun('complete-run')?.status, 'completed');
+    assert.equal(store.getRecord('complete-question')?.kind === 'question' &&
+      store.getRecord('complete-question')?.status, 'dismissed');
+  } finally { store.close(); }
+});
+
 test('running Task takeover waits for confirmed termination and records human result before resume', async () => {
   const store = new SqliteStore(':memory:');
   try {
