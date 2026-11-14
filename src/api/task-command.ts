@@ -83,7 +83,7 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
   const row = store.db.prepare('SELECT version FROM task WHERE id=?').get(input.taskId);
   const task = store.getTask(input.taskId);
   if (!task || Number(row?.version) !== input.expectedVersion) throw new Error('Task version changed; reload before deciding');
-  if (task.owner && ['resume', 'retry', 'cancel', 'confirm_termination'].includes(input.kind))
+  if (task.owner && ['resume', 'retry', 'cancel', 'confirm_termination', 'complete'].includes(input.kind))
     throw new Error('Human takeover result is required first');
   if (!input.reason.trim()) throw new Error('Reason is required');
   const latestRunStatus = (taskId: string) => {
@@ -112,7 +112,12 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
   if (['pause', 'takeover'].includes(input.kind) && !['queued', 'investigating', 'developing', 'waiting_human'].includes(task.state))
     throw new Error('Task cannot be paused or taken over now');
   if (input.kind === 'cancel' && !['new', 'triaged', 'queued', 'investigating', 'developing', 'waiting_human',
-    'paused', 'blocked', 'failed'].includes(task.state)) throw new Error('Task cannot be cancelled now');
+    'paused', 'blocked', 'failed', 'verifying', 'reviewing', 'ready_to_merge'].includes(task.state))
+    throw new Error('Task cannot be cancelled now');
+  if (input.kind === 'complete' && !['new', 'triaged', 'queued', 'investigating', 'developing', 'waiting_human',
+    'paused', 'blocked', 'failed', 'verifying', 'reviewing', 'ready_to_merge', 'merging', 'merged',
+    'release_pending', 'releasing', 'released'].includes(task.state))
+    throw new Error('Task cannot be marked complete now');
   const active = store.db.prepare("SELECT id FROM run WHERE task_id=? AND status IN ('running','queued','waiting_human') ORDER BY created_at DESC LIMIT 1")
     .get(task.id);
   const run = active ? store.getRun(String(active.id)) : undefined;
@@ -132,9 +137,10 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
     if (!input.reason.trim()) throw new Error('Reason is required');
     const now = new Date().toISOString();
     const actor = { kind: 'human' as const, id: actorId };
-    if (input.kind === 'pause' || input.kind === 'takeover' || input.kind === 'cancel') {
-      if (run) store.replaceRun({ ...run, status: 'cancelled', leaseUntil: undefined,
-        workerId: undefined, endedAt: now }, run.status);
+    if (input.kind === 'pause' || input.kind === 'takeover' || input.kind === 'cancel' || input.kind === 'complete') {
+      if (run) store.replaceRun({ ...run,
+        status: input.kind === 'complete' ? 'completed' : 'cancelled',
+        leaseUntil: undefined, workerId: undefined, endedAt: now }, run.status);
       if (input.kind === 'cancel') {
         for (const row of store.db.prepare("SELECT id,payload_json,kind FROM task_record WHERE task_id=? AND kind IN ('question','approval_request') AND status='open'").all(current.id)) {
           const record = JSON.parse(String(row.payload_json)) as Record<string, unknown>;
@@ -143,6 +149,15 @@ export async function executeTaskCommand(store: SqliteStore, runners: Readonly<R
             .run(status, JSON.stringify({ ...record, status }), row.id);
         }
         store.saveTransition(current.id, 'cancelled', input.reason, now, randomUUID(), actor);
+      }
+      else if (input.kind === 'complete') {
+        for (const row of store.db.prepare("SELECT id,payload_json,kind FROM task_record WHERE task_id=? AND kind IN ('question','approval_request') AND status='open'").all(current.id)) {
+          const record = JSON.parse(String(row.payload_json)) as Record<string, unknown>;
+          const status = row.kind === 'question' ? 'dismissed' : 'invalidated';
+          store.db.prepare('UPDATE task_record SET status=?,payload_json=? WHERE id=? AND status=\'open\'')
+            .run(status, JSON.stringify({ ...record, status }), row.id);
+        }
+        store.saveTransition(current.id, 'closed', input.reason, now, randomUUID(), actor);
       }
       else {
         if (current.state !== 'queued' && current.state !== 'waiting_human' && current.state !== 'paused')
