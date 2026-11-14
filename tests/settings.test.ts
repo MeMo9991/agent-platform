@@ -99,6 +99,55 @@ test('settings API requires a separately configured role', async () => {
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('settings explain a missing searchRoot instead of a generic validation error', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-platform-search-root-'));
+  const paths = { platform: join(directory, 'platform.json'), schedules: join(directory, 'schedules.json') };
+  const platform = JSON.parse(readFileSync('config/platform.json', 'utf8')) as Record<string, any>;
+  writeFileSync(paths.platform, JSON.stringify(platform));
+  writeFileSync(paths.schedules, readFileSync('config/schedules.json'));
+  try {
+    const before = readSettings(paths);
+    const groups = structuredClone(before.groups.projectGroups);
+    groups[0].searchRootConfigured = true;
+    assert.throws(() => saveSettings(paths, 'projectGroups', before.revision, groups),
+      /reports searchRootConfigured but has no saved searchRoot/);
+
+    assert.throws(() => saveSettings(paths, 'projectGroups', before.revision,
+      [{ projectKey: 'group-without-root', repositories: [], defaultRepoKey: 'repo' }]),
+      /Project group group-without-root sets defaultRepoKey without searchRoot/);
+
+    const { credentialsRef: _credentials, ...repo } = platform.projectGroups[0].repositories[0];
+    assert.throws(() => saveSettings(paths, 'projectGroups', before.revision,
+      [{ projectKey: 'duplicate-repos', repositories: [repo, { ...repo }] }]),
+      /Project group duplicate-repos has duplicate repository keys/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('settings API returns a readable validation error', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-platform-settings-error-'));
+  const paths = { platform: join(directory, 'platform.json'), schedules: join(directory, 'schedules.json') };
+  writeFileSync(paths.platform, readFileSync('config/platform.json'));
+  writeFileSync(paths.schedules, readFileSync('config/schedules.json'));
+  const store = new SqliteStore(':memory:');
+  const coordinator = createKernelCoordinator(store, {}, 'p1', 'test', 'qoder', ['agent-platform'], createTaskCandidateFinder(store));
+  const credentialFile = join(directory, 'token');
+  const server = await startLocalApi(store, coordinator, { credentialFile, actorId: 'owner', roles: ['configure'],
+    dashboard: { actorId: 'owner', repoKeys: ['agent-platform'], imageDirectory: join(directory, 'images'),
+      attachmentReaders: {}, settingsPaths: paths } });
+  const headers = { authorization: `Bearer ${readFileSync(credentialFile, 'utf8')}`, 'content-type': 'application/json' };
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const settings = await (await fetch(`${base}/api/settings`, { headers })).json() as Record<string, any>;
+    const response = await fetch(`${base}/api/settings/projectGroups`, { method: 'PUT', headers,
+      body: JSON.stringify({ expectedRevision: settings.revision, value: [
+        { projectKey: 'group-without-root', repositories: [], defaultRepoKey: 'repo' }] }) });
+    assert.equal(response.status, 400);
+    const body = await response.json() as { error: string };
+    assert.match(body.error, /projectGroups\.0\.searchRoot: Project group group-without-root sets defaultRepoKey without searchRoot/);
+    assert.doesNotMatch(body.error, /^\s*\[/);
+  } finally { await server.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('review policy is readable and savable through the settings API', () => {
   const directory = mkdtempSync(join(tmpdir(), 'agent-platform-review-'));
   const paths = { platform: join(directory, 'platform.json'), schedules: join(directory, 'schedules.json') };

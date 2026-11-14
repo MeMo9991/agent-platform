@@ -111,6 +111,10 @@ export function saveSettings(paths: SettingsPaths, group: SettingsGroup, expecte
         if (renames.has(previous.projectKey)) throw new Error(`Project group ${previous.projectKey} split is ambiguous`);
         renames.set(previous.projectKey, String(group.projectKey));
       }
+      const clearSearchRoot = group.searchRoot === null;
+      const searchRoot = clearSearchRoot ? undefined : group.searchRoot ?? previous?.searchRoot;
+      if (group.searchRootConfigured === true && !clearSearchRoot && !searchRoot)
+        throw new Error(`Project group ${String(group.projectKey)} reports searchRootConfigured but has no saved searchRoot; provide an absolute searchRoot or set it to null`);
       const repositories = group.repositories.map((item: unknown) => {
         if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Invalid repository');
         const repo = item as Record<string, unknown>;
@@ -121,8 +125,7 @@ export function saveSettings(paths: SettingsPaths, group: SettingsGroup, expecte
         return { ...visible, credentialsRef: old?.credentialsRef ?? 'unconfigured',
           localPath: repo.localPath === null ? undefined : repo.localPath ?? old?.localPath };
       });
-      return { ...fields, repositories,
-        searchRoot: group.searchRoot === null ? undefined : group.searchRoot ?? previous?.searchRoot };
+      return { ...fields, repositories, searchRoot };
     });
     if (renames.size) nextSchedules.tasks = current.schedules.tasks.map(task => ({ ...task,
       projectKey: renames.get(task.projectKey) ?? task.projectKey }));

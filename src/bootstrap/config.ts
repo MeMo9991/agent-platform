@@ -19,8 +19,14 @@ export const projectGroup = z.object({ projectKey: id,
   .refine(value => !value.repoKeys || !value.repositories.length, 'repoKeys cannot accompany nested repositories')
   .transform(value => ({ ...value,
     repoKeys: value.repositories.length ? value.repositories.map(repo => repo.repoKey) : value.repoKeys ?? [] }))
-  .refine(value => new Set(value.repoKeys).size === value.repoKeys.length &&
-    (!value.defaultRepoKey || value.searchRoot), 'Duplicate project repository or missing search root');
+  .superRefine((value, context) => {
+    if (new Set(value.repoKeys).size !== value.repoKeys.length)
+      context.addIssue({ code: 'custom', path: ['repoKeys'],
+        message: `Project group ${value.projectKey} has duplicate repository keys` });
+    if (value.defaultRepoKey && !value.searchRoot)
+      context.addIssue({ code: 'custom', path: ['searchRoot'],
+        message: `Project group ${value.projectKey} sets defaultRepoKey without searchRoot` });
+  });
 export const devopsSourceConfig = z.object({
   businessProjectId: z.number().int().positive(), pageSize: z.number().int().positive().optional(),
 }).strict();
