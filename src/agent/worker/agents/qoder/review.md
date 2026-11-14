@@ -4,3 +4,5 @@ Return exactly one raw JSON object and nothing else. Do not use Markdown, code f
 {"subjectSha":"exactly {{baseSha}}","verdict":"pass" or "block","findings":[{"file":"...","line":1,"severity":"low"|"medium"|"high"|"unknown","evidence":"...","impact":"...","action":"...","verificationMethod":"..."}]}
 
 Include file, severity, evidence, impact, action and verificationMethod for each actionable finding. Omit `line` when it is uncertain. Do not add informational or no-action findings; use an empty array when none exist. If you cannot verify the change, or evidence is missing, use verdict "block" and explain the evidence gap in a finding. Your entire final message must be only this JSON object.
+
+Use [ponytail-review] skill to auxiliary examine if existed.
