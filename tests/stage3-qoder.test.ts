@@ -8,27 +8,48 @@ import { join } from 'node:path';
 import { createQoderRunner } from '../src/agent/worker/agents/qoder.js';
 import { buildQoderSystemPrompt } from '../src/agent/worker/agents/qoder/system-prompt.js';
 
-test('Qoder reads edited prompt text for each new session', () => {
+test('Qoder reads edited investigate prompt text without a separate question prompt', () => {
   const directory = mkdtempSync(join(tmpdir(), 'qoder-prompt-'));
   try {
     writeFileSync(join(directory, 'system-prompt.md'), '{{mandate}}\n{{skill}}');
     writeFileSync(join(directory, 'investigate.md'), 'Investigate only');
-    writeFileSync(join(directory, 'question.md'), 'Ask first');
+    // An empty question.md must not break the build: no stage loads it anymore.
+    writeFileSync(join(directory, 'question.md'), '');
     const request = { stage: 'investigate', mandate: { goal: 'Investigate' },
       skill: { content: 'Read only' }, workspace: { baseSha: 'a'.repeat(40) } } as Parameters<typeof buildQoderSystemPrompt>[0];
-    assert.match(buildQoderSystemPrompt(request, directory), /Investigate only\nAsk first$/);
-    writeFileSync(join(directory, 'question.md'), 'Ask the owner first');
-    assert.match(buildQoderSystemPrompt(request, directory), /Ask the owner first$/);
+    assert.match(buildQoderSystemPrompt(request, directory), /Investigate only$/);
+    writeFileSync(join(directory, 'investigate.md'), 'Investigate and confirm first');
+    assert.match(buildQoderSystemPrompt(request, directory), /Investigate and confirm first$/);
     assert.throws(() => { writeFileSync(join(directory, 'system-prompt.md'), '{{skill}}');
       buildQoderSystemPrompt(request, directory); }, /required placeholder/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('investigate prompt is explicitly read-only and asks the model to stop searching', () => {
+test('investigate prompt is read-only, avoids repeated searches and owns the question contract', () => {
   const prompt = buildQoderSystemPrompt({ stage: 'investigate', mandate: { goal: 'Investigate' },
     workspace: { baseSha: 'a'.repeat(40) } } as Parameters<typeof buildQoderSystemPrompt>[0]);
   assert.match(prompt, /strictly read-only/);
   assert.match(prompt, /Do not repeat the same tool call/);
+  assert.match(prompt, /"kind":"question"/);
+  assert.match(prompt, /normal investigation conclusion/);
+});
+
+test('develop prompt owns the question contract without a separate question.md', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'qoder-develop-prompt-'));
+  try {
+    writeFileSync(join(directory, 'system-prompt.md'), '{{mandate}}');
+    writeFileSync(join(directory, 'develop.md'), 'Develop only');
+    // A leftover empty question.md must not be loaded by any stage.
+    writeFileSync(join(directory, 'question.md'), '');
+    const request = { stage: 'develop', mandate: { goal: 'Develop' },
+      workspace: { baseSha: 'a'.repeat(40) } } as Parameters<typeof buildQoderSystemPrompt>[0];
+    assert.match(buildQoderSystemPrompt(request, directory), /Develop only$/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+
+  const prompt = buildQoderSystemPrompt({ stage: 'develop', mandate: { goal: 'Develop' },
+    workspace: { baseSha: 'a'.repeat(40) } } as Parameters<typeof buildQoderSystemPrompt>[0]);
+  assert.match(prompt, /"kind":"question"/);
+  assert.match(prompt, /normal development result/);
 });
 
 test('review prompt requires reviewer role and one raw JSON object', () => {
