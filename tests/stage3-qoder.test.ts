@@ -13,22 +13,30 @@ test('Qoder reads edited prompt text for each new session', () => {
   try {
     writeFileSync(join(directory, 'system-prompt.md'), '{{mandate}}\n{{skill}}');
     writeFileSync(join(directory, 'investigate.md'), 'Investigate only');
-    writeFileSync(join(directory, 'question.md'), 'Ask first');
     const request = { stage: 'investigate', mandate: { goal: 'Investigate' },
       skill: { content: 'Read only' }, workspace: { baseSha: 'a'.repeat(40) } } as Parameters<typeof buildQoderSystemPrompt>[0];
-    assert.match(buildQoderSystemPrompt(request, directory), /Investigate only\nAsk first$/);
-    writeFileSync(join(directory, 'question.md'), 'Ask the owner first');
-    assert.match(buildQoderSystemPrompt(request, directory), /Ask the owner first$/);
+    assert.match(buildQoderSystemPrompt(request, directory), /Investigate only$/);
+    writeFileSync(join(directory, 'investigate.md'), 'Investigate the owner first');
+    assert.match(buildQoderSystemPrompt(request, directory), /Investigate the owner first$/);
     assert.throws(() => { writeFileSync(join(directory, 'system-prompt.md'), '{{skill}}');
       buildQoderSystemPrompt(request, directory); }, /required placeholder/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('investigate prompt is explicitly read-only and asks the model to stop searching', () => {
+test('investigate prompt is read-only, avoids repeated searches and owns the question contract', () => {
   const prompt = buildQoderSystemPrompt({ stage: 'investigate', mandate: { goal: 'Investigate' },
     workspace: { baseSha: 'a'.repeat(40) } } as Parameters<typeof buildQoderSystemPrompt>[0]);
   assert.match(prompt, /strictly read-only/);
   assert.match(prompt, /Do not repeat the same tool call/);
+  assert.match(prompt, /"kind":"question"/);
+  assert.match(prompt, /normal investigation conclusion/);
+});
+
+test('develop owns the question contract without a separate question prompt', () => {
+  const prompt = buildQoderSystemPrompt({ stage: 'develop', mandate: { goal: 'Edit' },
+    workspace: { baseSha: 'a'.repeat(40) } } as Parameters<typeof buildQoderSystemPrompt>[0]);
+  assert.match(prompt, /"kind":"question"/);
+  assert.match(prompt, /normal development result/);
 });
 
 test('review prompt requires reviewer role and one raw JSON object', () => {
