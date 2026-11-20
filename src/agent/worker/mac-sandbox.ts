@@ -5,6 +5,7 @@ import { copyFile, lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } fro
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
+import { qoderPatPath, readQoderPat } from '../../bootstrap/qoder-credentials.js';
 import type { ExecutionBoundary } from './manager.js';
 import type { IsolatedProcessLauncher } from './agents/qoder.js';
 
@@ -81,7 +82,7 @@ export async function createMacQoderRuntime(input: { cloneRoot: string; profileR
     profilePath: string; checkProfilePath: string; digest: string; checkDigest: string;
     mode: 'read' | 'write'; launched: boolean;
     agentClosed: boolean; checking: boolean; agentRequired: boolean;
-    checkWorkspace?: string; cachePaths: string[] }>();
+    checkWorkspace?: string; cachePaths: string[]; qoderPat?: string }>();
   const matchProof = (proof: { verified: true; runId: string; repoKey: string; workspacePath: string;
     mode: 'read' | 'write'; adapterVersion: string; configDigest: string }, cwd: string) => {
     const saved = proofs.get(proof.runId);
@@ -101,8 +102,9 @@ export async function createMacQoderRuntime(input: { cloneRoot: string; profileR
     agentRequired = true, checkWorkspacePath, cachePaths = [] }) {
     if (!/^[A-Za-z0-9_-]+$/.test(runId) || (mode === 'write' &&
         (!input.writeEnabled || mandate.repoKey !== repoKey || !mandate.allowedActions.includes('edit') ||
-          !['human_approval', 'auto_pr'].includes(mandate.authority.kind) ||
-          !process.env.QODERCN_PERSONAL_ACCESS_TOKEN))) return undefined;
+          !['human_approval', 'auto_pr'].includes(mandate.authority.kind)))) return undefined;
+    const qoderPat = mode === 'write' ? readQoderPat() : process.env.QODERCN_PERSONAL_ACCESS_TOKEN;
+    if (mode === 'write' && !qoderPat) throw new Error('QoderCN PAT is missing. Configure it in Agent & Budget.');
     if (proofs.has(runId)) throw new Error('Previous Run isolation is still active');
     const workspace = await realpath(workspacePath);
     if (workspace !== resolve(cloneRoot, runId) || !(await lstat(resolve(workspace, '.git'))).isDirectory())
@@ -143,7 +145,7 @@ export async function createMacQoderRuntime(input: { cloneRoot: string; profileR
       try {
         outside = await mkdtemp('/private/tmp/agent-platform-boundary-probe-');
         const protectedFiles = [resolve(home, '.config/agent-platform/local-api.token'),
-          resolve(qoderConfig, 'settings.json')].filter(existsSync);
+          resolve(qoderConfig, 'settings.json'), qoderPatPath()].filter(existsSync);
         if (!protectedFiles.length || protectedFiles.some(path => probe('/bin/cat', path) === 0) ||
             probe('/usr/bin/touch', resolve(outside, 'denied')) === 0 ||
             probe('/usr/bin/touch', allowed) !== 0)
@@ -160,7 +162,7 @@ export async function createMacQoderRuntime(input: { cloneRoot: string; profileR
     }
     proofs.set(runId, { repoKey, workspace, temporary, profilePath, checkProfilePath,
       digest: base.digest, checkDigest, mode, launched: false, agentClosed: false, checking: false,
-      agentRequired, ...(checkWorkspace ? { checkWorkspace } : {}), cachePaths: caches });
+      agentRequired, ...(checkWorkspace ? { checkWorkspace } : {}), cachePaths: caches, qoderPat });
     return { verified: true, runId, repoKey, workspacePath: workspace,
       mode, adapterVersion: 'mac-sandbox-1', configDigest: base.digest };
   }, runCheck({ proof, command, args, cwd, env }) {
@@ -281,8 +283,7 @@ export async function createMacQoderRuntime(input: { cloneRoot: string; profileR
       env: { HOME: saved.mode === 'write' ? saved.temporary : home,
         USER: process.env.USER ?? '', LANG: process.env.LANG ?? 'en_US.UTF-8',
         PATH: qoderLink + ':/usr/bin:/bin:/usr/sbin:/sbin', TMPDIR: saved.temporary,
-        ...(process.env.QODERCN_PERSONAL_ACCESS_TOKEN
-          ? { QODERCN_PERSONAL_ACCESS_TOKEN: process.env.QODERCN_PERSONAL_ACCESS_TOKEN } : {}) },
+        ...(saved.qoderPat ? { QODERCN_PERSONAL_ACCESS_TOKEN: saved.qoderPat } : {}) },
     });
     child.once('close', () => { saved.agentClosed = groupGone(child.pid); });
     return { process: child, isTerminated() { return groupGone(child.pid); }, terminate() {

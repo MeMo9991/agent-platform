@@ -2,13 +2,15 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
-import { platformConfig, type PlatformConfig } from '../bootstrap/config.js';
+import { platformConfig, stage5PreflightRepositories, type PlatformConfig } from '../bootstrap/config.js';
 import { scheduleConfig, type ScheduleConfig } from '../bootstrap/scheduler.js';
 import { validateScheduledSources } from '../bootstrap/start-schedules.js';
 import { devopsCredentials, readCredentials, writeCredentials, credentialsExist } from '../bootstrap/devops-credentials.js';
+import { readCodeHostGroupToken, readCodeHostToken, writeCodeHostGroupToken } from '../bootstrap/code-host-credentials.js';
 import { reviewConfig } from '../authorization/policy/config.js';
+import { readQoderPat, writeQoderPat } from '../bootstrap/qoder-credentials.js';
 
-export const settingsGroup = z.enum(['projectGroups', 'schedules', 'agents', 'budget', 'policyRef', 'releasePipelines', 'port', 'review', 'devopsCredentials']);
+export const settingsGroup = z.enum(['projectGroups', 'projectGroupToken', 'schedules', 'agents', 'qoderPat', 'budget', 'policyRef', 'releasePipelines', 'port', 'review', 'devopsCredentials']);
 export type SettingsGroup = z.infer<typeof settingsGroup>;
 export type SettingsPaths = { platform: string; schedules: string };
 
@@ -31,18 +33,24 @@ function validatePair(platform: PlatformConfig, schedules: ScheduleConfig): void
 }
 function publicRepositories(repositories: PlatformConfig['repositories']) {
   return repositories.map(repo => {
-    const { credentialsRef: _protected, ...visible } = repo;
+    const { credentialsRef: _protected, credentialGroupKey: _group, ...visible } = repo as typeof repo &
+      { credentialGroupKey?: string };
     void _protected;
     return { ...visible,
     autoPr: repo.autoPr ?? { enabled: false, allowedPrefixes: [] },
     localPath: repo.localPath && !isAbsolute(repo.localPath) ? repo.localPath : undefined,
-    localPathConfigured: Boolean(repo.localPath), credentialsRefConfigured: repo.credentialsRef !== 'unconfigured' };
+    localPathConfigured: Boolean(repo.localPath),
+    credentialsRefConfigured: repo.credentialsRef !== 'unconfigured' || Boolean(readCodeHostToken(repo.repoKey)) };
   });
 }
 function publicProjectGroups(platform: PlatformConfig) {
+  const configuredRepositories = new Set(stage5PreflightRepositories(platform).map(repo => repo.repoKey));
   return platform.projectGroups.map(group => ({ projectKey: group.projectKey,
     repositories: publicRepositories(group.repositories), defaultRepoKey: group.defaultRepoKey,
-    searchRootConfigured: Boolean(group.searchRoot) }));
+    verification: group.verification, functionalVerificationUrl: group.functionalVerificationUrl,
+    searchRootConfigured: Boolean(group.searchRoot),
+    tokenConfigured: Boolean(readCodeHostGroupToken(group.projectKey)) ||
+      (group.repositories.length > 0 && group.repositories.every(repo => configuredRepositories.has(repo.repoKey))) }));
 }
 export function readSettings(paths: SettingsPaths) {
   const { platform, schedules, revision } = load(paths);
@@ -56,7 +64,7 @@ export function readSettings(paths: SettingsPaths) {
         : { authorization: '', cookie: '' } },
     protected: { actorId: platform.interaction?.actorId, roles: platform.interaction?.roles,
       credentialFileConfigured: Boolean(platform.interaction?.credentialFile),
-      devopsCredentialsConfigured: credentialsExist() } };
+      devopsCredentialsConfigured: credentialsExist(), qoderPatConfigured: Boolean(readQoderPat()) } };
 }
 
 function writeAtomicBytes(path: string, bytes: string, expectedBytes: string): void {
@@ -77,6 +85,21 @@ function writeAtomic(path: string, value: unknown, expectedBytes: string): void 
 export function saveSettings(paths: SettingsPaths, group: SettingsGroup, expectedRevision: string, value: unknown) {
   const current = load(paths);
   if (current.revision !== expectedRevision) throw new Error('Configuration version changed; reload before saving');
+  if (group === 'qoderPat') {
+    const { token } = z.object({ token: z.string().trim() }).strict().parse(value);
+    writeQoderPat(token);
+    return { revision: current.revision, restartRequired: false };
+  }
+  if (group === 'projectGroupToken') {
+    const input = z.object({ projectKey: z.string().min(1), token: z.string().min(1).max(4096)
+      .regex(/^[\x21-\x7e]+$/) }).strict().parse(value);
+    const target = current.platform.projectGroups.find(item => item.projectKey === input.projectKey);
+    if (!target) throw new Error('Project group is not configured');
+    if (new Set(target.repositories.map(repo => repo.provider)).size > 1)
+      throw new Error('Project group repositories must use one code host provider');
+    writeCodeHostGroupToken(input.projectKey, input.token);
+    return { revision: current.revision, restartRequired: true };
+  }
   if (group === 'devopsCredentials') {
     const input = value as Record<string, unknown>;
     const existing = readCredentials();
@@ -98,7 +121,7 @@ export function saveSettings(paths: SettingsPaths, group: SettingsGroup, expecte
     nextPlatform.projectGroups = value.map((item: unknown) => {
       if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Invalid project group');
       const group = item as Record<string, unknown>;
-      const { searchRootConfigured: _configured, ...fields } = group;
+      const { searchRootConfigured: _configured, tokenConfigured: _token, ...fields } = group;
       void _configured;
       if (!Array.isArray(group.repositories)) throw new Error('Project repositories must be an array');
       const knownKeys = group.repositories.map((repo: Record<string, unknown>) => repo?.repoKey)
@@ -120,12 +143,16 @@ export function saveSettings(paths: SettingsPaths, group: SettingsGroup, expecte
         const repo = item as Record<string, unknown>;
         const old = current.platform.repositories.find(existing => existing.repoKey === repo.repoKey);
         if ('credentialsRef' in repo) throw new Error('Repository credential references are protected');
-        const { localPathConfigured: _path, credentialsRefConfigured: _credential, ...visible } = repo;
+        const { localPathConfigured: _path, credentialsRefConfigured: _credential,
+          credentialGroupKey: _group, ...visible } = repo;
         void _path; void _credential;
         return { ...visible, credentialsRef: old?.credentialsRef ?? 'unconfigured',
           localPath: repo.localPath === null ? undefined : repo.localPath ?? old?.localPath };
       });
-      return { ...fields, repositories, searchRoot };
+      return { ...fields, repositories, searchRoot,
+        verification: group.verification === null ? undefined : group.verification ?? previous?.verification,
+        functionalVerificationUrl: group.functionalVerificationUrl === null ? undefined
+          : group.functionalVerificationUrl ?? previous?.functionalVerificationUrl };
     });
     if (renames.size) nextSchedules.tasks = current.schedules.tasks.map(task => ({ ...task,
       projectKey: renames.get(task.projectKey) ?? task.projectKey }));

@@ -74,7 +74,7 @@ export function createStage5OpenChange(store: SqliteStore, repositories: Readonl
     const sourceSha = store.latestReviewedSha(taskId);
     if (!task || task.state !== 'ready_to_merge' || task.mandate.policyVersion !== policyVersion ||
         !repo || !host || host.repoKey !== repo.repoKey || host.provider !== repo.provider ||
-        !host.readTarget || !host.readRequiredChecks || !repo.requiredChecks.length ||
+        !host.readTarget || !host.readRequiredChecks ||
         !review || !sourceSha || review.subjectSha !== sourceSha)
       throw new Error('Task, repository, review or policy is unavailable for opening a change');
     const developmentRow = store.db.prepare(`SELECT payload_json FROM task_record WHERE task_id=? AND kind='development'

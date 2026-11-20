@@ -44,7 +44,7 @@ export function workerDisposition(run: Run, kind: 'pause' | 'missing_skill', at:
   processTerminationUnconfirmed = false): { run: Run; state: TaskState } {
   return kind === 'pause'
     ? { run: { ...run, status: 'paused', leaseUntil: undefined, workerId: undefined,
-        processTerminationUnconfirmed }, state: run.stage === 'verify' || run.stage === 'review'
+        processTerminationUnconfirmed }, state: run.stage === 'verify' || run.stage === 'functional_verify' || run.stage === 'review'
         ? 'blocked' : 'waiting_human' }
     : { run: { ...run, status: 'failed', leaseUntil: undefined, workerId: undefined, endedAt: at },
         state: 'blocked' };

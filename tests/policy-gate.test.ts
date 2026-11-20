@@ -11,7 +11,8 @@ const base = 'a'.repeat(40);
 const commit = 'b'.repeat(40);
 const finder = { find: () => ({ candidates: [], complete: true }) };
 
-function fixture(review: Record<string, unknown>) {
+function fixture(review: Record<string, unknown>, verificationConfigured = true,
+  developmentChecksRequired = verificationConfigured) {
   const store = new SqliteStore(':memory:');
   const at = new Date().toISOString();
   store.saveTask({ id: 'task', repoKey: 'repo', title: 'Develop', scope: 'Develop',
@@ -22,9 +23,94 @@ function fixture(review: Record<string, unknown>) {
   store.saveRun({ id: 'run', taskId: 'task', iteration: 1, stage: 'develop', status: 'running',
     priority: 0, attempt: 1, agentKind: 'qoder', commitSha: base, createdAt: at });
   const coordinator = createKernelCoordinator(store, {}, 'p1', 'rule', 'qoder', ['repo'], finder,
-    undefined, {}, resolveReview(review, 'p1'));
+    undefined, {}, resolveReview(review, 'p1'), () => verificationConfigured, () => developmentChecksRequired);
   return { store, coordinator };
 }
+
+test('missing verification waits for manual delivery approval without queuing verify', async () => {
+  const { store, coordinator } = fixture({ mode: 'warn' }, false);
+  try {
+    await coordinator.onSignal({ kind: 'agent_event', taskId: 'task',
+      event: { kind: 'result', runId: 'run', status: 'succeeded', exitCode: 0, resultRef: 'ref',
+        development: { ...development(['src/a.ts']), checks: [] } } });
+    assert.equal(store.getTask('task')?.state, 'waiting_human');
+    assert.equal(store.db.prepare("SELECT count(*) AS n FROM run WHERE stage='verify'").get()?.n, 0);
+    const request = JSON.parse(String(store.db.prepare(
+      "SELECT payload_json FROM task_record WHERE kind='approval_request' AND status='open'").get()?.payload_json));
+    assert.equal(request.request.kind, 'manual_delivery');
+    await coordinator.onSignal({ kind: 'human_response', taskId: 'task',
+      response: { kind: 'approval_decision', value: { requestId: request.request.id,
+        actor: { kind: 'human', id: 'owner' }, decision: 'approve',
+        at: new Date().toISOString(), idempotencyKey: 'manual-delivery-approval' } } });
+    assert.equal(store.getTask('task')?.state, 'waiting_human');
+    assert.equal(store.db.prepare("SELECT count(*) AS n FROM run WHERE stage='verify'").get()?.n, 0);
+    assert.equal(store.getRecord(request.request.id)?.status, 'approved');
+  } finally { store.close(); }
+});
+
+test('group verification may follow development without per-repository checks', async () => {
+  const { store, coordinator } = fixture({ mode: 'warn' }, true, false);
+  try {
+    await coordinator.onSignal({ kind: 'agent_event', taskId: 'task',
+      event: { kind: 'result', runId: 'run', status: 'succeeded', exitCode: 0, resultRef: 'ref',
+        development: { ...development(['src/a.ts']), checks: [] } } });
+    assert.equal(store.getTask('task')?.state, 'verifying');
+    assert.equal(store.db.prepare("SELECT count(*) AS n FROM run WHERE stage='verify'").get()?.n, 1);
+  } finally { store.close(); }
+});
+
+test('verified review waits for manual delivery approval when external delivery is unconfigured', async () => {
+  const store = new SqliteStore(':memory:');
+  try {
+    const at = new Date().toISOString();
+    store.saveTask({ id: 'task', repoKey: 'repo', title: 'Develop', scope: 'Develop',
+      mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Develop',
+        allowedActions: ['investigate'], maxAutoRisk: 'low', policyVersion: 'p1',
+        authority: { kind: 'trusted_rule', ruleRef: 'rule' } },
+      state: 'reviewing', iteration: 1, priority: 0, baseRef: base, createdAt: at, updatedAt: at });
+    store.saveRun({ id: 'develop', taskId: 'task', iteration: 1, stage: 'develop', status: 'succeeded',
+      priority: 0, attempt: 1, commitSha: commit, createdAt: at });
+    store.saveRun({ id: 'review', taskId: 'task', iteration: 1, stage: 'review', status: 'running',
+      priority: 0, attempt: 1, commitSha: commit, createdAt: at });
+    const coordinator = createKernelCoordinator(store, {}, 'p1', 'rule', 'qoder', ['repo'], finder,
+      undefined, {}, resolveReview({ mode: 'warn' }, 'p1'), () => true, () => false, () => false);
+    await coordinator.onSignal({ kind: 'agent_event', taskId: 'task',
+      event: { kind: 'result', runId: 'review', status: 'succeeded', exitCode: 0, resultRef: 'ref',
+        review: { subjectSha: commit, verdict: 'pass', findings: [] } } });
+    assert.equal(store.getTask('task')?.state, 'waiting_human');
+    const request = JSON.parse(String(store.db.prepare(
+      "SELECT payload_json FROM task_record WHERE kind='approval_request' AND status='open'").get()?.payload_json));
+    assert.equal(request.request.kind, 'manual_delivery');
+    assert.equal(request.request.verificationSkipped, false);
+    await coordinator.onSignal({ kind: 'human_response', taskId: 'task',
+      response: { kind: 'approval_decision', value: { requestId: request.request.id,
+        actor: { kind: 'human', id: 'owner' }, decision: 'approve', at, idempotencyKey: 'review-manual' } } });
+    assert.equal(store.getTask('task')?.state, 'waiting_human');
+  } finally { store.close(); }
+});
+
+test('manual delivery approval cannot be created for a running development Run', () => {
+  const { store } = fixture({ mode: 'warn' }, false);
+  try {
+    store.saveTransition('task', 'waiting_human', 'handoff', new Date().toISOString(), 'handoff',
+      { kind: 'system', id: 'test' });
+    assert.throws(() => store.saveApprovalRequest({ kind: 'manual_delivery', id: 'manual', taskId: 'task',
+      iteration: 1, sourceSha: base, policyVersion: 'p1', reason: 'manual' }), /does not match/);
+  } finally { store.close(); }
+});
+
+test('policy approval cannot bypass failed development evidence', async () => {
+  const { store, coordinator } = fixture({ mode: 'enforce', limits: { maxFiles: 2,
+    maxChangedLines: 2000 } }, false);
+  try {
+    await coordinator.onSignal({ kind: 'agent_event', taskId: 'task',
+      event: { kind: 'result', runId: 'run', status: 'succeeded', exitCode: 0, resultRef: 'ref',
+        development: { ...development(['src/a.ts', 'src/b.ts', 'src/c.ts']),
+          postCheckVerified: false, checks: [] } } });
+    assert.equal(store.getTask('task')?.state, 'blocked');
+    assert.equal(store.db.prepare("SELECT count(*) AS n FROM task_record WHERE kind='approval_request'").get()?.n, 0);
+  } finally { store.close(); }
+});
 
 function development(paths: string[]) {
   return { baseSha: base, commitSha: commit, diffRef: 'diff', changedPaths: paths,

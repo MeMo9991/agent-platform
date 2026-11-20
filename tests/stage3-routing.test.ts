@@ -501,14 +501,20 @@ test('a structured Qoder result becomes a waiting question only after durable te
     const runId = String(store.db.prepare('SELECT id FROM run').get()?.id);
     const taskId = store.getRun(runId)!.taskId;
     let finished = false;
+    let launches = 0;
+    let resumedAnswer: unknown;
     const manager = createWorkerManager({ store, coordinator, enabledAgents: ['qoder'],
       runners: { qoder: { capabilities: () => ({ start: 'supported', resume: 'unsupported', send: 'unsupported' }),
-        async start() { return { sessionId: 'question-session' }; },
+        async start(request) {
+          if (++launches === 2 && request.input.kind === 'task')
+            resumedAnswer = JSON.parse(request.input.prompt).answers[0];
+          return { sessionId: `question-session-${launches}` };
+        },
         async resume() { return { kind: 'unsupported' }; }, async send() { return { kind: 'unsupported' }; },
         async read() { return finished ? { kind: 'finished', runId, exitCode: 0, resultRef: '/trusted/result.json' }
           : { kind: 'running', runId }; },
         async readDurable() { return { kind: 'finished', runId, exitCode: 0, resultRef: '/trusted/result.json' }; },
-        async resultSummary() { return '{"kind":"question","prompt":"Which service owns this behavior?"}'; },
+        async resultSummary() { return 'Investigation conclusion: the quantity comparison needs clarification.\n\n{"kind":"question","prompt":"Which service owns this behavior?"}'; },
         async cancel() { return { kind: 'accepted' }; } } },
       workspace: { async prepare() { return { repoKey: 'agent-platform', path: '/tmp/structured-question', baseSha: 'a'.repeat(40) }; } },
       skills: { async load(ref) { return { ref, content: 'Investigate safely' }; } },
@@ -525,6 +531,14 @@ test('a structured Qoder result becomes a waiting question only after durable te
     assert.equal(question?.prompt, 'Which service owns this behavior?');
     assert.equal(await manager.recover(), 0);
     assert.equal(store.openQuestionForRun(runId)?.id, question?.id);
+    await coordinator.onSignal({ kind: 'human_response', taskId,
+      response: { kind: 'answer', value: { questionId: question!.id, content: 'The API service',
+        idempotencyKey: 'investigate-answer', actor: { kind: 'human', id: 'owner' } } } });
+    assert.equal(store.getTask(taskId)?.state, 'investigating');
+    assert.equal(await manager.tick(), true);
+    assert.equal(launches, 2);
+    assert.deepEqual(resumedAnswer, { questionId: question!.id, content: 'The API service', status: 'pending' });
+    assert.equal(store.db.prepare("SELECT status FROM task_record WHERE kind='answer'").get()?.status, 'delivered');
   } finally { store.close(); }
 });
 

@@ -23,7 +23,7 @@ export const verifyConfig = z.object({
 });
 export type VerifyConfig = z.infer<typeof verifyConfig>;
 export const repositoryConfig = z.object({ repoKey: id, provider: z.enum(['github', 'gitlab']), hostUrl: z.url(),
-  projectRef: id, targetBranch: id, requiredChecks: z.array(id), credentialsRef: id, localPath: id.optional(),
+  projectRef: id, targetBranch: id, requiredChecks: z.array(id).default([]), credentialsRef: id, localPath: id.optional(),
   autoPr: z.object({ enabled: z.boolean(), allowedPrefixes: z.array(z.enum(['src/', 'tests/', 'web/src/'])) }).optional(),
   localChecks: z.array(checkCommand).default([]), verify: verifyConfig.optional() });
 export const changeRef = z.object({ provider: z.enum(['github', 'gitlab']), repoKey: id, id, sourceSha: id, targetSha: id });

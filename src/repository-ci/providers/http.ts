@@ -1,10 +1,12 @@
 import type { z } from 'zod';
 import type { repositoryConfig } from '../model.js';
+import { readCodeHostGroupToken, readCodeHostToken } from '../../bootstrap/code-host-credentials.js';
 
-export type Repository = z.infer<typeof repositoryConfig>;
+export type Repository = z.infer<typeof repositoryConfig> & { credentialGroupKey?: string };
 export function credential(repo: Repository): string {
   const match = /^env:([A-Za-z_][A-Za-z0-9_]*)$/.exec(repo.credentialsRef);
-  const value = match && process.env[match[1]!];
+  const value = (repo.credentialGroupKey && readCodeHostGroupToken(repo.credentialGroupKey)) ??
+    readCodeHostToken(repo.repoKey) ?? (match && process.env[match[1]!]);
   if (!value) throw new Error(`Code-host credential is unavailable for ${repo.repoKey}`);
   if (!/^[\x21-\x7e]+$/.test(value))
     throw new Error(`Code-host credential has whitespace, control or non-ASCII characters for ${repo.repoKey}`);

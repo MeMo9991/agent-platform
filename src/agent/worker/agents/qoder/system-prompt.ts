@@ -20,5 +20,6 @@ export function buildQoderSystemPrompt(request: z.infer<typeof runRequest>, dire
   return [read('system-prompt'),
     ...(request.stage === 'investigate' ? [read('investigate')] : []),
     ...(request.stage === 'develop' ? [read('develop')] : []),
+    ...(request.stage === 'functional_verify' ? [read('functional-verify')] : []),
     ...(request.stage === 'review' ? [read('review')] : [])].join('\n');
 }

@@ -73,9 +73,9 @@ test('develop grants only the built-in tools needed to edit and commit in its sa
     assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /previousResults are historical, unverified reports/);
     assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /"kind":"question"/);
     assert.equal(args[args.indexOf('--setting-sources') + 1], 'user');
-    assert.deepEqual(args.slice(args.indexOf('--tools'), args.indexOf('--tools') + 9),
-      ['--tools', 'Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash',
-        '--allowed-tools', 'Read,Grep,Glob,Edit,Write,Bash']);
+    assert.deepEqual(args.slice(args.indexOf('--tools'), args.indexOf('--tools') + 10),
+      ['--tools', 'Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash', 'Skill',
+        '--allowed-tools', 'Read,Grep,Glob,Edit,Write,Bash,Skill']);
     return { process: child, terminate: () => true, isTerminated: () => true };
   } }, directory);
   try {
@@ -126,6 +126,36 @@ test('review asks for one raw JSON verdict bound to the pinned SHA', async () =>
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('functional verification gives Qoder local HTTP tools and a structured verdict contract', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'qoder-functional-'));
+  const workspace = join(directory, 'clone');
+  mkdirSync(workspace);
+  const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(),
+    kill: () => true }) as unknown as ChildProcess;
+  const sha = 'b'.repeat(40);
+  const runner = createQoderRunner({ verified: true, launch(_command, args) {
+    assert.equal(args[args.indexOf('--permission-mode') + 1], 'dont_ask');
+    assert.deepEqual(args.slice(args.indexOf('--tools'), args.indexOf('--tools') + 8),
+      ['--tools', 'Read', 'Grep', 'Glob', 'Bash', 'Skill', '--allowed-tools', 'Read,Grep,Glob,Bash,Skill']);
+    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /bounded curl requests/);
+    return { process: child, terminate: () => true, isTerminated: () => true };
+  } }, directory);
+  try {
+    const started = runner.start({ taskId: 'task', runId: 'functional-run', stage: 'functional_verify', repoKey: 'repo',
+      mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Verify', allowedActions: ['investigate'],
+        maxAutoRisk: 'low', policyVersion: 'p1', authority: { kind: 'trusted_rule', ruleRef: 'rule' } },
+      workspace: { repoKey: 'repo', path: workspace, baseSha: sha },
+      input: { kind: 'task', runId: 'functional-run', prompt: 'Local check', sourceEventIds: [] },
+      execution: { verified: true, runId: 'functional-run', repoKey: 'repo', workspacePath: workspace,
+        mode: 'read', adapterVersion: 'test', configDigest: 'digest' }, timeoutMs: 1000 });
+    child.stdout?.emit('data', JSON.stringify({ type: 'result', subtype: 'success',
+      session_id: 'functional-session', result: `{"subjectSha":"${sha}","verdict":"pass","reason":"Observed"}`,
+      is_error: false }) + '\n');
+    child.emit('close', 0);
+    await started;
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('Qoder confirms input only after assistant output and keeps an early exit pending', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'qoder-runner-'));
   const workspace = join(directory, 'clone');
@@ -148,9 +178,9 @@ test('Qoder confirms input only after assistant output and keeps an early exit p
     assert.match(args.at(-1)!, /Bug/);
     assert.equal(args[args.indexOf('--output-format') + 1], 'stream-json');
     assert.equal(args[args.indexOf('--permission-mode') + 1], 'dont_ask');
-    assert.equal(args[args.indexOf('--setting-sources') + 1], '');
-    assert.deepEqual(args.slice(args.indexOf('--tools'), args.indexOf('--tools') + 6),
-      ['--tools', 'Read', 'Grep', 'Glob', '--allowed-tools', 'Read,Grep,Glob']);
+    assert.equal(args[args.indexOf('--setting-sources') + 1], 'user');
+    assert.deepEqual(args.slice(args.indexOf('--tools'), args.indexOf('--tools') + 7),
+      ['--tools', 'Read', 'Grep', 'Glob', 'Skill', '--allowed-tools', 'Read,Grep,Glob,Skill']);
     assert.equal(args[args.indexOf('--attachment') + 1], realpathSync(imagePath));
     return { process: child, terminate: () => true, isTerminated: () => true };
   } }, directory);

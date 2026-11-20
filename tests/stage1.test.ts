@@ -12,7 +12,7 @@ import { agentEvent, agentInput, agentUsage, run } from '../src/agent/worker/mod
 import { approvalDecision, approvalRequest, humanResponse, routeReviewDecision } from '../src/interaction/model.js';
 import { routeDecision } from '../src/agent/router/model.js';
 import { skillRef } from '../src/skills/model.js';
-import { platformConfig, selectAgentRunner, selectCodeHost, selectReleasePipeline, selectSource } from '../src/bootstrap/config.js';
+import { configuredLocalVerification, platformConfig, selectAgentRunner, selectCodeHost, selectReleasePipeline, selectSource, stage5PreflightRepositories } from '../src/bootstrap/config.js';
 import { denyUnconfigured, investigationMandate } from '../src/authorization/model.js';
 import { unavailableAgent, unavailableCodeHost, unavailableReleasePipeline } from '../src/bootstrap/ports.js';
 import { releaseRequest, releaseSnapshot } from '../src/repository-ci/model.js';
@@ -213,6 +213,28 @@ test('repo configuration binds only the selected code host', () => {
   assert.throws(() => selectCodeHost('a', config, { a: b }));
   assert.throws(() => selectCodeHost('missing', config, { a, b }));
   assert.equal(platformConfig.safeParse({ ...config, repositories: [config.repositories[0], config.repositories[0]] }).success, false);
+});
+
+test('incomplete verification and GitLab delivery configuration do not enter startup preflight', () => {
+  const repo = { provider: 'gitlab', hostUrl: 'https://gitlab.example', projectRef: 'team/service',
+    targetBranch: 'dev', localPath: '/tmp/service', localChecks: [], requiredChecks: [],
+    credentialsRef: 'unconfigured' };
+  const config = platformConfig.parse({ repositories: [
+    { ...repo, repoKey: 'missing' },
+    { ...repo, repoKey: 'no-token', requiredChecks: ['test'] },
+    { ...repo, repoKey: 'configured', requiredChecks: ['test'], credentialsRef: 'env:GL',
+      localChecks: [{ command: 'mvn', args: ['test'], timeoutMs: 1000 }] },
+    { ...repo, repoKey: 'no-checks', requiredChecks: undefined, credentialsRef: 'env:GL' },
+  ], sources: [], agents: [], budget: { maxRunMs: 1000 }, policyRef: 'v1' });
+  assert.deepEqual(stage5PreflightRepositories(config, { GL: 'token' }).map(item => item.repoKey), ['configured', 'no-checks']);
+  assert.deepEqual(config.repositories[3]?.requiredChecks, []);
+  assert.deepEqual(stage5PreflightRepositories(config, {}).map(item => item.repoKey), []);
+  assert.equal(configuredLocalVerification(config.repositories[0]!, true), false);
+  assert.equal(configuredLocalVerification(config.repositories[2]!, true), true);
+  assert.equal(configuredLocalVerification(config.repositories[2]!, false), false);
+  assert.equal(configuredLocalVerification({ ...config.repositories[2]!, verify: { mode: 'platform',
+    workspace: 'copy', prepare: [], env: {}, cacheKeyFiles: [] } }, false), true);
+  assert.equal(configuredLocalVerification({ ...config.repositories[2]!, localPath: undefined }, true), false);
 });
 
 test('release contract retains deployment target and recovery identity', () => {

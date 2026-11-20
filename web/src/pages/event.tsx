@@ -11,7 +11,8 @@ function Image({ path, alt }: { path: string; alt: string }) {
   }, [path]);
   return url ? <img src={url} alt={alt} className="attachment" /> : <p className="muted">图片加载中或不可访问</p>;
 }
-export function EventPage({ id, repoKeys, canRoute }: { id: string; repoKeys: string[]; canRoute: boolean }) {
+export function EventPage({ id, repoKeys, unverifiedRepoKeys, canRoute }: { id: string; repoKeys: string[];
+  unverifiedRepoKeys: string[]; canRoute: boolean }) {
   const [event, setEvent] = useState<Event>();
   const [choice, setChoice] = useState('new_task');
   const [taskId, setTaskId] = useState('');
@@ -69,6 +70,8 @@ export function EventPage({ id, repoKeys, canRoute }: { id: string; repoKeys: st
           {choice === 'new_task' && <label>目标仓库<select value={selectedRepoKey} onChange={change => { setRepoKey(change.target.value); setDecisionKey(crypto.randomUUID()); }}>
             {allowedRepoKeys.map(key => <option key={key}>{key}</option>)}</select>
             {!allowedRepoKeys.length && <span>项目组尚未配置可用仓库</span>}</label>}
+          {choice === 'new_task' && unverifiedRepoKeys.includes(selectedRepoKey) &&
+            <p role="status">此仓库当前无法自动校验。请检查构建配置、仓库路径和 Stage5 Worker 开关；若继续，开发完成后会跳过 verify，等待人工批准并由人工推送、创建 PR/MR。</p>}
           {choice === 'new_task' && <label>关联旧任务（可选）<select value={parentTaskId} onChange={change => {
             setParentTaskId(change.target.value); setDecisionKey(crypto.randomUUID()); }}>
             <option value="">不关联</option>{event.routing?.candidates.map(item =>

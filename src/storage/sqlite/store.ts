@@ -132,6 +132,19 @@ export class SqliteStore implements EventRepository {
        (status='paused' AND json_extract(payload_json,'$.processTerminationUnconfirmed')=1)) LIMIT 1`)
       .get(taskId) !== undefined;
   }
+  hasOpenHumanRequest(taskId: string): boolean {
+    return this.db.prepare("SELECT 1 FROM task_record WHERE task_id=? AND kind IN ('question','approval_request') AND status='open' LIMIT 1")
+      .get(taskId) !== undefined;
+  }
+  functionalReviewReady(taskId: string, runId: string, iteration: number, sha: string): boolean {
+    const run = this.getRun(runId);
+    const latest = this.db.prepare('SELECT id FROM run WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT 1').get(taskId);
+    return run?.taskId === taskId && run.iteration === iteration && run.stage === 'functional_verify' &&
+      ['paused', 'failed'].includes(run.status) && !run.processTerminationUnconfirmed &&
+      run.commitSha === sha && latest?.id === runId && Boolean(this.db.prepare(`SELECT 1 FROM run
+        WHERE task_id=? AND iteration=? AND stage='verify' AND status='succeeded' AND commit_sha=? LIMIT 1`)
+        .get(taskId, iteration, sha));
+  }
   commitRoute(eventId: string, plan: RoutePlan, at: string): string | undefined {
     const decision = routeDecision.parse(plan.decision);
     return this.transaction(() => {
@@ -261,6 +274,8 @@ export class SqliteStore implements EventRepository {
     const task = this.getTask(id);
     if (!task) return false;
     this.transaction(() => {
+      this.db.prepare('DELETE FROM dashboard_command WHERE task_id=?').run(id);
+      this.db.prepare('DELETE FROM subscription WHERE task_id=?').run(id);
       this.db.prepare("DELETE FROM task_record WHERE task_id=?").run(id);
       this.db.prepare("DELETE FROM run WHERE task_id=?").run(id);
       this.db.prepare("DELETE FROM task WHERE id=?").run(id);
@@ -338,12 +353,14 @@ export class SqliteStore implements EventRepository {
       const stageFive = request.kind === 'action' || (request.kind === 'scope_change' &&
         request.proposedMandate.allowedActions.some(action => action === 'open_pr' || action === 'merge'));
       const reviewedSha = stageFive ? this.latestReviewedSha(request.taskId) : undefined;
-      const continueRun = request.kind === 'continue'
-        ? this.db.prepare("SELECT 1 FROM run WHERE task_id=? AND stage='develop' AND commit_sha=? LIMIT 1")
-          .get(request.taskId, request.sourceSha) : undefined;
+      const continueRun = request.kind === 'continue' || request.kind === 'manual_delivery'
+        ? this.db.prepare("SELECT 1 FROM run WHERE task_id=? AND iteration=? AND stage='develop' AND status='succeeded' AND commit_sha=? LIMIT 1")
+          .get(request.taskId, request.iteration, request.sourceSha) : undefined;
       if (!current || current.state !== 'waiting_human' ||
           (request.kind !== 'action' && current.iteration !== request.iteration) ||
-          (request.kind === 'continue' ? !continueRun
+          (request.kind === 'functional_review'
+            ? !this.functionalReviewReady(request.taskId, request.runId, request.iteration, request.sourceSha)
+            : request.kind === 'continue' || request.kind === 'manual_delivery' ? !continueRun
             : stageFive ? reviewedSha !== request.sourceSha : current.baseRef !== request.sourceSha) ||
           current.mandate.policyVersion !== request.policyVersion)
         throw new Error('Approval request does not match current Task, policy and SHA');
@@ -484,17 +501,21 @@ export class SqliteStore implements EventRepository {
       const current = this.getTask(record.taskId);
       const stageFive = request.kind === 'action' || (request.kind === 'scope_change' &&
         request.proposedMandate.allowedActions.some(action => action === 'open_pr' || action === 'merge'));
-      const continueRun = request.kind === 'continue'
-        ? this.db.prepare("SELECT 1 FROM run WHERE task_id=? AND stage='develop' AND commit_sha=? LIMIT 1")
-          .get(request.taskId, request.sourceSha) : undefined;
+      const continueRun = request.kind === 'continue' || request.kind === 'manual_delivery'
+        ? this.db.prepare("SELECT 1 FROM run WHERE task_id=? AND iteration=? AND stage='develop' AND status='succeeded' AND commit_sha=? LIMIT 1")
+          .get(request.taskId, request.iteration, request.sourceSha) : undefined;
       if (!current || current.state !== 'waiting_human' ||
           (request.kind !== 'action' && current.iteration !== request.iteration) ||
-          (request.kind === 'continue' ? !continueRun
+          (request.kind === 'functional_review'
+            ? !this.functionalReviewReady(request.taskId, request.runId, request.iteration, request.sourceSha)
+            : request.kind === 'continue' || request.kind === 'manual_delivery' ? !continueRun
             : stageFive ? this.latestReviewedSha(current.id) !== request.sourceSha : current.baseRef !== request.sourceSha) ||
           (request.kind === 'action' && this.latestReview(current.id)?.id !== request.reviewRecordId) ||
           current.mandate.policyVersion !== request.policyVersion) throw new Error('Approval request is stale');
       this.saveRecord({ id: randomUUID(), taskId: current.id, kind: 'approval', requestId: request.id,
-        action: request.kind === 'scope_change' || request.kind === 'continue' ? 'edit' : request.action,
+        action: request.kind === 'functional_review' ? 'review'
+          : request.kind === 'scope_change' || request.kind === 'continue' || request.kind === 'manual_delivery'
+            ? 'edit' : request.action,
         subjectSha: request.sourceSha,
         policyVersion: request.policyVersion, actor: value.actor, decision: value.decision,
         idempotencyKey: value.idempotencyKey, at: value.at });
@@ -508,7 +529,8 @@ export class SqliteStore implements EventRepository {
         if (changed.changes !== 1) throw new Error('Approval Task state changed');
         return next;
       }
-      return (request.kind === 'action' || request.kind === 'continue') && value.decision === 'approve'
+      return (request.kind === 'action' || request.kind === 'continue' ||
+        request.kind === 'manual_delivery' || request.kind === 'functional_review') && value.decision === 'approve'
         ? current : undefined;
     });
   }
@@ -586,6 +608,12 @@ export class SqliteStore implements EventRepository {
       const record = taskRecord.parse(JSON.parse(String(row.payload_json)));
       return record.kind === 'review' && isBlockingReview(record);
     }).length;
+  }
+  countFunctionalFailures(taskId: string, iteration: number): number {
+    return Number(this.db.prepare(`SELECT count(*) AS n FROM task_record AS record
+      JOIN run ON run.id=record.run_id WHERE record.task_id=? AND run.iteration=?
+      AND run.stage='functional_verify' AND record.kind='functional_verification'
+      AND json_extract(record.payload_json,'$.verdict')='fail'`).get(taskId, iteration)?.n ?? 0);
   }
   setRepairBaseRef(taskId: string, sourceSha: string): void {
     const current = this.getTask(taskId);

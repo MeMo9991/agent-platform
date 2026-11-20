@@ -87,22 +87,15 @@ test('GitHub reads every active required check and rejects incomplete branch rul
   } finally { delete process.env.AGENT_STAGE5_TEST_TOKEN; }
 });
 
-test('GitLab blocks code-host actions without protected target and required pipelines', async () => {
+test('GitLab required checks come from configuration without requiring branch protection', async () => {
   process.env.AGENT_STAGE5_TEST_TOKEN = 'fixture-token';
   const repo = { repoKey: 'two', provider: 'gitlab' as const, hostUrl: 'https://gitlab.example.test',
     projectRef: 'group/two', targetBranch: 'main', requiredChecks: ['verify'],
     credentialsRef: 'env:AGENT_STAGE5_TEST_TOKEN', localChecks: [] };
   try {
-    const fetcher = (async (input: string | URL | Request) => Response.json(
-      String(input).includes('/protected_branches/')
-        ? { allow_force_push: false, merge_access_levels: [{ access_level: 40 }] }
-        : { only_allow_merge_if_pipeline_succeeds: true })) as typeof fetch;
+    const fetcher = (async () => { throw new Error('No protection API call expected'); }) as typeof fetch;
     assert.deepEqual(await createGitLabCodeHost(repo, fetcher).readRequiredChecks?.('main'), []);
-    const unsafe = createGitLabCodeHost(repo, (async (input: string | URL | Request) => Response.json(
-      String(input).includes('/protected_branches/')
-        ? { allow_force_push: true, merge_access_levels: [{ access_level: 40 }] }
-        : { only_allow_merge_if_pipeline_succeeds: true })) as typeof fetch);
-    await assert.rejects(unsafe.readRequiredChecks?.('main'), /lacks required/);
+    await assert.rejects(createGitLabCodeHost(repo, fetcher).readRequiredChecks?.('other'), /Target branch differs/);
   } finally { delete process.env.AGENT_STAGE5_TEST_TOKEN; }
 });
 

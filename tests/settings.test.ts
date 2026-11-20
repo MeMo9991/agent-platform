@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readSettings, saveSettings } from '../src/api/settings.js';
@@ -8,6 +8,87 @@ import { SqliteStore } from '../src/storage/sqlite/store.js';
 import { createKernelCoordinator } from '../src/agent/kernel/coordinator.js';
 import { createTaskCandidateFinder } from '../src/agent/router/candidate-finder.js';
 import { startLocalApi } from '../src/api/local.js';
+import { platformConfig, projectGroup, stage5PreflightRepositories } from '../src/bootstrap/config.js';
+import { credential } from '../src/repository-ci/providers/http.js';
+import { writeCodeHostToken } from '../src/bootstrap/code-host-credentials.js';
+import { readQoderPat } from '../src/bootstrap/qoder-credentials.js';
+
+test('Qoder PAT settings persist privately and are readable without restart', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-platform-qoder-pat-'));
+  const previous = process.env.AGENT_PLATFORM_QODER_PAT_PATH;
+  const tokenFile = join(directory, 'qodercn.pat');
+  process.env.AGENT_PLATFORM_QODER_PAT_PATH = tokenFile;
+  const paths = { platform: 'config/platform.json', schedules: 'config/schedules.json' };
+  try {
+    const { revision } = readSettings(paths);
+    assert.throws(() => saveSettings(paths, 'qoderPat', revision, { token: 'invalid token' }), /Invalid QoderCN PAT/);
+    assert.equal(saveSettings(paths, 'qoderPat', revision, { token: 'fixture-qoder-pat' }).restartRequired, false);
+    assert.equal(statSync(tokenFile).mode & 0o777, 0o600);
+    assert.equal(readQoderPat(), 'fixture-qoder-pat');
+    const settings = readSettings(paths);
+    assert.equal(settings.protected.qoderPatConfigured, true);
+    assert.equal(JSON.stringify(settings).includes('fixture-qoder-pat'), false);
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_PLATFORM_QODER_PAT_PATH;
+    else process.env.AGENT_PLATFORM_QODER_PAT_PATH = previous;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('project group accepts only an optional local functional verification URL', () => {
+  const base = { projectKey: 'cloudbom', repositories: [], verification: true };
+  assert.equal(projectGroup.parse(base).functionalVerificationUrl, undefined);
+  assert.equal(projectGroup.parse({ ...base, functionalVerificationUrl: 'http://127.0.0.1:8888' })
+    .functionalVerificationUrl, 'http://127.0.0.1:8888');
+  assert.equal(projectGroup.safeParse({ ...base, functionalVerificationUrl: 'https://example.com' }).success, false);
+  assert.equal(projectGroup.safeParse({ ...base, functionalVerificationUrl: 'http://127.0.0.1:8888',
+    verification: false }).success, false);
+});
+
+test('one project group token serves its repositories without exposing the token', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-platform-code-host-token-'));
+  const previous = process.env.AGENT_PLATFORM_CODE_HOST_CREDENTIALS_PATH;
+  const tokenFile = join(directory, 'code-host.json');
+  process.env.AGENT_PLATFORM_CODE_HOST_CREDENTIALS_PATH = tokenFile;
+  const paths = { platform: join(directory, 'platform.json'), schedules: join(directory, 'schedules.json') };
+  const raw = JSON.parse(readFileSync('config/platform.json', 'utf8'));
+  raw.projectGroups[0].repositories.push({ ...raw.projectGroups[0].repositories[0],
+    repoKey: 'second-repo', projectRef: 'MeMo9991/second-repo' });
+  writeFileSync(paths.platform, JSON.stringify(raw));
+  writeFileSync(paths.schedules, readFileSync('config/schedules.json'));
+  try {
+    const before = readSettings(paths);
+    assert.throws(() => saveSettings(paths, 'projectGroupToken', before.revision,
+      { projectKey: 'unknown', token: 'secret-value' }), /Project group is not configured/);
+    writeCodeHostToken('agent-platform', 'legacy-token');
+    const saved = saveSettings(paths, 'projectGroupToken', before.revision,
+      { projectKey: 'agent-platform', token: 'secret-value' });
+    assert.equal(saved.restartRequired, true);
+    assert.equal(statSync(tokenFile).mode & 0o777, 0o600);
+    assert.equal(JSON.stringify(readSettings(paths)).includes('secret-value'), false);
+    assert.equal(JSON.stringify(readSettings(paths)).includes('credentialGroupKey'), false);
+    assert.equal(readFileSync(paths.platform, 'utf8').includes('secret-value'), false);
+    assert.equal(readSettings(paths).groups.projectGroups.find(item => item.projectKey === 'agent-platform')?.tokenConfigured, true);
+    assert.equal('codeHostCredentials' in readSettings(paths).groups, false);
+    const config = platformConfig.parse(JSON.parse(readFileSync(paths.platform, 'utf8')));
+    assert.equal(credential(config.repositories.find(repo => repo.repoKey === 'agent-platform')!), 'secret-value');
+    assert.equal(credential(config.repositories.find(repo => repo.repoKey === 'second-repo')!), 'secret-value');
+    assert.deepEqual(stage5PreflightRepositories(config).map(repo => repo.repoKey).sort(),
+      ['agent-platform', 'second-repo']);
+    const groups = structuredClone(readSettings(paths).groups.projectGroups);
+    groups.push({ projectKey: 'new-project', repositories: [], verification: false,
+      tokenConfigured: false, searchRootConfigured: false });
+    const added = saveSettings(paths, 'projectGroups', saved.revision, groups);
+    assert.equal(readSettings(paths).groups.projectGroups.find(item => item.projectKey === 'new-project')?.tokenConfigured, false);
+    saveSettings(paths, 'projectGroupToken', added.revision,
+      { projectKey: 'new-project', token: 'new-project-token' });
+    assert.equal(readSettings(paths).groups.projectGroups.find(item => item.projectKey === 'new-project')?.tokenConfigured, true);
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_PLATFORM_CODE_HOST_CREDENTIALS_PATH;
+    else process.env.AGENT_PLATFORM_CODE_HOST_CREDENTIALS_PATH = previous;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('settings save validates groups, preserves trust roots and hides local paths', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'agent-platform-settings-'));
@@ -20,6 +101,7 @@ test('settings save validates groups, preserves trust roots and hides local path
     credentialsRef: 'unconfigured', localPath: '/private/secret/new-service' });
   platform.interaction.credentialFile = '/private/secret/token';
   platform.projectGroups[0].searchRoot = '/private/secret/projects';
+  platform.projectGroups[0].verification = true;
   platform.projectGroups[1].searchRoot = '/private/secret/cloudbom';
   platform.projectGroups[1].defaultRepoKey = 'new-service';
   writeFileSync(paths.platform, JSON.stringify(platform));
@@ -36,10 +118,12 @@ test('settings save validates groups, preserves trust roots and hides local path
     assert.equal(service.credentialsRefConfigured, false);
     assert.equal(service.localPathConfigured, true);
     assert.equal(before.groups.projectGroups[0].searchRootConfigured, true);
+    assert.equal(before.groups.projectGroups[0].verification, true);
     assert.equal(before.protected.credentialFileConfigured, true);
     const changed = structuredClone(before.groups.projectGroups);
     changed[0].repositories[0].targetBranch = 'develop';
     changed[0].repositories[0].localPath = undefined;
+    changed[0].functionalVerificationUrl = 'http://127.0.0.1:8888';
     const saved = saveSettings(paths, 'projectGroups', before.revision, changed);
     assert.notEqual(saved.revision, before.revision);
     const persisted = JSON.parse(readFileSync(paths.platform, 'utf8')) as Record<string, any>;
@@ -48,6 +132,8 @@ test('settings save validates groups, preserves trust roots and hides local path
     assert.equal(persisted.projectGroups[1].repositories[0].credentialsRef, 'unconfigured');
     assert.equal(persisted.projectGroups[1].repositories[0].localPath, '/private/secret/new-service');
     assert.equal(persisted.projectGroups[0].repositories[0].targetBranch, 'develop');
+    assert.equal(persisted.projectGroups[0].verification, true);
+    assert.equal(persisted.projectGroups[0].functionalVerificationUrl, 'http://127.0.0.1:8888');
     assert.deepEqual(persisted.interaction, platform.interaction);
     const groups = structuredClone(readSettings(paths).groups.projectGroups);
     groups[0].defaultRepoKey = 'agent-platform';

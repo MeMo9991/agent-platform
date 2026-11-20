@@ -1,16 +1,22 @@
 import { execFile } from 'node:child_process';
-import { chmod, cp, lstat, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
+import { chmod, copyFile, cp, lstat, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { basename, dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import type { Run, WorkspaceManager } from './model.js';
+import type { GroupManifest, Run, WorkspaceManager } from './model.js';
+import { changedMavenModules, changedMavenTests } from './maven-modules.js';
+
+export type GroupWorkspaceConfig = { projectKey: string; searchRoot: string; buildFile: string;
+  moduleSelection?: 'changed-maven';
+  repositories: Readonly<Record<string, { path: string; remote: string }>> };
 
 const exec = promisify(execFile);
 export function createGitWorkspaceManager(repositories: Readonly<Record<string, { path: string; remote: string }>>,
   runtimeRoot: string, repoForRun: (run: Run) => string,
   sourceForRun?: (run: Run) => string | undefined,
   taskBaseForRun?: (run: Run) => string | undefined,
-  baseRefForRun?: (run: Run) => string | undefined): WorkspaceManager {
+  baseRefForRun?: (run: Run) => string | undefined,
+  groups: Readonly<Record<string, GroupWorkspaceConfig | undefined>> = {}): WorkspaceManager {
   const clonePath = (run: Run) => {
     if (!/^[A-Za-z0-9_-]+$/.test(run.id)) throw new Error('Run ID is not a safe clone name');
     return resolve(runtimeRoot, 'clones', run.id);
@@ -39,6 +45,70 @@ export function createGitWorkspaceManager(repositories: Readonly<Record<string, 
     }
     await cp(source, path, { recursive: true, errorOnExist: true, force: false });
   }
+  async function groupDirectory(group: GroupWorkspaceConfig, repo: { path: string; remote: string }): Promise<string> {
+    const root = await realpath(group.searchRoot);
+    const path = await realpath(repo.path);
+    if (dirname(path) !== root || !/^[A-Za-z0-9._-]+$/.test(basename(path)))
+      throw new Error('Group repository must be a direct child of its search root');
+    if ((await git(path, 'remote', 'get-url', 'origin')) !== repo.remote)
+      throw new Error('Group repository origin changed');
+    return basename(path);
+  }
+  async function prepareGroupCheckCopy(run: Run, group: GroupWorkspaceConfig, source: string,
+    path: string): Promise<{ path: string; baseSha: string; groupManifest: GroupManifest }> {
+    const root = await realpath(group.searchRoot);
+    const buildSource = resolve(root, group.buildFile);
+    if (!buildSource.startsWith(`${root}/`) || !(await lstat(buildSource)).isFile() ||
+        !(await realpath(buildSource)).startsWith(`${root}/`))
+      throw new Error('Group build file is missing or outside the search root');
+    const buildBytes = await readFile(buildSource);
+    const inputs: GroupManifest['inputs'] = [];
+    await mkdir(path, { mode: 0o700 });
+    for (const [repoKey, repo] of Object.entries(group.repositories)) {
+      const directory = await groupDirectory(group, repo);
+      if (group.buildFile.split('/')[0] === directory || inputs.some(item => item.directory === directory))
+        throw new Error('Group build directory and repository directories must be distinct');
+      const target = resolve(path, directory);
+      const sha = repoKey === repoForRun(run) ? run.commitSha! : await git(repo.path, 'rev-parse', 'HEAD');
+      if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error('Group repository has no full commit SHA');
+      if (repoKey === repoForRun(run)) {
+        await copyWorkspace(source, target);
+        await verifyClone(target, repo.remote);
+      } else {
+        await exec('git', ['clone', '--no-hardlinks', '--no-checkout', '--', repo.path, target]);
+        await exec('git', ['remote', 'set-url', 'origin', repo.remote], { cwd: target });
+        await exec('git', ['checkout', '--detach', sha], { cwd: target });
+        await verifyClone(target, repo.remote);
+        if (await git(repo.path, 'rev-parse', 'HEAD') !== sha)
+          throw new Error(`Group repository ${repoKey} changed during snapshot`);
+      }
+      if (await git(target, 'rev-parse', 'HEAD') !== sha ||
+          await git(target, 'status', '--porcelain=v1', '--untracked-files=all'))
+        throw new Error(`Group repository ${repoKey} snapshot is not clean`);
+      inputs.push({ repoKey, directory, sha });
+    }
+    const buildTarget = resolve(path, group.buildFile);
+    await mkdir(dirname(buildTarget), { recursive: true, mode: 0o700 });
+    await copyFile(buildSource, buildTarget);
+    const buildFileSha256 = createHash('sha256').update(buildBytes).digest('hex');
+    if (createHash('sha256').update(await readFile(buildTarget)).digest('hex') !== buildFileSha256 ||
+        createHash('sha256').update(await readFile(buildSource)).digest('hex') !== buildFileSha256)
+      throw new Error('Group build file changed during snapshot');
+    const changedModules = group.moduleSelection === 'changed-maven'
+      ? await changedMavenModules(source, baseRefForRun?.(run) ?? '', run.commitSha!) : undefined;
+    const changedTests = changedModules
+      ? await changedMavenTests(source, baseRefForRun?.(run) ?? '', run.commitSha!) : undefined;
+    const evidenceDir = resolve(runtimeRoot, 'evidence');
+    await mkdir(evidenceDir, { recursive: true, mode: 0o700 });
+    const buildFileRef = resolve(evidenceDir, `${randomUUID()}.pom`);
+    await writeFile(buildFileRef, buildBytes, { mode: 0o600, flag: 'wx' });
+    return { path, baseSha: run.commitSha!, groupManifest: {
+      projectKey: group.projectKey, buildFile: group.buildFile, buildFileSha256, buildFileRef, inputs,
+      ...(changedModules ? { changedModules: changedModules.map(module => {
+        const directory = inputs.find(item => item.repoKey === repoForRun(run))!.directory;
+        return module === '.' ? directory : `${directory}/${module}`;
+      }), changedTests } : {}) } };
+  }
   async function sanitizeCopiedClone(path: string, remote: string, baseSha: string): Promise<void> {
     const gitDir = resolve(path, '.git');
     await rm(resolve(gitDir, 'agent-input'), { recursive: true, force: true });
@@ -65,7 +135,7 @@ export function createGitWorkspaceManager(repositories: Readonly<Record<string, 
     const remote = (await exec('git', ['remote', 'get-url', 'origin'], { cwd })).stdout.trim();
     if (remote !== repo.remote) throw new Error(`Repository origin mismatch for ${repoKey}`);
     const developSource = run.stage === 'develop' && run.commitSha ? sourceForRun?.(run) : undefined;
-    const pinned = run.stage === 'verify' || run.stage === 'review' ||
+    const pinned = run.stage === 'verify' || run.stage === 'functional_verify' || run.stage === 'review' ||
       (run.stage === 'develop' && !!run.commitSha && !!developSource);
     const expectedBase = run.stage === 'develop' ? baseRefForRun?.(run) : undefined;
     const path = clonePath(run);
@@ -144,6 +214,11 @@ export function createGitWorkspaceManager(repositories: Readonly<Record<string, 
     const path = resolve(root, run.id);
     try { await lstat(path); throw new Error('Check workspace path already exists'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    const group = groups[repoForRun(run)];
+    if (group) {
+      try { return await prepareGroupCheckCopy(run, group, source, path); }
+      catch (error) { await rm(path, { recursive: true, force: true }); throw error; }
+    }
     // APFS clonefile keeps the check copy cheap; fall back to a regular copy elsewhere.
     if (process.platform === 'darwin') {
       try { await exec('cp', ['-cR', source, path]); }
@@ -166,7 +241,48 @@ export function createGitWorkspaceManager(repositories: Readonly<Record<string, 
     const path = resolve(root, run.id);
     if (!path.startsWith(`${root}/`)) throw new Error('Check workspace is outside the runtime check root');
     await rm(path, { recursive: true, force: true });
-  }, async verifyDevelopment(run) {
+  }, async verifyGroupCheckCopy(run) {
+    const manifest = run.groupManifest;
+    const group = groups[repoForRun(run)];
+    const path = resolve(runtimeRoot, 'check-workspaces', run.id);
+    if (!manifest || !group || !run.checkWorkspaceRef || resolve(run.checkWorkspaceRef) !== path ||
+        manifest.projectKey !== group.projectKey || manifest.buildFile !== group.buildFile ||
+        Boolean(manifest.changedModules) !== (group.moduleSelection === 'changed-maven') ||
+        manifest.inputs.length !== Object.keys(group.repositories).length ||
+        new Set(manifest.inputs.map(item => item.repoKey)).size !== manifest.inputs.length ||
+        manifest.inputs.find(item => item.repoKey === repoForRun(run))?.sha !== run.commitSha)
+      throw new Error('Group verification manifest does not match the Run');
+    for (const item of manifest.inputs) {
+      const repo = group.repositories[item.repoKey];
+      if (!repo || item.directory !== await groupDirectory(group, repo) ||
+          !/^[A-Za-z0-9._-]+$/.test(item.directory))
+        throw new Error('Group verification input is invalid');
+      const target = resolve(path, item.directory);
+      await verifyClone(target, repo.remote);
+      if (await git(target, 'rev-parse', 'HEAD') !== item.sha ||
+          await git(target, 'status', '--porcelain=v1', '--untracked-files=no'))
+        throw new Error(`Group verification input ${item.repoKey} changed during checks`);
+    }
+    if (manifest.changedModules) {
+      const owner = manifest.inputs.find(item => item.repoKey === repoForRun(run))!;
+      const modules = (await changedMavenModules(clonePath(run), baseRefForRun?.(run) ?? '', run.commitSha!))
+        .map(module => module === '.' ? owner.directory : `${owner.directory}/${module}`);
+      if (modules.join('\0') !== manifest.changedModules.join('\0'))
+        throw new Error('Changed Maven module selection no longer matches pinned commits');
+      const tests = await changedMavenTests(clonePath(run), baseRefForRun?.(run) ?? '', run.commitSha!);
+      if (tests.join('\0') !== manifest.changedTests?.join('\0'))
+        throw new Error('Changed Maven test selection no longer matches pinned commits');
+    }
+    const buildPath = resolve(path, manifest.buildFile);
+    const evidenceDir = await realpath(resolve(runtimeRoot, 'evidence'));
+    if (!(await realpath(manifest.buildFileRef)).startsWith(`${evidenceDir}/`) ||
+        createHash('sha256').update(await readFile(manifest.buildFileRef)).digest('hex') !== manifest.buildFileSha256)
+      throw new Error('Group build evidence changed');
+    if (!(await lstat(buildPath)).isFile() ||
+        !(await realpath(buildPath)).startsWith(`${await realpath(path)}/`) ||
+        createHash('sha256').update(await readFile(buildPath)).digest('hex') !== manifest.buildFileSha256)
+      throw new Error('Group build file changed during checks');
+  }, async verifyDevelopment(run, cumulativeBaseSha = run.commitSha) {
     const repoKey = repoForRun(run);
     const repo = repositories[repoKey];
     const path = clonePath(run);
@@ -195,7 +311,16 @@ export function createGitWorkspaceManager(repositories: Readonly<Record<string, 
     await mkdir(evidenceDir, { recursive: true, mode: 0o700 });
     const diffRef = resolve(evidenceDir, `${randomUUID()}.patch`);
     await writeFile(diffRef, diff, { mode: 0o600, flag: 'wx' });
-    return { baseSha: run.commitSha, commitSha, diffRef, changedPaths };
+    let cumulativeDiffRef = diffRef;
+    if (cumulativeBaseSha !== run.commitSha) {
+      if (!cumulativeBaseSha || !/^[a-f0-9]{40}$/.test(cumulativeBaseSha)) throw new Error('Cumulative diff base SHA is invalid');
+      await exec('git', ['merge-base', '--is-ancestor', cumulativeBaseSha, commitSha], { cwd: path });
+      const cumulative = (await exec('git', ['diff', '--binary', cumulativeBaseSha, commitSha],
+        { cwd: path, maxBuffer: 10 * 1024 * 1024 })).stdout;
+      cumulativeDiffRef = resolve(evidenceDir, `${randomUUID()}.patch`);
+      await writeFile(cumulativeDiffRef, cumulative, { mode: 0o600, flag: 'wx' });
+    }
+    return { baseSha: run.commitSha, commitSha, diffRef, cumulativeDiffRef, changedPaths };
   }, async verifyAfterChecks(run, commitSha) {
     const repo = repositories[repoForRun(run)];
     const path = clonePath(run);

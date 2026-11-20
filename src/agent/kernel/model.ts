@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { id } from '../../shared/model.js';
-import { agentEvent, developmentEvidence, verificationEvidence, reviewEvidence } from '../worker/model.js';
+import { agentEvent, developmentEvidence, verificationEvidence, functionalVerificationEvidence, reviewEvidence } from '../worker/model.js';
 import { humanResponse } from '../../interaction/model.js';
 import type { reopenTaskCommand } from '../../interaction/model.js';
 
@@ -15,6 +15,7 @@ export const kernelSignal = z.discriminatedUnion('kind', [
       z.object({ kind: z.literal('finished'), sessionId: id, exitCode: z.number().int(),
         resultRef: id.optional(), error: z.string().max(2048).optional(),
         development: developmentEvidence.optional(), verification: verificationEvidence.optional(),
+        functionalVerification: functionalVerificationEvidence.optional(),
         review: reviewEvidence.optional() }),
     ]).optional() }),
 ]);

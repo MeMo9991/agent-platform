@@ -5,7 +5,7 @@ import type { KernelCoordinator } from '../kernel/model.js';
 import type { Task, TaskMandate } from '../task/model.js';
 import type { AgentRunner, Run, WorkspaceManager } from './model.js';
 import { z } from 'zod';
-import { reviewEvidence, type executionAttestation, type developmentEvidence,
+import { reviewEvidence, functionalVerificationEvidence, type executionAttestation, type developmentEvidence,
   type verificationEvidence, type agentSnapshot } from './model.js';
 import type { SkillLoader } from '../../skills/model.js';
 import { decide, policyWarning, shouldWarn } from '../../authorization/policy/evaluate.js';
@@ -25,8 +25,11 @@ export interface VerifyPlan {
 const defaultVerifyPlan: VerifyPlan = { mode: 'agent', workspace: 'clone', prepare: [], env: {}, cacheKeyFiles: [] };
 const questionOutput = z.object({ kind: z.literal('question'), prompt: z.string().trim().min(1).max(2000) }).strict();
 function parseQuestionOutput(summary: string): string | undefined {
-  try { return questionOutput.safeParse(JSON.parse(summary)).data?.prompt; }
-  catch { return undefined; }
+  for (const candidate of [summary, summary.trim().split(/\r?\n/).at(-1)!]) {
+    try { const prompt = questionOutput.safeParse(JSON.parse(candidate)).data?.prompt; if (prompt) return prompt; }
+    catch { /* A conclusion may precede the final question line. */ }
+  }
+  return undefined;
 }
 export function parseReviewOutput(summary: string): z.infer<typeof reviewEvidence> {
   try { return reviewEvidence.parse(JSON.parse(summary)); }
@@ -65,6 +68,9 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
   riskPolicy?: { assess(task: Task, run: Run): 'low' | 'medium' | 'high' | 'unknown' };
   policyVersion?: string;
   localChecks?: Readonly<Record<string, readonly { command: string; args: readonly string[]; timeoutMs: number }[]>>;
+  groupChecks?: Readonly<Record<string, readonly { command: string; args: readonly string[]; timeoutMs: number }[]>>;
+  functionalVerificationUrls?: Readonly<Record<string, string>>;
+  groupSnapshotRepos?: ReadonlySet<string>;
   verifyPlans?: Readonly<Record<string, VerifyPlan | undefined>>;
   cacheRoot?: string;
   agentVerifyEnabled?: boolean;
@@ -147,7 +153,18 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
   }
   async function runPlatformCheck(command: { command: string; args: readonly string[];
     timeoutMs: number }, cwd: string, env: Readonly<Record<string, string>>,
-    proof: ExecutionAttestation): Promise<CheckReceipt> {
+    proof: ExecutionAttestation, cachePath: string, modules?: readonly string[],
+    tests?: readonly string[]): Promise<CheckReceipt> {
+    const values = { CACHE: cachePath, CHECK_WORKSPACE: cwd } as const;
+    if (command.args.includes('${CHANGED_MODULES}') && !modules?.length)
+      throw new Error('Changed modules are unavailable');
+    if (command.args.some(arg => arg.includes('${CHANGED_TESTS}')) && !tests?.length)
+      throw new Error('No changed Maven test class found; add or update a focused test for this task');
+    const args = command.args.map(arg => arg === '${CHANGED_MODULES}'
+      ? modules!.map(module => `../${module}`).join(',')
+      : arg.replace(/\$\{(CACHE|CHECK_WORKSPACE)\}/g,
+        (_, name: keyof typeof values) => values[name]).replace(/\$\{CHANGED_TESTS\}/g,
+        () => tests!.join(',')));
     const startedAt = new Date().toISOString();
     const controller = new AbortController();
     let handle: ReturnType<NonNullable<ExecutionBoundary['runCheck']>> | undefined;
@@ -158,7 +175,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
         receipt = { result: 'unavailable', exitCode: null, logRef: await unavailableLog(),
           terminationConfirmed: true };
       } else {
-        handle = input.boundary.runCheck({ proof, command: command.command, args: [...command.args],
+        handle = input.boundary.runCheck({ proof, command: command.command, args,
           timeoutMs: command.timeoutMs, cwd, signal: controller.signal, env });
         const completed = await bounded(handle.completion, command.timeoutMs);
         if (!completed) {
@@ -180,7 +197,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
       receipt = { result: 'unavailable', exitCode: null, logRef: await checkedLogRef(stopped?.logRef),
         terminationConfirmed: stopped?.terminated === true };
     }
-    return { command: command.command, args: [...command.args], timeoutMs: command.timeoutMs,
+    return { command: command.command, args, timeoutMs: command.timeoutMs,
       startedAt, endedAt: new Date().toISOString(), ...receipt };
   }
   async function runPlatformVerification(run: Run, task: Task, plan: VerifyPlan):
@@ -201,16 +218,23 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
     let prepareFailed = false;
     let checkCount = 0;
     for (const command of plan.prepare) {
-      const receipt = await runPlatformCheck(command, checkWorkspace, env, run.execution);
+      const receipt = await runPlatformCheck(command, checkWorkspace, env, run.execution, cachePath);
       checks.push(receipt);
       if (receipt.result !== 'passed' || receipt.exitCode !== 0 || !receipt.terminationConfirmed) {
         prepareFailed = true;
         break;
       }
     }
-    if (!prepareFailed) for (const command of input.localChecks?.[task.repoKey] ?? []) {
+    if ((input.groupSnapshotRepos?.has(task.repoKey) ?? Boolean(input.groupChecks?.[task.repoKey])) && !run.groupManifest)
+      throw new Error('Group verification has no pinned input manifest');
+    if (!prepareFailed) for (const command of input.groupChecks?.[task.repoKey] ?? input.localChecks?.[task.repoKey] ?? []) {
+      if (command.args.some(arg => arg.includes('${CHANGED_TESTS}')) &&
+          !run.groupManifest?.changedTests?.length) continue;
       checkCount++;
-      checks.push(await runPlatformCheck(command, checkWorkspace, env, run.execution));
+      const receipt = await runPlatformCheck(command, checkWorkspace, env, run.execution, cachePath,
+        run.groupManifest?.changedModules, run.groupManifest?.changedTests);
+      checks.push(receipt);
+      if (receipt.result !== 'passed' || receipt.exitCode !== 0 || !receipt.terminationConfirmed) break;
     }
     const terminationUnconfirmed = checks.some(check => !check.terminationConfirmed);
     let postCheckError: string | undefined;
@@ -221,15 +245,21 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
       try {
         if (!input.workspace.verifyAfterChecks) throw new Error('Post-check Git verifier is unavailable');
         await input.workspace.verifyAfterChecks(run, run.commitSha);
+        if (run.groupManifest) {
+          if (!input.workspace.verifyGroupCheckCopy) throw new Error('Group input verifier is unavailable');
+          await input.workspace.verifyGroupCheckCopy(run);
+        }
       } catch (error) { postCheckError = error instanceof Error ? error.message : String(error); }
     }
     return { subjectSha: run.commitSha, checks, postCheckVerified: !postCheckError,
       ...(postCheckError ? { postCheckError } : {}),
-      ...(explicitCache && run.cacheKey ? { cacheKey: run.cacheKey } : {}) };
+      ...(explicitCache && run.cacheKey ? { cacheKey: run.cacheKey } : {}),
+      ...(run.groupManifest ? { groupManifest: run.groupManifest } : {}) };
   }
   async function startPlatformVerify(claimed: Run, task: Task, plan: VerifyPlan): Promise<boolean> {
     let proof: ExecutionAttestation | undefined;
     let checkCopy: string | undefined;
+    let groupManifest: Run['groupManifest'];
     let copiedCheckWorkspace = false;
     try {
       const workspace = await input.workspace.prepare(claimed);
@@ -237,10 +267,14 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
       if (plan.workspace === 'copy') {
         if (!input.workspace.prepareCheckCopy) throw new Error('Check workspace copy is unavailable');
         await input.workspace.cleanupCheckCopy?.(claimed);
-        checkCopy = (await input.workspace.prepareCheckCopy(claimed)).path;
+        const copy = await input.workspace.prepareCheckCopy(claimed);
+        checkCopy = copy.path;
+        groupManifest = copy.groupManifest;
+        if ((input.groupSnapshotRepos?.has(task.repoKey) ?? Boolean(input.groupChecks?.[task.repoKey])) !== Boolean(groupManifest))
+          throw new Error('Group check configuration and snapshot do not match');
         copiedCheckWorkspace = true;
       } else checkCopy = workspace.path;
-      const cache = await prepareCache(plan, task.repoKey, workspace.path);
+      const cache = await prepareCache(plan, task.repoKey, groupManifest ? checkCopy! : workspace.path);
       proof = await input.boundary.attest({ runId: claimed.id, repoKey: task.repoKey,
         workspacePath: workspace.path, mode: 'read', mandate: task.mandate, agentRequired: false,
         ...(copiedCheckWorkspace ? { checkWorkspacePath: checkCopy } : {}),
@@ -251,6 +285,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
         throw new Error('Platform verification isolation is unverified');
       input.store.replaceRun({ ...claimed, status: 'running', workspaceRef: workspace.path,
         checkWorkspaceRef: checkCopy, cacheKey: cache?.key, commitSha: workspace.baseSha,
+        ...(groupManifest ? { groupManifest } : {}),
         execution: proof, startedAt: new Date().toISOString() }, 'running');
       return true;
     } catch (error) {
@@ -318,6 +353,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
     recovered = false): Promise<void> {
     let development: z.infer<typeof developmentEvidence> | undefined;
     let verification: z.infer<typeof verificationEvidence> | undefined;
+    let functionalVerification: z.infer<typeof functionalVerificationEvidence> | undefined;
     let review: z.infer<typeof reviewEvidence> | undefined;
     if ((run.stage === 'develop' || run.stage === 'verify') && snapshot.exitCode === 0 && snapshot.resultRef) {
       try {
@@ -327,7 +363,13 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
             run.execution.workspacePath !== run.workspaceRef || !run.commitSha ||
             (run.stage === 'develop' && (run.commitSha !== task.baseRef || !input.workspace.verifyDevelopment)))
           throw new Error('Run has no matching workspace, SHA or isolation proof');
-        const git = run.stage === 'develop' ? await input.workspace.verifyDevelopment!(run)
+        const firstDevelopment = run.stage === 'develop' ? input.store.db.prepare(`SELECT
+          json_extract(payload_json,'$.baseSha') AS sha FROM task_record
+          WHERE task_id=? AND kind='development' ORDER BY at,id LIMIT 1`).get(task.id)?.sha : undefined;
+        if (firstDevelopment !== undefined && (typeof firstDevelopment !== 'string' ||
+            !/^[a-f0-9]{40}$/.test(firstDevelopment))) throw new Error('First development base SHA is invalid');
+        const git = run.stage === 'develop' ? await input.workspace.verifyDevelopment!(run,
+          firstDevelopment ?? run.commitSha)
           : { baseSha: task.baseRef ?? '', commitSha: run.commitSha, diffRef: '' };
         if (run.stage === 'develop' && git.baseSha !== run.commitSha)
           throw new Error('Verified diff base does not match Run');
@@ -423,14 +465,34 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
           at: new Date().toISOString() });
       }
     }
+    if (run.stage === 'functional_verify' && snapshot.exitCode === 0 && snapshot.resultRef && run.sessionId && run.commitSha) {
+      try {
+        const runner = run.agentKind ? input.runners[run.agentKind] : undefined;
+        if (!runner?.resultSummary || !run.execution || run.execution.mode !== 'read' ||
+            run.execution.workspacePath !== run.workspaceRef || !input.workspace.verifyAfterChecks)
+          throw new Error('Functional verification session or isolation proof is missing');
+        const summary = await runner.resultSummary(run.id, run.sessionId, snapshot.resultRef);
+        if (Buffer.byteLength(summary, 'utf8') > 8192) throw new Error('Functional verification result exceeds limit');
+        functionalVerification = functionalVerificationEvidence.parse(JSON.parse(summary));
+        if (functionalVerification.subjectSha !== run.commitSha)
+          throw new Error('Functional verification names another SHA');
+        await input.workspace.verifyAfterChecks(run, run.commitSha);
+      } catch (error) {
+        input.store.saveRecord({ id: randomUUID(), taskId: run.taskId, runId: run.id,
+          kind: 'agent_report', status: 'failed',
+          summary: `Functional verification evidence rejected: ${error instanceof Error ? error.message : String(error)}`,
+          at: new Date().toISOString() });
+      }
+    }
     try {
       if (recovered) await input.coordinator.onSignal({ kind: 'recovery', taskId: run.taskId, runId: run.id,
         observation: { kind: 'finished', sessionId: run.sessionId!, exitCode: snapshot.exitCode,
-          resultRef: snapshot.resultRef, error: snapshot.error, development, verification, review } });
+          resultRef: snapshot.resultRef, error: snapshot.error, development, verification,
+          functionalVerification, review } });
       else await input.coordinator.onSignal({ kind: 'agent_event', taskId: run.taskId,
         event: { kind: 'result', runId: run.id, status: snapshot.exitCode === 0 ? 'succeeded' : 'failed',
           exitCode: snapshot.exitCode, resultRef: snapshot.resultRef, error: snapshot.error,
-          development, verification, review } });
+          development, verification, functionalVerification, review } });
     } finally {
       if (run.workspaceRef) await rm(resolve(run.workspaceRef, '.git', 'agent-input'), { recursive: true, force: true });
       if (run.execution) await input.boundary.release?.(run.execution);
@@ -523,6 +585,8 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
       const runner = claimed.agentKind && input.runners[claimed.agentKind];
       if (!runner || !claimed.agentKind || !input.enabledAgents.includes(claimed.agentKind) ||
           runner.capabilities().start !== 'supported') throw new Error('Agent runner is unavailable or unverified');
+      if (claimed.stage === 'functional_verify' && !input.functionalVerificationUrls?.[task.repoKey])
+        throw new Error('Configured local functional verification URL is missing');
       const humanResume = claimed.queueClass === 'human_resume';
       if (humanResume && claimed.sessionId &&
           (runner.capabilities().resume !== 'supported' || runner.capabilities().send !== 'supported')) {
@@ -696,9 +760,12 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
           checks: checks.map(({ command, args, result, exitCode }) => ({ command, args, result, exitCode })) };
       }
       const facts = { taskId: task.id, iteration: task.iteration, repoKey: task.repoKey,
-        scope: task.scope, baseSha: task.baseRef ?? workspace.baseSha, previousResults, parentTaskFacts,
+        scope: task.scope, baseSha: claimed.stage === 'functional_verify' ? workspace.baseSha
+          : task.baseRef ?? workspace.baseSha, previousResults, parentTaskFacts,
         reopenEvidence: claimed.stage === 'review' ? undefined : reopenEvidence, reviewEvidence: reviewEvidenceFacts,
-        events: eventFacts, answers: answeredFacts };
+        events: eventFacts, answers: answeredFacts,
+        functionalVerificationUrl: claimed.stage === 'functional_verify'
+          ? input.functionalVerificationUrls?.[task.repoKey] : undefined };
       const reviewContract = claimed.stage === 'review'
         ? `${JSON.stringify(facts)}\n\nYou are the independent reviewer, not the implementer. Do not implement, modify files, run tests, or summarize the change. Return exactly one raw JSON object and nothing else: {"subjectSha":"${claimed.commitSha}","verdict":"pass" or "block","findings":[...]}. If evidence is missing, use verdict "block".`
         : JSON.stringify(facts);
