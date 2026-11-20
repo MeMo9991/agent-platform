@@ -186,6 +186,10 @@ export function createStage5OpenChange(store: SqliteStore, repositories: Readonl
             existing.repoKey !== repo.repoKey) throw new Error('Existing change differs from approved target');
         if ((await host.readChange(existing)).state !== 'open')
           throw new Error('Existing change is not open');
+        if (host.approveChange) {
+          try { await host.approveChange(existing); }
+          catch { /* Approval sync is best-effort. */ }
+        }
         store.settleEffect(intent.id, 'done', { changeId: existing.id,
           observedSourceSha: sourceSha, observedTargetSha: targetSha, merged: false });
         return { kind: 'opened', changeId: existing.id };
@@ -212,6 +216,10 @@ export function createStage5OpenChange(store: SqliteStore, repositories: Readonl
         if (change.repoKey !== repo.repoKey || change.sourceSha !== sourceSha || change.targetSha !== targetSha ||
             await host.readTarget?.(repo.targetBranch) !== targetSha)
           throw new Error('Created change differs from approved target');
+        if (host.approveChange) {
+          try { await host.approveChange(change); }
+          catch { /* Approval sync is best-effort; the MR is already created. */ }
+        }
         store.settleEffect(intent.id, 'done', { changeId: change.id,
           observedSourceSha: sourceSha, observedTargetSha: targetSha, merged: false });
         return { kind: 'opened', changeId: change.id };
@@ -220,6 +228,10 @@ export function createStage5OpenChange(store: SqliteStore, repositories: Readonl
           const found = await host.findChangeByBranch(branch);
           if (found && found.repoKey === repo.repoKey && found.sourceSha === sourceSha &&
               found.targetSha === targetSha && (await host.readChange(found)).state === 'open') {
+            if (host.approveChange) {
+              try { await host.approveChange(found); }
+              catch { /* Approval sync is best-effort. */ }
+            }
             store.settleEffect(intent.id, 'done', { changeId: found.id,
               observedSourceSha: sourceSha, observedTargetSha: targetSha, merged: false });
             return { kind: 'opened', changeId: found.id };

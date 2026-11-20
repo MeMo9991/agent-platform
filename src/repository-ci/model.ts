@@ -49,6 +49,7 @@ export interface CodeHost {
   findChangeByBranch?(branch: string): Promise<z.infer<typeof changeRef> | undefined>;
   openChange(request: { sourceSha: string; sourceBranch?: string; targetBranch: string;
     targetSha?: string; title?: string }): Promise<z.infer<typeof changeRef>>;
+  approveChange?(change: z.infer<typeof changeRef>): Promise<void>;
   readChange(change: z.infer<typeof changeRef>): Promise<z.infer<typeof changeSnapshot>>;
   merge(request: { change: z.infer<typeof changeRef>; expectedSourceSha: string }): Promise<{ merged: boolean }>;
 }

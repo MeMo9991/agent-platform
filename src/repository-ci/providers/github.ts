@@ -111,6 +111,11 @@ export function createGitHubCodeHost(repo: Repository, fetcher: typeof fetch = f
         throw new Error('Created GitHub pull request does not match the requested SHA and target');
       return ref(pull, input.targetSha);
     },
+    async approveChange(change) {
+      if (change.provider !== 'github' || change.repoKey !== repo.repoKey || !/^\d+$/.test(change.id))
+        throw new Error('GitHub change belongs to another repository');
+      await request(`/pulls/${change.id}/reviews`, 'POST', { event: 'APPROVE' });
+    },
     async readChange(change) {
       if (change.provider !== 'github' || change.repoKey !== repo.repoKey || !/^\d+$/.test(change.id))
         throw new Error('GitHub change belongs to another repository');
