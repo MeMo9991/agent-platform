@@ -11,7 +11,8 @@ test('CI gate rejects missing, duplicate, stale and pending required checks', ()
     sourceSha, targetSha }, state: 'open', sourceSha, targetSha, gate: 'ready', observedAt: new Date().toISOString(),
     checks: [{ repoKey: 'repo', commitSha: sourceSha, name: 'test', status: 'completed', conclusion: 'success' }] };
   assert.equal(checksReady(snapshot, ['test']), true);
-  assert.equal(checksReady(snapshot, []), false);
+  assert.equal(checksReady(snapshot, []), true);
+  assert.equal(checksReady({ ...snapshot, gate: 'blocked' }, []), false);
   assert.equal(checksReady(snapshot, ['missing']), false);
   assert.equal(checksReady({ ...snapshot, checks: [...snapshot.checks, ...snapshot.checks] }, ['test']), false);
   assert.equal(checksReady({ ...snapshot, targetSha: 'c'.repeat(40) }, ['test']), false);

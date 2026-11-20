@@ -174,7 +174,8 @@ test('platform verify blocks when a check fails and does not queue review', asyn
         },
         async release() { /* released */ },
       },
-      localChecks: { 'agent-platform': [{ command: 'npm', args: ['test'], timeoutMs: 5000 }] },
+      localChecks: { 'agent-platform': [{ command: 'npm', args: ['test'], timeoutMs: 5000 },
+        { command: 'npm', args: ['must-not-run'], timeoutMs: 5000 }] },
       verifyPlans: { 'agent-platform': { mode: 'platform', workspace: 'copy',
         prepare: [{ command: 'npm', args: ['ci'], timeoutMs: 5000 }],
         env: {}, cacheKeyFiles: ['package-lock.json'] } },
@@ -185,10 +186,95 @@ test('platform verify blocks when a check fails and does not queue review', asyn
     assert.equal(await manager.poll(), 1);
     assert.equal(store.getRun('verify-run')?.status, 'failed');
     assert.equal(store.getTask(task.id)?.state, 'blocked');
+    assert.equal(store.db.prepare("SELECT count(*) AS n FROM task_record WHERE kind='check'").get()?.n, 2);
     assert.equal(store.db.prepare("SELECT count(*) AS n FROM run WHERE stage='review'").get()?.n, 0);
     assert.equal(runnerStarted, false);
   } finally {
     store.close();
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('group verify executes configured command and records pinned repository inputs', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-platform-group-run-'));
+  const store = new SqliteStore(':memory:');
+  try {
+    const at = new Date().toISOString();
+    const sha = 'c'.repeat(40);
+    const source = join(directory, 'source');
+    const copy = join(directory, 'check');
+    mkdirSync(source);
+    const manifest = { projectKey: 'group', buildFile: 'Build/pom.xml',
+      buildFileSha256: 'd'.repeat(64), buildFileRef: join(directory, 'build.pom'), inputs: [
+        { repoKey: 'agent-platform', directory: 'service', sha },
+        { repoKey: 'peer', directory: 'peer', sha: 'e'.repeat(40) }],
+      changedModules: ['service/domain'], changedTests: ['FocusedTest'] };
+    const task = createTask(at, sha);
+    store.saveTask(task);
+    store.saveRun({ id: 'group-run', taskId: task.id, iteration: 1, stage: 'verify',
+      status: 'queued', priority: 0, attempt: 0, agentKind: 'qoder', commitSha: sha, createdAt: at });
+    const coordinator = createKernelCoordinator(store, {}, 'p1', 'test', 'qoder', ['agent-platform']);
+    const commands: string[] = [];
+    let checkedInputs = false;
+    let selectedTests = ['FocusedTest'];
+    const manager = createWorkerManager({ store, coordinator, enabledAgents: ['qoder'],
+      runners: { qoder: { capabilities: () => ({ start: 'supported' }),
+        async start() { throw new Error('Group verify must not start an Agent'); },
+        async resume() { return { kind: 'unsupported' as const }; },
+        async send() { return { kind: 'unsupported' as const }; },
+        async read() { return { kind: 'unknown' as const, runId: 'group-run' }; },
+        async cancel() { return { kind: 'accepted' as const }; } } }, workspace: {
+        async prepare() { return { repoKey: task.repoKey, path: source, baseSha: sha }; },
+        async prepareCheckCopy() { mkdirSync(copy); return { path: copy, baseSha: sha,
+          groupManifest: { ...manifest, changedTests: selectedTests } }; },
+        async cleanupCheckCopy() { rmSync(copy, { recursive: true, force: true }); },
+        async verifyAfterChecks() { /* fixed subject SHA checked by the real workspace manager */ },
+        async verifyGroupCheckCopy(run) { assert.deepEqual(run.groupManifest,
+          { ...manifest, changedTests: selectedTests }); checkedInputs = true; },
+      }, skills: { async load(ref) { return { ref, content: 'verify' }; } },
+      boundary: {
+        async attest(value) { return { verified: true as const, runId: value.runId, repoKey: value.repoKey,
+          workspacePath: value.workspacePath, mode: 'read' as const, adapterVersion: 'test', configDigest: 'digest' }; },
+        runCheck(value) { commands.push(`${value.command} ${value.args.join(' ')}`);
+          assert.equal(value.cwd, copy);
+          assert.equal(value.env?.JAVA_TOOL_OPTIONS,
+            `-Djava.io.tmpdir=${join(copy, '.agent-cache')}`);
+          const logRef = join(directory, 'group.log');
+          writeFileSync(logRef, 'passed\n');
+          return { completion: Promise.resolve({ result: 'passed' as const, exitCode: 0,
+            logRef, terminationConfirmed: true }), async terminate() { return { terminated: true, logRef }; } };
+        },
+      },
+      localChecks: { 'agent-platform': [] },
+      groupChecks: { 'agent-platform': [
+        { command: 'mvn', args: ['-f', 'Build/pom.xml', '-pl', '${CHANGED_MODULES}',
+          '-am', '-DskipTests', 'install'], timeoutMs: 5000 },
+        { command: 'mvn', args: ['-f', 'Build/pom.xml', '-pl', '${CHANGED_MODULES}',
+          '-DargLine=-javaagent:${CACHE}/mockito.jar', '-Dtest=${CHANGED_TESTS}', 'verify'], timeoutMs: 5000 }] },
+      verifyPlans: { 'agent-platform': { mode: 'platform', workspace: 'copy', prepare: [],
+        env: { JAVA_TOOL_OPTIONS: '-Djava.io.tmpdir=${CACHE}' },
+        cacheKeyFiles: [] } },
+      skillRepoPath: 'agent-platform', skillCommitSha: sha, maxRunMs: 60_000,
+      checkLogDirectory: join(directory, 'logs'), enabledStages: ['verify'],
+      limits: { maxConcurrentRuns: 2, perRepoConcurrentRuns: 2, perAgentConcurrentRuns: 2, reservedHumanResume: 1 } });
+    assert.equal(await manager.tick(), true);
+    assert.deepEqual(store.getRun('group-run')?.groupManifest, manifest);
+    assert.equal(await manager.poll(), 1);
+    assert.deepEqual(commands, [
+      'mvn -f Build/pom.xml -pl ../service/domain -am -DskipTests install',
+      `mvn -f Build/pom.xml -pl ../service/domain -DargLine=-javaagent:${join(copy, '.agent-cache')}/mockito.jar -Dtest=FocusedTest verify`]);
+    assert.equal(checkedInputs, true);
+    assert.equal(store.getTask(task.id)?.state, 'reviewing');
+    assert.equal(store.db.prepare("SELECT count(*) AS n FROM task_record WHERE kind='group_verification'").get()?.n, 1);
+    selectedTests = [];
+    store.saveTask({ ...task, id: 'task-without-tests' });
+    store.saveRun({ id: 'group-run-without-tests', taskId: 'task-without-tests', iteration: 1,
+      stage: 'verify', status: 'queued', priority: 0, attempt: 0, agentKind: 'qoder',
+      commitSha: sha, createdAt: at });
+    assert.equal(await manager.tick(), true);
+    assert.equal(await manager.poll(), 1);
+    assert.equal(store.getRun('group-run-without-tests')?.status, 'succeeded');
+    assert.deepEqual(commands.slice(2), [
+      'mvn -f Build/pom.xml -pl ../service/domain -am -DskipTests install']);
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });

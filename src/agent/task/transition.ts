@@ -7,14 +7,16 @@ const next: Partial<Record<TaskState, TaskState[]>> = {
   queued: ['investigating', 'developing', 'verifying', 'reviewing', 'waiting_human', 'paused', 'blocked', 'cancelled', 'closed'],
   investigating: ['developing', 'waiting_human', 'blocked', 'failed', 'cancelled', 'closed'],
   developing: ['verifying', 'waiting_human', 'blocked', 'failed', 'cancelled', 'closed'],
-  verifying: ['reviewing', 'developing', 'blocked', 'failed', 'closed'],
+  verifying: ['reviewing', 'developing', 'waiting_human', 'blocked', 'failed', 'closed'],
   reviewing: ['ready_to_merge', 'developing', 'waiting_human', 'blocked', 'closed'],
   ready_to_merge: ['merging', 'waiting_human', 'blocked', 'closed'],
   merging: ['merged', 'blocked', 'failed', 'closed'],
   merged: ['release_pending', 'closed'], release_pending: ['releasing', 'waiting_human', 'closed'],
   releasing: ['released', 'blocked', 'failed', 'closed'], released: ['closed'],
   waiting_human: ['queued', 'investigating', 'developing', 'verifying', 'reviewing', 'ready_to_merge', 'release_pending', 'paused', 'blocked', 'cancelled', 'closed'],
-  paused: ['queued', 'verifying', 'cancelled', 'closed'], blocked: ['queued', 'cancelled', 'closed'], failed: ['queued', 'cancelled', 'closed'],
+  paused: ['queued', 'verifying', 'waiting_human', 'cancelled', 'closed'],
+  blocked: ['queued', 'waiting_human', 'cancelled', 'closed'],
+  failed: ['queued', 'waiting_human', 'cancelled', 'closed'],
 };
 export type TaskTransitionResult = { task: Task; record: Extract<TaskRecord, { kind: 'state_change' }> };
 export function transitionTask(value: Task, to: TaskState, reason: string, at: string, recordId: string,

@@ -23,10 +23,37 @@ test('verify advances only with checks on its pinned SHA', () => {
   const platformResult = { kind: 'result' as const, runId: run.id, status: 'succeeded' as const,
     exitCode: 0, verification: result.verification };
   assert.deepEqual(decideAgentEvent(task, run, platformResult), { state: 'reviewing', queueStage: 'review' });
+  assert.deepEqual(decideAgentEvent(task, run, platformResult, false, 0, true, true, true),
+    { state: 'verifying', queueStage: 'functional_verify' });
   assert.equal(decideAgentEvent(task, run, { ...result, verification: { ...result.verification,
     subjectSha: 'c'.repeat(40) } }).state, 'blocked');
   assert.equal(decideAgentEvent(task, run, { ...result, verification: { ...result.verification,
     checks: [{ ...check, result: 'timeout', exitCode: null }] } }).state, 'blocked');
+  assert.deepEqual(decideAgentEvent(task, run, { ...result, verification: { ...result.verification,
+    checks: [{ ...check, result: 'failed', exitCode: 1 }] } }),
+  { state: 'blocked', reason: 'Fixed-SHA check npm failed (exit 1); inspect its check log' });
+});
+
+test('functional verification gates review and reports mismatches or unavailable local checks', () => {
+  const at = new Date().toISOString();
+  const sha = 'b'.repeat(40);
+  const task: Task = { id: 'task', repoKey: 'repo', title: 'Task', scope: 'Task',
+    mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Task',
+      allowedActions: ['investigate', 'edit'], maxAutoRisk: 'low', policyVersion: 'p1',
+      authority: { kind: 'human_approval', approvalRef: 'approval' } },
+    state: 'verifying', iteration: 1, priority: 0, baseRef: sha, createdAt: at, updatedAt: at };
+  const run: Run = { id: 'functional', taskId: task.id, iteration: 1, stage: 'functional_verify',
+    status: 'running', priority: 0, attempt: 0, commitSha: sha, createdAt: at };
+  const result = (verdict: 'pass' | 'fail' | 'unverifiable') => ({ kind: 'result' as const,
+    runId: run.id, status: 'succeeded' as const, exitCode: 0, resultRef: 'result',
+    functionalVerification: { subjectSha: sha, verdict, reason: 'Local observation' } });
+  assert.deepEqual(decideAgentEvent(task, run, result('pass')),
+    { state: 'reviewing', queueStage: 'review' });
+  assert.deepEqual(decideAgentEvent(task, run, result('fail')),
+    { state: 'developing', queueStage: 'develop', reason: 'Local functional verification failed' });
+  assert.deepEqual(decideAgentEvent(task, run, result('unverifiable')),
+    { state: 'waiting_human', reason: 'Local functional verification could not be completed' });
+  assert.equal(decideAgentEvent(task, run, { ...result('pass'), functionalVerification: undefined }).state, 'blocked');
 });
 
 test('review blocks after two automatic repair rounds', () => {

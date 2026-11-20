@@ -15,6 +15,46 @@ import type { AgentRunner } from '../src/agent/worker/model.js';
 import { createQoderRunner, unavailableQoderLauncher } from '../src/agent/worker/agents/qoder.js';
 import { createGitWorkspaceManager } from '../src/agent/worker/workspace.js';
 
+test('task detail explains a stored verify check failure', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-platform-check-reason-'));
+  const store = new SqliteStore(':memory:');
+  let server: Awaited<ReturnType<typeof startLocalApi>> | undefined;
+  try {
+    const at = new Date().toISOString();
+    const sha = 'a'.repeat(40);
+    store.saveTask({ id: 'task', repoKey: 'repo', title: 'Task', scope: 'Task',
+      mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Task', allowedActions: ['investigate'],
+        maxAutoRisk: 'low', policyVersion: 'p1', authority: { kind: 'trusted_rule', ruleRef: 'test' } },
+      state: 'blocked', iteration: 1, priority: 0, baseRef: sha, createdAt: at, updatedAt: at });
+    store.saveRun({ id: 'verify', taskId: 'task', iteration: 1, stage: 'verify', status: 'failed',
+      priority: 0, attempt: 0, commitSha: sha, createdAt: at });
+    store.saveRecord({ id: 'report', taskId: 'task', runId: 'verify', kind: 'agent_report',
+      status: 'failed', summary: 'Fixed-SHA verification lacks passing command evidence', at });
+    store.saveRecord({ id: 'check', taskId: 'task', runId: 'verify', kind: 'check', subjectSha: sha,
+      command: 'mvn', args: ['verify'], timeoutMs: 1000, startedAt: at, endedAt: at,
+      result: 'failed', exitCode: 1, logRef: join(directory, 'check.log'), terminationConfirmed: true, at });
+    const coordinator = createKernelCoordinator(store, {}, 'p1', 'manual', 'qoder', ['repo']);
+    server = await startLocalApi(store, coordinator, { credentialFile: join(directory, 'token'),
+      actorId: 'owner', roles: ['command'], dashboard: { actorId: 'owner', repoKeys: ['repo'] } });
+    const token = readFileSync(join(directory, 'token'), 'utf8');
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/tasks/task`,
+      { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).runs[0].reason,
+      'Fixed-SHA check mvn failed (exit 1); inspect its check log');
+    store.db.prepare(`INSERT INTO dashboard_command
+      (idempotency_key,actor_id,task_id,kind,reason,task_version) VALUES (?,?,?,?,?,?)`)
+      .run('old-command', 'owner', 'task', 'retry', 'old', 1);
+    store.db.prepare(`INSERT INTO subscription (task_id,source_id,target_kind,target_key,mode)
+      VALUES (?,?,?,?,?)`).run('task', 'manual:repo', 'thread', 'thread', 'handle');
+    const deleted = await fetch(`http://127.0.0.1:${server.port}/api/tasks/task`,
+      { method: 'DELETE', headers: { authorization: `Bearer ${token}` } });
+    assert.equal(deleted.status, 200);
+    assert.equal(store.db.prepare('SELECT count(*) AS n FROM dashboard_command WHERE task_id=?').get('task')?.n, 0);
+    assert.equal(store.db.prepare('SELECT count(*) AS n FROM subscription WHERE task_id=?').get('task')?.n, 0);
+  } finally { await server?.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('stage four accepts one image task, routes it, versions commands and splits through Router', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'agent-platform-stage4-'));
   const images = join(directory, 'images');
@@ -108,7 +148,58 @@ test('an answer-only credential cannot submit or command through the dashboard',
         text: '未经授权的结论', idempotencyKey: 'review-one' }) })).status, 400);
     assert.equal((await fetch(`${base}/api/tasks/any/review-findings`, { method: 'POST', headers,
       body: JSON.stringify({}) })).status, 409);
+    assert.equal((await fetch(`${base}/api/tasks/any/reviews/any/draft-findings`, { headers })).status, 403);
+    assert.equal((await fetch(`${base}/api/tasks/any/developments/any/diff`, { headers })).status, 403);
     assert.equal(store.db.prepare('SELECT count(*) AS n FROM source_event').get()?.n, 0);
+  } finally { await server?.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('historical development preview includes all changes since the first task base', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-platform-cumulative-diff-'));
+  const clone = join(directory, 'clones', 'develop-two');
+  mkdirSync(clone, { recursive: true });
+  mkdirSync(join(directory, 'evidence'));
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: clone, encoding: 'utf8' }).trim();
+  const store = new SqliteStore(':memory:');
+  let server: Awaited<ReturnType<typeof startLocalApi>> | undefined;
+  try {
+    git('init', '-q'); git('config', 'user.email', 'test@example.test'); git('config', 'user.name', 'Test');
+    writeFileSync(join(clone, 'file.txt'), 'before\n'); git('add', '.'); git('commit', '-qm', 'base');
+    const base = git('rev-parse', 'HEAD');
+    writeFileSync(join(clone, 'file.txt'), 'middle\n'); git('add', '.'); git('commit', '-qm', 'first');
+    const first = git('rev-parse', 'HEAD');
+    writeFileSync(join(clone, 'file.txt'), 'final\n'); git('add', '.'); git('commit', '-qm', 'second');
+    const second = git('rev-parse', 'HEAD');
+    const firstPatch = join(directory, 'evidence', 'first.patch');
+    const secondPatch = join(directory, 'evidence', 'second.patch');
+    writeFileSync(firstPatch, git('diff', base, first), { mode: 0o600 });
+    writeFileSync(secondPatch, git('diff', first, second), { mode: 0o600 });
+    const at = new Date().toISOString();
+    store.saveTask({ id: 'task', repoKey: 'repo', title: 'Work', scope: 'Work',
+      mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Work', allowedActions: ['investigate'],
+        maxAutoRisk: 'low', policyVersion: 'p1', authority: { kind: 'trusted_rule', ruleRef: 'test' } },
+      state: 'waiting_human', iteration: 1, priority: 0, createdAt: at, updatedAt: at });
+    for (const [id, baseSha, commitSha, diffRef] of [
+      ['develop-one', base, first, firstPatch], ['develop-two', first, second, secondPatch],
+    ]) {
+      store.saveRun({ id, taskId: 'task', iteration: 1, stage: 'develop', status: 'succeeded',
+        priority: 0, attempt: 1, commitSha, workspaceRef: clone, createdAt: at });
+      store.saveRecord({ id, taskId: 'task', runId: id, kind: 'development', baseSha, commitSha,
+        diffRef, postCheckVerified: true, at });
+    }
+    const coordinator = createKernelCoordinator(store, {}, 'p1', 'manual', 'qoder', ['repo']);
+    server = await startLocalApi(store, coordinator, { credentialFile: join(directory, 'token'),
+      actorId: 'owner', roles: ['command'], dashboard: { actorId: 'owner', repoKeys: ['repo'],
+        evidenceRoot: directory } });
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/tasks/task/developments/develop-two/diff`,
+      { headers: { authorization: `Bearer ${readFileSync(join(directory, 'token'), 'utf8')}` } });
+    assert.equal(response.status, 200);
+    const preview = await response.json() as { content: string; baseSha: string; commitSha: string };
+    assert.equal(preview.baseSha, base);
+    assert.equal(preview.commitSha, second);
+    assert.match(preview.content, /-before/);
+    assert.match(preview.content, /\+final/);
+    assert.doesNotMatch(preview.content, /middle/);
   } finally { await server?.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -243,11 +334,28 @@ test('task detail withholds unreviewed Agent text and returns path-free developm
     assert.doesNotMatch(JSON.stringify(detail), /\/Users\/test|demo-secret|super-secret|progress-secret|question-secret|error-secret|check-secret|sensitive-review-value/);
     assert.equal(detail.records.find((item: any) => item.id === 'review-secret').findingCount, 1);
     assert.equal(detail.records.find((item: any) => item.id === 'review-secret').findings, undefined);
+    const draftResponse = await fetch(`http://127.0.0.1:${server.port}/api/tasks/task/reviews/review-secret/draft-findings`,
+      { headers: { authorization: `Bearer ${readFileSync(join(directory, 'token'), 'utf8')}` } });
+    assert.equal(draftResponse.status, 200);
+    const draft = await draftResponse.json() as { findings: { evidence: string }[] };
+    assert.equal(draft.findings.length, 1);
+    assert.equal(draft.findings[0]?.evidence, 'token=[已隐藏]');
+    assert.doesNotMatch(JSON.stringify(draft), /sensitive-review-value/);
     assert.equal(JSON.stringify(detail).includes(directory), false);
     assert.equal(detail.records.find((item: any) => item.id === 'development').commitSha, 'b'.repeat(40));
     assert.equal(detail.records.find((item: any) => item.id === 'development').diff.sha256,
       createHash('sha256').update(readFileSync(diff)).digest('hex'));
     assert.equal(detail.records.find((item: any) => item.id === 'unrelated').diff.available, false);
+    const preview = await fetch(`http://127.0.0.1:${server.port}/api/tasks/task/developments/development/diff`,
+      { headers: { authorization: `Bearer ${readFileSync(join(directory, 'token'), 'utf8')}` } });
+    assert.equal(preview.status, 200);
+    assert.equal((await preview.json() as { content: string }).content, readFileSync(diff, 'utf8'));
+    const wrongTask = await fetch(`http://127.0.0.1:${server.port}/api/tasks/other/developments/development/diff`,
+      { headers: { authorization: `Bearer ${readFileSync(join(directory, 'token'), 'utf8')}` } });
+    assert.equal(wrongTask.status, 404);
+    const invalidEvidence = await fetch(`http://127.0.0.1:${server.port}/api/tasks/task/developments/unrelated/diff`,
+      { headers: { authorization: `Bearer ${readFileSync(join(directory, 'token'), 'utf8')}` } });
+    assert.equal(invalidEvidence.status, 404);
     assert.equal(detail.records.find((item: any) => item.id === 'check').result, 'passed');
     assert.equal(detail.records.find((item: any) => item.id === 'check').log.recordId, 'check');
     const inbox = await fetch(`http://127.0.0.1:${server.port}/api/inbox`,

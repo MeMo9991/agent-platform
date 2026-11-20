@@ -12,13 +12,17 @@ export type Run = { id: string; stage: string; status: string; sessionId?: strin
   createdAt: string; endedAt?: string; reason?: string; processTerminationUnconfirmed?: boolean };
 export type EvidenceFile = { recordId: string; available: boolean; bytes?: number; sha256?: string; truncated?: boolean };
 export type RecordItem = { id: string; taskId: string; runId?: string; kind: string; at: string; status?: string; prompt?: string;
-  content?: string; summary?: string; request?: { id: string; kind: string; sourceSha: string;
+  content?: string; summary?: string; request?: { id: string; kind: string; runId?: string; sourceSha: string;
+    verificationSkipped?: boolean;
     action?: string; targetBranch?: string; targetSha?: string; changeRef?: string; reviewRecordId?: string;
     policyVersion?: string; reason?: string;
     proposedMandate?: { goal: string; allowedActions: string[]; maxAutoRisk?: string } }; reason?: string; from?: string;
   to?: string; questionId?: string; decision?: string; subjectSha?: string;
   baseSha?: string; commitSha?: string; codeChange?: 'none' | 'committed'; developmentRecordId?: string;
   postCheckVerified?: boolean; postCheckError?: string;
+  projectKey?: string; buildFile?: string; buildFileSha256?: string; changedModules?: string[];
+  buildFileEvidence?: EvidenceFile;
+  inputs?: { repoKey: string; directory: string; sha: string }[];
   diff?: EvidenceFile; log?: EvidenceFile; command?: string; args?: string[];
   result?: string; exitCode?: number | null; terminationConfirmed?: boolean;
   verdict?: 'pass' | 'block'; findingCount?: number; reviewRecordId?: string;

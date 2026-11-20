@@ -71,8 +71,12 @@ test('opening a change requests approval for the reviewed SHA and rechecks the t
       { async prepare() { throw new Error('No clone expected'); },
         async verifyAfterChecks() {} }, 'v1', async () => { pushes++; pushedSha = sourceSha; });
     const version = () => Number(store.db.prepare('SELECT version FROM task WHERE id=?').get('task')?.version);
+    repo.requiredChecks = [];
+    platformRequired = [];
     const request = await service.prepare('task', version());
     assert.equal(request.kind, 'action_request');
+    repo.requiredChecks = ['verify'];
+    platformRequired = ['verify'];
     assert.equal(request.sourceSha, sourceSha);
     assert.equal(request.targetSha, target);
     assert.equal(store.getTask('task')?.state, 'waiting_human');
@@ -87,6 +91,11 @@ test('opening a change requests approval for the reviewed SHA and rechecks the t
     assert.equal(store.db.prepare("SELECT count(*) AS n FROM task_record WHERE kind='effect'").get()?.n, 1);
     assert.equal((await service.status('task')).ready, true);
     assert.equal(store.db.prepare("SELECT count(*) AS n FROM task_record WHERE kind='ci'").get()?.n, 1);
+    repo.requiredChecks = [];
+    platformRequired = [];
+    assert.equal((await service.status('task')).ready, true);
+    repo.requiredChecks = ['verify'];
+    platformRequired = ['verify'];
     platformRequired = ['verify', 'security'];
     assert.equal((await service.status('task')).ready, false);
     platformRequired = ['verify'];

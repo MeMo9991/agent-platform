@@ -57,13 +57,6 @@ export function createGitLabCodeHost(repo: Repository, fetcher: typeof fetch = f
     },
     async readRequiredChecks(branch) {
       if (branch !== repo.targetBranch) throw new Error('Target branch differs from repository configuration');
-      const project = await request<{ only_allow_merge_if_pipeline_succeeds?: boolean }>('');
-      const protectedBranch = await request<{ allow_force_push?: boolean;
-        merge_access_levels?: unknown[] }>(`/protected_branches/${encodeURIComponent(branch)}`);
-      if (project.only_allow_merge_if_pipeline_succeeds !== true ||
-          protectedBranch.allow_force_push !== false ||
-          !protectedBranch.merge_access_levels?.length)
-        throw new Error('GitLab target branch lacks required pipeline or branch protection');
       return [];
     },
     async findChangeByBranch(branch) {

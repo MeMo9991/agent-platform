@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -83,7 +84,8 @@ function evidenceFile(path: unknown, root: string, recordId: unknown, allowed: r
   } catch { return { ...reference, available: false }; }
 }
 function safeRun(run: Record<string, unknown>) {
-  const { workspaceRef, resultRef, execution, ...publicRun } = run;
+  const { workspaceRef, resultRef, execution, groupManifest, ...publicRun } = run;
+  void groupManifest;
   return publicRun;
 }
 function safeRecord(record: Record<string, unknown>, evidenceRoot: string, store: SqliteStore) {
@@ -91,17 +93,20 @@ function safeRecord(record: Record<string, unknown>, evidenceRoot: string, store
   for (const key of ['id', 'taskId', 'runId', 'eventId', 'kind', 'at', 'status', 'content',
     'from', 'to', 'decision', 'subjectSha', 'questionId', 'policyVersion', 'reviewedSha',
     'baseSha', 'commitSha', 'developmentRecordId', 'codeChange', 'postCheckVerified', 'postCheckError',
+    'projectKey', 'buildFile', 'buildFileSha256', 'changedModules', 'changedTests', 'inputs',
     'command', 'args', 'exitCode', 'terminationConfirmed', 'timeoutMs', 'startedAt', 'endedAt',
     'reviewRecordId', 'findingIndex', 'disposition', 'reason', 'targetSha', 'changeId', 'ready',
     'gate', 'ruleId', 'effect'])
-    if (record[key] !== undefined) selected[key] = key === 'args' && Array.isArray(record[key])
+    if (record[key] !== undefined && !(record.kind === 'functional_verification' && key === 'reason'))
+      selected[key] = key === 'args' && Array.isArray(record[key])
       ? (record[key] as unknown[]).map(value => typeof value === 'string' ? safeText(value) : '')
       : ['content', 'command', 'postCheckError', 'reason'].includes(key) && typeof record[key] === 'string'
         ? safeText(record[key] as string) : record[key];
   if (record.kind === 'approval_request' && record.request && typeof record.request === 'object') {
     const request = record.request as Record<string, unknown>;
     const proposed = request.proposedMandate as Record<string, unknown> | undefined;
-    selected.request = { id: request.id, kind: request.kind, sourceSha: request.sourceSha,
+    selected.request = { id: request.id, kind: request.kind, runId: request.runId, sourceSha: request.sourceSha,
+      verificationSkipped: request.verificationSkipped,
       action: request.action, targetBranch: request.targetBranch, targetSha: request.targetSha,
       changeRef: request.changeRef, reviewRecordId: request.reviewRecordId, policyVersion: request.policyVersion,
       reason: typeof request.reason === 'string' ? safeText(request.reason) : undefined,
@@ -112,6 +117,8 @@ function safeRecord(record: Record<string, unknown>, evidenceRoot: string, store
     selected.log = evidenceFile(record.logRef, evidenceRoot, record.id, ['check-logs', 'sandbox-profiles']);
   }
   if (record.kind === 'development') selected.diff = evidenceFile(record.diffRef, evidenceRoot, record.id, ['evidence']);
+  if (record.kind === 'group_verification') selected.buildFileEvidence = evidenceFile(record.buildFileRef,
+    evidenceRoot, record.id, ['evidence']);
   if (record.kind === 'effect') {
     selected.action = record.action;
     const receipt = record.receipt as Record<string, unknown> | undefined;
@@ -204,6 +211,7 @@ function protectedDirectory(path: string): string {
 }
 
 export type DashboardOptions = { actorId: string; repoKeys: readonly string[];
+  unverifiedRepoKeys?: readonly string[];
   projectGroups?: Readonly<Record<string, { repoKeys: readonly string[]; defaultRepoKey?: string }>>;
   selectRepositoryByGroup?: Readonly<Record<string, (title: string, body: string) => { repoKey: string } | undefined>>;
   sourceRepoKeys?: Readonly<Record<string, readonly string[]>>;
@@ -228,6 +236,7 @@ export async function handleDashboard(request: IncomingMessage, response: Server
   try {
     if (request.method === 'GET' && path === '/api/config') {
       send(response, 200, { actorId: options.actorId, repoKeys: options.repoKeys,
+        unverifiedRepoKeys: options.unverifiedRepoKeys ?? [],
         projectGroups: Object.entries(options.projectGroups ?? {}).map(([projectKey, group]) =>
           ({ projectKey, repoKeys: group.repoKeys, defaultRepoKey: group.defaultRepoKey })),
         roles,
@@ -292,6 +301,78 @@ export async function handleDashboard(request: IncomingMessage, response: Server
         .all(...args, limit, offset).map(row => safeTask(store, String(row.id)));
       send(response, 200, { items, total, limit, offset }); return true;
     }
+    const reviewDraftMatch = /^\/api\/tasks\/([^/]+)\/reviews\/([^/]+)\/draft-findings$/.exec(path);
+    if (request.method === 'GET' && reviewDraftMatch) {
+      if (!roles.includes('command') && !roles.includes('approve')) {
+        send(response, 403, { error: 'Review role required' }); return true;
+      }
+      const taskId = decodeURIComponent(reviewDraftMatch[1]!);
+      const review = store.getRecord(decodeURIComponent(reviewDraftMatch[2]!));
+      if (!review || review.kind !== 'review' || review.taskId !== taskId) {
+        send(response, 404, { error: 'Review is unavailable' }); return true;
+      }
+      const field = (value: string | undefined, max: number) => value ? safeText(value).slice(0, max) : undefined;
+      send(response, 200, { findings: review.findings.map(finding => ({
+        file: field(finding.file, 500), line: finding.line,
+        severity: field(finding.severity, 40), evidence: field(finding.evidence, 4000),
+        impact: field(finding.impact, 4000), action: field(finding.action, 2000),
+        verificationMethod: field(finding.verificationMethod, 2000),
+      })) }); return true;
+    }
+    const developmentDiffMatch = /^\/api\/tasks\/([^/]+)\/developments\/([^/]+)\/diff$/.exec(path);
+    if (request.method === 'GET' && developmentDiffMatch) {
+      if (!roles.includes('command') && !roles.includes('approve')) {
+        send(response, 403, { error: 'Review role required' }); return true;
+      }
+      const taskId = decodeURIComponent(developmentDiffMatch[1]!);
+      const record = store.getRecord(decodeURIComponent(developmentDiffMatch[2]!));
+      if (!record || record.kind !== 'development' || record.taskId !== taskId) {
+        send(response, 404, { error: 'Development diff is unavailable' }); return true;
+      }
+      const first = store.db.prepare(`SELECT json_extract(payload_json,'$.baseSha') AS sha
+        FROM task_record WHERE task_id=? AND kind='development' ORDER BY at,id LIMIT 1`).get(taskId);
+      const baseSha = String(first?.sha ?? '');
+      if (!/^[a-f0-9]{40}$/.test(baseSha) || !/^[a-f0-9]{40}$/.test(record.commitSha)) {
+        send(response, 404, { error: 'Development diff base is unavailable' }); return true;
+      }
+      let bytes: Buffer;
+      if (!record.cumulativeDiffRef && baseSha !== record.baseSha) {
+        const run = store.getRun(record.runId);
+        try {
+          const clones = realpathSync(resolve(options.evidenceRoot ?? '', 'clones'));
+          if (!run?.workspaceRef || run.taskId !== taskId || run.commitSha !== record.commitSha ||
+              !/^[A-Za-z0-9_-]+$/.test(run.id) ||
+              realpathSync(run.workspaceRef) !== resolve(clones, run.id)) throw new Error('Clone identity changed');
+          const head = execFileSync('git', ['rev-parse', 'HEAD'],
+            { cwd: run.workspaceRef, encoding: 'utf8', timeout: 10_000 }).trim();
+          if (head !== record.commitSha) throw new Error('Clone HEAD changed');
+          execFileSync('git', ['merge-base', '--is-ancestor', baseSha, record.commitSha],
+            { cwd: run.workspaceRef, timeout: 10_000 });
+          bytes = execFileSync('git', ['diff', '--binary', baseSha, record.commitSha],
+            { cwd: run.workspaceRef, timeout: 10_000, maxBuffer: 10 * 1024 * 1024 });
+        } catch {
+          send(response, 404, { error: 'Cumulative diff is unavailable; development workspace was removed or changed' });
+          return true;
+        }
+      } else {
+        const ref = record.cumulativeDiffRef ?? record.diffRef;
+        const evidence = evidenceFile(ref, options.evidenceRoot ?? '', record.id, ['evidence']);
+        if (!('sha256' in evidence)) {
+          send(response, evidence.available ? 413 : 404,
+            { error: evidence.available ? 'Development diff exceeds preview limit' : 'Development diff is unavailable' });
+          return true;
+        }
+        bytes = readFileSync(ref);
+        if (createHash('sha256').update(bytes).digest('hex') !== evidence.sha256) {
+          send(response, 409, { error: 'Development diff changed during reading' }); return true;
+        }
+      }
+      if (bytes.length > 2 * 1024 * 1024) {
+        send(response, 413, { error: 'Development diff exceeds preview limit' }); return true;
+      }
+      send(response, 200, { content: bytes.toString('utf8'), baseSha, commitSha: record.commitSha,
+        sha256: createHash('sha256').update(bytes).digest('hex') }); return true;
+    }
     const taskMatch = /^\/api\/tasks\/([^/]+)$/.exec(path);
     if (request.method === 'DELETE' && taskMatch) {
       if (!roles.includes('command')) { send(response, 403, { error: 'Command role required' }); return true; }
@@ -311,9 +392,18 @@ export async function handleDashboard(request: IncomingMessage, response: Server
         if (typeof record.runId === 'string' && typeof record.summary === 'string' && record.summary)
           failureReasons.set(record.runId, safeText(record.summary));
       }
-      const runs = rawRuns.map(run => ({ ...safeRun(run), reason: failureReasons.get(String(run.id)) }));
       const records = store.db.prepare('SELECT payload_json FROM task_record WHERE task_id=? ORDER BY at,id').all(id)
         .map(row => safeRecord(JSON.parse(String(row.payload_json)), options.evidenceRoot ?? '', store));
+      const runs = rawRuns.map(run => {
+        let reason = failureReasons.get(String(run.id));
+        if (reason === 'Fixed-SHA verification lacks passing command evidence') {
+          const failed = records.find(record => record.kind === 'check' && record.runId === run.id &&
+            record.result !== 'passed');
+          if (failed) reason = `Fixed-SHA check ${failed.command} ${failed.result} ` +
+            `(exit ${failed.exitCode ?? 'unknown'}); inspect its check log`;
+        }
+        return { ...safeRun(run), reason };
+      });
       const events = store.db.prepare('SELECT DISTINCT event_id FROM task_record WHERE task_id=? AND event_id IS NOT NULL UNION SELECT origin_event_id FROM task WHERE id=? AND origin_event_id IS NOT NULL')
         .all(id, id).map(row => safeEvent(store, String(row.event_id ?? row.origin_event_id), options.sourceRepoKeys));
       send(response, 200, { task, runs, records, events }); return true;

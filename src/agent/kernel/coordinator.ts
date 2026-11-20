@@ -39,8 +39,11 @@ export interface KernelStore extends EventLoopStore {
   openQuestionForRun(runId: string): TaskRecord | undefined;
   hasPendingInput(taskId: string): boolean;
   countReviewBlocks(taskId: string, iteration: number): number;
+  countFunctionalFailures(taskId: string, iteration: number): number;
   setRepairBaseRef(taskId: string, sourceSha: string): void;
   hasActiveRun(taskId: string): boolean;
+  hasOpenHumanRequest(taskId: string): boolean;
+  functionalReviewReady(taskId: string, runId: string, iteration: number, sha: string): boolean;
   getReopenByKey(key: string): Extract<TaskRecord, { kind: 'reopen' }> | undefined;
   saveReopenedTask(previous: Task, next: Task, reopeningRecordId: string): void;
   transferInvestigation(relatedTaskId: string, targetTaskId: string, at: string): void;
@@ -52,11 +55,33 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
   allowedRepos: readonly string[], finder: TaskCandidateFinder,
   autoMandate?: (event: SourceEvent) => Task['mandate'] | undefined,
   sourceRepoKeys: Readonly<Record<string, readonly string[]>> = {},
-  reviewPolicy?: ResolvedReview): KernelCoordinator & { processPending(limit?: number): number;
+  reviewPolicy?: ResolvedReview,
+  verificationConfigured: (repoKey: string) => boolean = () => true,
+  developmentChecksRequired: (repoKey: string) => boolean = verificationConfigured,
+  automaticDeliveryConfigured: (repoKey: string) => boolean = () => true,
+  functionalVerificationConfigured: (repoKey: string) => boolean = () => false): KernelCoordinator & {
+    offerFunctionalReview(runId: string, reason: string): void; processPending(limit?: number): number;
     resolveHumanRoute(value: z.infer<typeof routeReviewDecision>): string | undefined } {
   const eventLoop = createEventLoop(store, trustedRepoBySource, policyVersion, ruleRef, agentKind, finder, 60_000, autoMandate);
   const actor = { kind: 'system' as const, id: 'kernel' };
+  function offerFunctionalReview(runId: string, reason: string): void {
+    store.transaction(() => {
+      const run = store.getRun(runId);
+      const task = run && store.getTask(run.taskId);
+      const requestId = `functional-review-${runId}`;
+      if (!run?.commitSha || !task || !['blocked', 'failed', 'paused', 'waiting_human'].includes(task.state) ||
+          store.getRecord(requestId) || store.hasOpenHumanRequest(task.id) ||
+          !store.functionalReviewReady(task.id, runId, task.iteration, run.commitSha)) return;
+      const at = new Date().toISOString();
+      if (task.state !== 'waiting_human')
+        store.saveTransition(task.id, 'waiting_human', reason, at, randomUUID(), actor);
+      store.saveApprovalRequest({ kind: 'functional_review', id: requestId, taskId: task.id,
+        runId, iteration: task.iteration, sourceSha: run.commitSha,
+        policyVersion: task.mandate.policyVersion, reason });
+    });
+  }
   return {
+    offerFunctionalReview,
     onQuestionProcessEnded(runId, sessionId) {
       store.transaction(() => {
         const run = store.getRun(runId);
@@ -88,6 +113,8 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
         if (kind === 'missing_skill' || (owner.state !== 'waiting_human' && owner.state !== 'paused'))
           store.saveTransition(owner.id, next.state, reason, at, randomUUID(),
             { kind: 'system', id: kind === 'pause' ? 'worker-manager' : 'skill-loader' });
+        if (run.stage === 'functional_verify' && !processTerminationUnconfirmed)
+          offerFunctionalReview(runId, reason);
       });
     },
     resolveHumanRoute(value) {
@@ -203,6 +230,8 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
             store.saveRecord({ id: randomUUID(), taskId: task.id, runId: run.id, kind: 'agent_report',
               status: 'progress', summary: 'Durable process termination evidence verified; automatic dispatch unblocked',
               at: new Date().toISOString() });
+            if (run.stage === 'functional_verify')
+              offerFunctionalReview(run.id, 'Functional verification stopped without a valid result');
           });
           return;
         }
@@ -212,6 +241,7 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
             exitCode: signal.observation.exitCode, resultRef: signal.observation.resultRef,
             error: signal.observation.error,
             development: signal.observation.development, verification: signal.observation.verification,
+            functionalVerification: signal.observation.functionalVerification,
             review: signal.observation.review } });
         return;
       }
@@ -249,6 +279,15 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
               store.saveRun({ id: randomUUID(), taskId: approved.id, iteration: approved.iteration, stage: 'verify',
                 status: 'queued', requestKey: `policy:${response.value.idempotencyKey}`, priority: approved.priority,
                 attempt: 0, agentKind, commitSha: approvedRequest.sourceSha, createdAt: response.value.at });
+            } else if (approvedRequest.kind === 'manual_delivery') {
+              // Approval records the manual handoff; the Task waits for human completion.
+            } else if (approvedRequest.kind === 'functional_review') {
+              store.saveTransition(approved.id, 'reviewing', 'Approved review after interrupted functional verification',
+                response.value.at, randomUUID(), response.value.actor);
+              store.saveRun({ id: randomUUID(), taskId: approved.id, iteration: approved.iteration,
+                stage: 'review', status: 'queued', requestKey: `functional-review:${response.value.idempotencyKey}`,
+                priority: approved.priority, attempt: 0, agentKind, commitSha: approvedRequest.sourceSha,
+                createdAt: response.value.at });
             } else if (approvedRequest.proposedMandate.allowedActions.includes('open_pr') ||
                 approvedRequest.proposedMandate.allowedActions.includes('merge')) {
               store.saveTransition(approved.id, 'ready_to_merge', 'Approved code-host scope',
@@ -281,11 +320,16 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
           if (!development) return;
           store.saveRecord({ id: randomUUID(), taskId, runId: run.id, kind: 'development',
             baseSha: development.baseSha, commitSha: development.commitSha, diffRef: development.diffRef,
+            cumulativeDiffRef: development.cumulativeDiffRef,
             postCheckVerified: development.postCheckVerified, postCheckError: development.postCheckError, at });
           for (const check of development.checks) store.saveRecord({ id: randomUUID(), taskId,
             runId: run.id, kind: 'check', subjectSha: development.commitSha, ...check, at });
         };
-        if (event.kind === 'result' && run.stage === 'develop' && event.development && reviewPolicy) {
+        if (event.kind === 'result' && run.stage === 'develop' && event.status === 'succeeded' &&
+            event.exitCode === 0 && event.development && reviewPolicy &&
+            decideAgentEvent(task, run, event, store.hasPendingInput(task.id), 0,
+            verificationConfigured(task.repoKey), developmentChecksRequired(task.repoKey),
+            functionalVerificationConfigured(task.repoKey)).state !== 'blocked') {
           const context = { gate: 'develop-complete' as const, repoKey: task.repoKey, taskId: task.id, runId: run.id,
             baseSha: event.development.baseSha, commitSha: event.development.commitSha,
             paths: event.development.changedPaths ?? [] };
@@ -312,13 +356,27 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
             saveDevelopmentEvidence(at);
             if (task.state !== 'waiting_human')
               store.saveTransition(task.id, 'waiting_human', reason, at, randomUUID(), actor);
-            store.saveApprovalRequest({ kind: 'continue', id: `policy-${run.id}`, taskId: task.id,
+            store.saveApprovalRequest({ kind: verificationConfigured(task.repoKey) ? 'continue' : 'manual_delivery',
+              id: `policy-${run.id}`, taskId: task.id,
               iteration: task.iteration, sourceSha: event.development.commitSha,
-              policyVersion: task.mandate.policyVersion, reason: policy.decision.reason });
+              verificationSkipped: !verificationConfigured(task.repoKey),
+              policyVersion: task.mandate.policyVersion, reason: verificationConfigured(task.repoKey)
+                ? policy.decision.reason
+                : `${policy.decision.reason}; verification is not configured, manual delivery only` });
             return;
           }
         }
-        const decision = decideAgentEvent(task, run, event, store.hasPendingInput(task.id), previousReviewBlocks);
+        let decision = decideAgentEvent(task, run, event, store.hasPendingInput(task.id), previousReviewBlocks,
+          verificationConfigured(task.repoKey), developmentChecksRequired(task.repoKey),
+          functionalVerificationConfigured(task.repoKey));
+        if (run.stage === 'functional_verify' && event.kind === 'result' &&
+            event.functionalVerification?.verdict === 'fail' &&
+            store.countFunctionalFailures(task.id, task.iteration) >= 2)
+          decision = { state: 'waiting_human', reason: 'Functional verification failed after two repair attempts' };
+        if (run.stage === 'review' && event.kind === 'result' && decision.state === 'ready_to_merge' &&
+            !automaticDeliveryConfigured(task.repoKey))
+          decision = { state: 'waiting_human', needsManualDeliveryApproval: true,
+            reason: 'Automatic code-host delivery is not configured; human approval is required for manual delivery' };
         const at = new Date().toISOString();
         if (event.kind === 'input_handled') {
           store.setEventLinkStatus(task.id, event.eventId, 'delivered', 'handled');
@@ -344,6 +402,9 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
             prompt: event.prompt, status: 'open', at });
         }
         if (event.kind === 'result') {
+          if (run.stage === 'functional_verify' && event.functionalVerification)
+            store.saveRecord({ id: randomUUID(), taskId: task.id, runId: run.id,
+              kind: 'functional_verification', ...event.functionalVerification, at });
           store.saveRecord({ id: randomUUID(), taskId: task.id, runId: run.id, kind: 'agent_report',
             status: decision.state === 'blocked' ? 'failed' : event.status,
             summary: decision.reason ?? event.error ?? event.resultRef ?? `Exit code ${event.exitCode ?? 'unknown'}`,
@@ -352,6 +413,9 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
           if (event.verification) for (const check of event.verification.checks)
             store.saveRecord({ id: randomUUID(), taskId: task.id, runId: run.id, kind: 'check',
               subjectSha: event.verification.subjectSha, ...check, at });
+          if (event.verification?.groupManifest && decision.state !== 'blocked')
+            store.saveRecord({ id: randomUUID(), taskId: task.id, runId: run.id, kind: 'group_verification',
+              subjectSha: event.verification.subjectSha, ...event.verification.groupManifest, at });
           if (event.review) store.saveRecord({ id: randomUUID(), taskId: task.id, runId: run.id,
             kind: 'review', iteration: task.iteration, ...event.review, at });
           store.replaceRun({ ...run, status: ['failed', 'blocked'].includes(decision.state ?? '') ? 'failed' : event.status,
@@ -360,8 +424,14 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
         }
         if (decision.state && task.state !== decision.state)
           store.saveTransition(task.id, decision.state, decision.reason ?? `Agent ${event.kind}`, at, randomUUID(), actor);
+        if (event.kind === 'result' && run.stage === 'functional_verify' &&
+            ['blocked', 'failed'].includes(decision.state ?? ''))
+          offerFunctionalReview(run.id, decision.reason ?? event.error ?? 'Functional verification stopped without a valid result');
         if (event.kind === 'result' && run.stage === 'review' && decision.queueStage === 'develop' && event.review)
           store.setRepairBaseRef(task.id, event.review.subjectSha);
+        if (event.kind === 'result' && run.stage === 'functional_verify' &&
+            decision.queueStage === 'develop' && event.functionalVerification)
+          store.setRepairBaseRef(task.id, event.functionalVerification.subjectSha);
         if (decision.needsScopeApproval) {
           if (!task.baseRef) throw new Error('Cannot request edit scope without a verified base SHA');
           const requestId = `scope-${run.id}`;
@@ -371,10 +441,21 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
               maxAutoRisk: 'high',
               authority: { kind: 'human_approval', approvalRef: requestId } } });
         }
+        if (decision.needsManualDeliveryApproval && event.kind === 'result' &&
+            (event.development || event.review))
+          store.saveApprovalRequest({ kind: 'manual_delivery', id: `manual-delivery-${run.id}`,
+            taskId: task.id, iteration: task.iteration,
+            sourceSha: event.development?.commitSha ?? event.review!.subjectSha,
+            policyVersion: task.mandate.policyVersion,
+            verificationSkipped: !verificationConfigured(task.repoKey),
+            reason: verificationConfigured(task.repoKey)
+              ? 'Local verification and review passed; approve manual push and PR/MR creation outside the platform'
+              : 'Verification was skipped; approve only manual push and PR/MR creation outside the platform' });
         if (decision.queueStage) store.saveRun({ id: randomUUID(), taskId: task.id, iteration: task.iteration,
           stage: decision.queueStage, status: 'queued', requestKey: `${task.id}:${task.iteration}:${decision.queueStage}:${run.id}`,
           agentKind, priority: run.priority, attempt: 0, createdAt: at,
           commitSha: event.kind === 'result' ? event.development?.commitSha ?? event.verification?.subjectSha ??
+            event.functionalVerification?.subjectSha ??
             (decision.queueStage === 'develop' ? event.review?.subjectSha : undefined) : undefined });
       });
     },

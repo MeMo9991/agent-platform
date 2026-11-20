@@ -83,12 +83,14 @@ export function createQoderRunner(launcher: IsolatedProcessLauncher, logDirector
       const args = ['-p', '--input-format', 'text', '--output-format', 'stream-json', '--cwd', request.workspace.path,
         '--permission-mode', request.stage === 'develop' ? 'bypass_permissions' : 'dont_ask',
         '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-        '--setting-sources', request.stage === 'develop' ? 'user' : '',
+        '--setting-sources', 'user',
         '--append-system-prompt', buildQoderSystemPrompt(request),
-        ...(['investigate', 'verify', 'review'].includes(request.stage) ? ['--tools', 'Read', 'Grep', 'Glob',
-          '--allowed-tools', 'Read,Grep,Glob'] : []),
-        ...(request.stage === 'develop' ? ['--tools', 'Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash',
-          '--allowed-tools', 'Read,Grep,Glob,Edit,Write,Bash'] : []),
+        ...(['investigate', 'verify', 'review'].includes(request.stage) ? ['--tools', 'Read', 'Grep', 'Glob', 'Skill',
+          '--allowed-tools', 'Read,Grep,Glob,Skill'] : []),
+        ...(request.stage === 'functional_verify' ? ['--tools', 'Read', 'Grep', 'Glob', 'Bash', 'Skill',
+          '--allowed-tools', 'Read,Grep,Glob,Bash,Skill'] : []),
+        ...(request.stage === 'develop' ? ['--tools', 'Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash', 'Skill',
+          '--allowed-tools', 'Read,Grep,Glob,Edit,Write,Bash,Skill'] : []),
         ...attachments.flatMap(path => ['--attachment', path]), prompt];
       const launched = launcher.launch('qoderclicn', args, request.workspace.path, request.execution);
       const child = launched.process;

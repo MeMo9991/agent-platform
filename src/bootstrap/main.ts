@@ -26,6 +26,8 @@ import { decide } from '../authorization/policy/evaluate.js';
 import { autoPrMandate, autoPrRuleRef } from '../authorization/auto-pr.js';
 import { randomUUID } from 'node:crypto';
 import { authorizationHeaders as defaultAuthorizationHeaders } from './devops-credentials.js';
+import { configuredGroupVerification, configuredLocalVerification, stage5PreflightRepositories } from './config.js';
+import { groupVerifier, groupVerifiers } from '../agent/worker/group-verifiers.js';
 
 const databasePath = process.env.AGENT_PLATFORM_DATABASE ?? '.runtime/state/agent-platform.sqlite3';
 const instanceLock = await acquireInstanceLock(databasePath, () => {
@@ -79,7 +81,25 @@ const runners = { qoder: createQoderRunner(qoderRuntime?.launcher ?? unavailable
 const agentKind = platform.agents.find(agent => agent.kind in runners)?.kind;
 if (!agentKind) throw new Error('Stage three requires one registered Agent kind');
 const stage5WorkerEnabled = process.env.AGENT_PLATFORM_STAGE5_WORKER_ENABLED === '1';
+const stage5WritesEnabled = process.env.AGENT_PLATFORM_STAGE5_WRITES_ENABLED === '1';
+const stage5WritableRepos = new Set(stage5WritesEnabled
+  ? stage5PreflightRepositories(platform).map(repo => repo.repoKey) : []);
 if (stage5WorkerEnabled && !qoderRuntime) throw new Error('Stage five Worker needs an enabled isolated Qoder runtime');
+const groupVerifications = Object.fromEntries(platform.projectGroups.filter(group =>
+  stage5WorkerEnabled && configuredGroupVerification(group) && groupVerifiers[group.projectKey]?.buildFile).flatMap(group => group.repositories.map(repo =>
+    [repo.repoKey, { projectKey: group.projectKey, searchRoot: group.searchRoot!,
+      moduleSelection: groupVerifiers[group.projectKey]!.moduleSelection,
+      buildFile: groupVerifiers[group.projectKey]!.buildFile!, repositories: Object.fromEntries(group.repositories.map(item =>
+        [item.repoKey, { path: resolve(item.localPath!), remote: `${item.hostUrl}/${item.projectRef}.git` }])) }] as const)));
+const groupChecks = Object.fromEntries(platform.projectGroups.filter(group =>
+  stage5WorkerEnabled && configuredGroupVerification(group)).flatMap(group => group.repoKeys.map(repoKey =>
+    [repoKey, groupVerifier(group.projectKey)!.checks] as const)));
+for (const group of platform.projectGroups)
+  if (group.functionalVerificationUrl && (!stage5WorkerEnabled || !configuredGroupVerification(group)))
+    throw new Error(`Functional verification for ${group.projectKey} requires an enabled, ready group verifier`);
+const functionalVerificationUrls = Object.fromEntries(platform.projectGroups.filter(group =>
+  group.functionalVerificationUrl)
+  .flatMap(group => group.repoKeys.map(repoKey => [repoKey, group.functionalVerificationUrl!] as const)));
 const coordinator = createKernelCoordinator(runtime.store, trustedRepoBySource, platform.policyRef,
   'configured-source', agentKind, platform.repositories.map(repo => repo.repoKey),
   createTaskCandidateFinder(runtime.store), event => {
@@ -88,7 +108,25 @@ const coordinator = createKernelCoordinator(runtime.store, trustedRepoBySource, 
     const policy = decide({ gate: 'intake', repoKey: repo.repoKey }, reviewPolicy);
     if (policy?.enforced && policy.decision.effect !== 'allow') return undefined;
     return autoPrMandate(event, repo, platform.policyRef);
-  }, sourceRepoKeys, reviewPolicy);
+  }, sourceRepoKeys, reviewPolicy, repoKey =>
+    Boolean(groupChecks[repoKey] || (!platform.projectGroups.some(group => group.repoKeys.includes(repoKey)) &&
+      platform.repositories.find(repo => repo.repoKey === repoKey &&
+      configuredLocalVerification(repo, stage5WorkerEnabled)))), repoKey =>
+    Boolean(!platform.projectGroups.some(group => group.repoKeys.includes(repoKey)) &&
+      platform.repositories.find(repo => repo.repoKey === repoKey && repo.localChecks.length > 0)),
+  repoKey => stage5WritableRepos.has(repoKey), repoKey => Boolean(functionalVerificationUrls[repoKey]));
+for (const row of runtime.store.db.prepare(`SELECT run.id, task.repo_key AS repoKey,
+    (SELECT json_extract(record.payload_json,'$.summary') FROM task_record AS record
+      WHERE record.run_id=run.id AND record.kind='agent_report' AND record.status='failed'
+      ORDER BY record.at DESC,record.id DESC LIMIT 1) AS reason
+    FROM run JOIN task ON task.id=run.task_id
+    WHERE run.stage='functional_verify' AND run.status IN ('paused','failed')
+      AND task.state IN ('blocked','failed','paused','waiting_human')
+      AND run.id=(SELECT id FROM run AS latest WHERE latest.task_id=task.id
+        ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1)`).all()) {
+  if (functionalVerificationUrls[String(row.repoKey)])
+    coordinator.offerFunctionalReview(String(row.id), String(row.reason ?? 'Functional verification stopped without a valid result'));
+}
 let routeTimer: ReturnType<typeof setInterval> | undefined;
 let ciTimer: ReturnType<typeof setInterval> | undefined;
 let ciTick: Promise<void> | undefined;
@@ -113,12 +151,11 @@ const workspace = createGitWorkspaceManager(Object.fromEntries(platform.reposito
       AND stage='investigate' AND status='succeeded' AND workspace_ref IS NOT NULL
       ORDER BY ended_at DESC LIMIT 1`).get(run.taskId, run.iteration);
     return row?.workspace_ref ? String(row.workspace_ref) : undefined;
-  }, run => runtime.store.getTask(run.taskId)?.baseRef);
+  }, run => runtime.store.getTask(run.taskId)?.baseRef, groupVerifications);
 const codeHosts = createCodeHosts(platform);
-const stage5WritesEnabled = process.env.AGENT_PLATFORM_STAGE5_WRITES_ENABLED === '1';
-if (stage5WritesEnabled) for (const repo of platform.repositories) {
+if (stage5WritesEnabled) for (const repo of stage5PreflightRepositories(platform)) {
   const host = codeHosts[repo.repoKey];
-  if (!host?.readTarget || !host.readRequiredChecks || !repo.requiredChecks.length)
+  if (!host?.readTarget || !host.readRequiredChecks)
     throw new Error(`Stage five write preflight is unavailable for ${repo.repoKey}`);
   await host.readTarget(repo.targetBranch);
   await host.readRequiredChecks(repo.targetBranch);
@@ -126,9 +163,10 @@ if (stage5WritesEnabled) for (const repo of platform.repositories) {
 const stage5OpenChange = createStage5OpenChange(runtime.store,
   Object.fromEntries(platform.repositories.map(repo => [repo.repoKey, repo])), codeHosts,
   workspace, platform.policyRef, undefined, reviewPolicy);
-const platformVerifyEnabled = platform.repositories.some(repo => repo.verify?.mode === 'platform');
+const platformVerifyEnabled = platform.repositories.some(repo => repo.verify?.mode === 'platform') ||
+  Object.keys(groupChecks).length > 0;
 const enabledStages: readonly Run['stage'][] | undefined = stage5WorkerEnabled
-  ? ['investigate', 'develop', 'verify', 'review']
+  ? ['investigate', 'develop', 'verify', 'functional_verify', 'review']
   : platformVerifyEnabled ? ['investigate', 'develop', 'verify'] : undefined;
 const manager = createWorkerManager({ store: runtime.store, coordinator,
   runners,
@@ -145,7 +183,13 @@ const manager = createWorkerManager({ store: runtime.store, coordinator,
   } },
   policyVersion: platform.policyRef, reviewPolicy,
   localChecks: Object.fromEntries(platform.repositories.map(repo => [repo.repoKey, repo.localChecks])),
-  verifyPlans: Object.fromEntries(platform.repositories.map(repo => [repo.repoKey, repo.verify])),
+  groupChecks,
+  functionalVerificationUrls,
+  groupSnapshotRepos: new Set(Object.keys(groupVerifications)),
+  verifyPlans: Object.fromEntries(platform.repositories.map(repo => [repo.repoKey,
+    platform.projectGroups.find(group => groupChecks[repo.repoKey] && group.repoKeys.includes(repo.repoKey))
+      ? groupVerifier(platform.projectGroups.find(group => group.repoKeys.includes(repo.repoKey))!.projectKey)!.verify
+      : repo.verify])),
   cacheRoot, agentVerifyEnabled: stage5WorkerEnabled,
   attachmentReaders,
   checkLogDirectory: resolve(root, '.runtime/check-logs'),
@@ -171,6 +215,9 @@ try {
     ...platform.interaction,
     dashboard: { actorId: platform.interaction.actorId,
       repoKeys: platform.repositories.map(repo => repo.repoKey),
+      unverifiedRepoKeys: platform.repositories.filter(repo => !groupChecks[repo.repoKey] &&
+        !configuredLocalVerification(repo, stage5WorkerEnabled))
+        .map(repo => repo.repoKey),
       projectGroups: Object.fromEntries(platform.projectGroups.map(group => [group.projectKey,
         { repoKeys: group.repoKeys, defaultRepoKey: group.defaultRepoKey }])),
       selectRepositoryByGroup: Object.fromEntries(platform.projectGroups.map(group =>
@@ -205,12 +252,13 @@ if (stage5WritesEnabled) {
   const pollCodeHost = () => {
     if (ciTick) return;
     ciTick = (async () => {
-      const automatic = runtime.store.db.prepare(`SELECT task.id,task.version FROM task
+      const automatic = runtime.store.db.prepare(`SELECT task.id,task.version,task.repo_key FROM task
         WHERE task.state='ready_to_merge' AND json_extract(task.mandate,'$.authority.kind')='auto_pr'
         AND NOT EXISTS (SELECT 1 FROM task_record AS effect WHERE effect.task_id=task.id
           AND effect.kind='effect' AND effect.status='done'
           AND json_extract(effect.payload_json,'$.action')='open_pr')`).all();
       for (const row of automatic) {
+        if (!stage5WritableRepos.has(String(row.repo_key))) continue;
         const taskId = String(row.id);
         try {
           const preflight = await stage5OpenChange.prepare(taskId, Number(row.version));
@@ -226,11 +274,12 @@ if (stage5WritesEnabled) {
           });
         }
       }
-      const tasks = runtime.store.db.prepare(`SELECT DISTINCT effect.task_id FROM task_record AS effect
+      const tasks = runtime.store.db.prepare(`SELECT DISTINCT effect.task_id,task.repo_key FROM task_record AS effect
         JOIN task ON task.id=effect.task_id WHERE effect.kind='effect' AND effect.status='done'
         AND json_extract(effect.payload_json,'$.action')='open_pr'
         AND task.state='ready_to_merge'`).all();
       for (const row of tasks) {
+        if (!stage5WritableRepos.has(String(row.repo_key))) continue;
         const taskId = String(row.task_id);
         try {
           await stage5OpenChange.status(taskId);

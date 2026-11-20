@@ -113,6 +113,7 @@ test('write attestation binds human edit scope and launches Qoder with only its 
 [ -z "$AGENT_PLATFORM_GITHUB_TOKEN" ] || exit 22
 /bin/cat "${home}/.qoder-cn/settings.json" >/dev/null 2>&1 && exit 23
 /bin/cat "${home}/.config/agent-platform/local-api.token" >/dev/null 2>&1 && exit 26
+/bin/cat "${home}/.config/agent-platform/qodercn.pat" >/dev/null 2>&1 && exit 32
 /usr/bin/touch "${outside}/escape" 2>/dev/null && exit 24
 printf 'after\n' > "$PWD/file.txt" || exit 25
 /usr/bin/git -C "$PWD" add file.txt || exit 27
@@ -127,9 +128,10 @@ printf 'after\n' > "$PWD/file.txt" || exit 25
         allowedActions: ['investigate', 'edit'] as Array<'investigate' | 'edit'>,
         maxAutoRisk: 'high' as const, policyVersion: 'p1',
         authority: { kind: 'human_approval' as const, approvalRef: 'approved' } };
-      assert.equal(await runtime.boundary.attest({ runId: 'write-run', repoKey: 'repo',
-        workspacePath: clone, mode: 'write', mandate }), undefined);
-      process.env.QODERCN_PERSONAL_ACCESS_TOKEN = 'fixture-only';
+      delete process.env.QODERCN_PERSONAL_ACCESS_TOKEN;
+      await assert.rejects(runtime.boundary.attest({ runId: 'write-run', repoKey: 'repo',
+        workspacePath: clone, mode: 'write', mandate }), /QoderCN PAT is missing/);
+      writeFileSync(join(home, '.config', 'agent-platform', 'qodercn.pat'), 'fixture-only', { mode: 0o600 });
       const disabled = await createMacQoderRuntime({ cloneRoot, profileRoot: join(root, 'profiles'), qoderPath: qoder });
       assert.equal(await disabled.boundary.attest({ runId: 'write-run', repoKey: 'repo',
         workspacePath: clone, mode: 'write', mandate }), undefined);

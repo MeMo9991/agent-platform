@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { Diff, Hunk, parseDiff } from 'react-diff-view';
+import 'react-diff-view/style/index.css';
 import { RiCheckLine, RiCloseLine, RiEditLine, RiFileCopyLine, RiPauseLine, RiPlayLine, RiRefreshLine, RiRestartLine, RiUserLine } from '@remixicon/react';
 import { api } from '../app/api';
 import { Badge, Button, Card } from '../components/ui';
 import { Chip } from '@/components/base/badges/chip';
 import { Tab, TabList, TabPanel, Tabs } from '@/components/base/tabs/tabs';
-import type { Detail, RecordItem, Run } from '../shared/types';
+import type { Detail, RecordItem, ReviewFinding, Run } from '../shared/types';
 import { canInterruptTask } from '../shared/task-command-availability';
 
 function QuestionReview({ taskId, version, targetId, onDone }: { taskId: string; version: number;
@@ -35,9 +37,21 @@ function ReviewFindingPublication({ taskId, version, review, index, onDone }: { 
   review: RecordItem; index: number; onDone: () => void }) {
   const [finding, setFinding] = useState({ file: '', severity: '', evidence: '', impact: '', action: '', verificationMethod: '' });
   const [line, setLine] = useState('');
+  const [loading, setLoading] = useState(false);
   const [key, setKey] = useState(() => crypto.randomUUID());
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  async function importDraft() {
+    setLoading(true); setError('');
+    try {
+      const draft = (await api<{ findings: ReviewFinding[] }>(`/api/tasks/${encodeURIComponent(taskId)}/reviews/${encodeURIComponent(review.id)}/draft-findings`)).findings[index];
+      if (!draft) throw new Error('原始意见不存在');
+      setFinding({ file: draft.file, severity: draft.severity, evidence: draft.evidence,
+        impact: draft.impact, action: draft.action ?? '', verificationMethod: draft.verificationMethod ?? '' });
+      setLine(draft.line ? String(draft.line) : ''); setKey(crypto.randomUUID());
+    } catch (cause) { setError(String(cause)); }
+    finally { setLoading(false); }
+  }
   async function publish(event: FormEvent) {
     event.preventDefault(); setBusy(true); setError('');
     try {
@@ -50,6 +64,8 @@ function ReviewFindingPublication({ taskId, version, review, index, onDone }: { 
   }
   return <form className="stack content-review" onSubmit={publish}>
     <p className="muted">请核对原生审查记录中意见 #{index + 1} 的文件、证据和影响，再发布供批准人处理。</p>
+    <Button type="button" variant="secondary" disabled={loading} onClick={() => void importDraft()}>
+      {loading ? '读取中…' : '导入 Agent 原始意见'}</Button>
     {(['file', 'severity', 'evidence', 'impact', 'action', 'verificationMethod'] as const).map(field =>
       <label key={field}>{({ file: '文件', severity: '严重度', evidence: '证据', impact: '影响', action: '建议处理',
         verificationMethod: '验证方法' })[field]}
@@ -94,17 +110,58 @@ function PublishedFinding({ finding }: { finding: RecordItem }) {
   return <dl className="task-run-meta">
     <div><dt>文件</dt><dd><code>{finding.file}{finding.line ? `:${finding.line}` : ''}</code></dd></div>
     <div><dt>严重度</dt><dd>{finding.severity}</dd></div>
-    <div className="task-review-wide"><dt>证据</dt><dd>{finding.evidence}</dd></div>
-    <div className="task-review-wide"><dt>影响</dt><dd>{finding.impact}</dd></div>
-    {finding.action && <div className="task-review-wide"><dt>建议处理</dt><dd>{finding.action}</dd></div>}
-    {finding.verificationMethod && <div className="task-review-wide"><dt>验证方法</dt><dd>{finding.verificationMethod}</dd></div>}
+    <div className="task-review-wide"><dt>证据</dt><dd><code>{finding.evidence}</code></dd></div>
+    <div className="task-review-wide"><dt>影响</dt><dd><code>{finding.impact}</code></dd></div>
+    {finding.action && <div className="task-review-wide"><dt>建议处理</dt><dd><code>{finding.action}</code></dd></div>}
+    {finding.verificationMethod && <div className="task-review-wide"><dt>验证方法</dt><dd><code>{finding.verificationMethod}</code></dd></div>}
     <div><dt>人工核对</dt><dd>{finding.reviewer}</dd></div>
     <div><dt>受审 SHA</dt><dd><code>{finding.subjectSha}</code></dd></div>
   </dl>;
 }
 
-function ReviewStageDetails({ review, records, nextRun }: { review: RecordItem;
-  records: RecordItem[]; nextRun?: Run }) {
+function DevelopmentDiff({ record }: { record: RecordItem }) {
+  const [open, setOpen] = useState(false);
+  const [preview, setPreview] = useState<{ content: string; baseSha: string; commitSha: string }>();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  async function load() {
+    setLoading(true); setError('');
+    try {
+      const result = await api<{ content: string; baseSha: string; commitSha: string }>(
+        `/api/tasks/${encodeURIComponent(record.taskId)}/developments/${encodeURIComponent(record.id)}/diff`);
+      setPreview(result);
+    } catch (cause) { setError(String(cause)); }
+    finally { setLoading(false); }
+  }
+  const files = preview ? parseDiff(preview.content) : [];
+  return <><button type="button" className="task-development-toggle" aria-expanded={open}
+    onClick={() => { setOpen(!open); if (!open && !preview && !loading) void load(); }}>代码改动</button>
+    {open && <div className="task-development-diff">
+    {loading && <p className="muted">读取中…</p>}
+    {error && <p role="alert" className="error">{error}</p>}
+    {preview && <p className="muted">任务累计改动：<code>{preview.baseSha}</code> → <code>{preview.commitSha}</code></p>}
+    {preview && (files.length ? files.map((file, index) => <section key={index}>
+      <h4>{file.newPath === '/dev/null' ? file.oldPath : file.newPath}</h4>
+      {file.hunks.length ? <Diff viewType="unified" diffType={file.type} hunks={file.hunks}>
+        {hunks => hunks.map(hunk => <Hunk key={hunk.content} hunk={hunk} />)}
+      </Diff> : <p className="muted">此文件没有可显示的文本行差异</p>}
+    </section>) : <p className="muted">没有可显示的代码差异</p>)}
+    </div>}</>;
+}
+
+function ReviewStageDetails({ review, records, nextRun, canInspect }: { review: RecordItem;
+  records: RecordItem[]; nextRun?: Run; canInspect: boolean }) {
+  const [drafts, setDrafts] = useState<ReviewFinding[]>();
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  async function inspect() {
+    setLoading(true); setError('');
+    try {
+      const result = await api<{ findings: ReviewFinding[] }>(`/api/tasks/${encodeURIComponent(review.taskId)}/reviews/${encodeURIComponent(review.id)}/draft-findings`);
+      setDrafts(result.findings);
+    } catch (cause) { setError(String(cause)); }
+    finally { setLoading(false); }
+  }
   return <details className="task-stage-details" open={review.verdict === 'block'}>
     <summary>审查详情 · {review.verdict === 'pass' ? '通过' : '阻断'} · {review.findingCount ?? 0} 条意见</summary>
     <dl className="task-run-meta"><div><dt>受审 SHA</dt><dd><code>{review.subjectSha}</code></dd></div>
@@ -115,10 +172,22 @@ function ReviewStageDetails({ review, records, nextRun }: { review: RecordItem;
         record.reviewRecordId === review.id && record.findingIndex === index && record.subjectSha === review.subjectSha);
       const resolved = records.some(record => record.kind === 'review_resolution' &&
         record.reviewRecordId === review.id && record.findingIndex === index);
-      return <div className="task-review-finding" key={index}><h3>意见 #{index + 1}</h3>
-        {published ? <PublishedFinding finding={published} /> : <p className="muted">意见内容待人工核对后展示</p>}
+      return <details className="task-review-finding" key={index}
+        onToggle={event => { if (event.currentTarget.open && !published && canInspect && !drafts && !loading) void inspect(); }}>
+        <summary>意见 #{index + 1}</summary>
+        {published ? <PublishedFinding finding={published} /> : drafts?.[index]
+          ? <><p className="muted">Agent 原始意见，仅供人工核对；发布记录才是正式审查意见。</p><dl className="task-run-meta">
+              <div><dt>文件</dt><dd><code>{drafts[index]!.file}{drafts[index]!.line ? `:${drafts[index]!.line}` : ''}</code></dd></div>
+              <div><dt>严重度</dt><dd>{drafts[index]!.severity}</dd></div>
+              <div className="task-review-wide"><dt>证据</dt><dd><code>{drafts[index]!.evidence}</code></dd></div>
+              <div className="task-review-wide"><dt>影响</dt><dd><code>{drafts[index]!.impact}</code></dd></div>
+              {drafts[index]!.action && <div className="task-review-wide"><dt>建议处理</dt><dd><code>{drafts[index]!.action}</code></dd></div>}
+              {drafts[index]!.verificationMethod && <div className="task-review-wide"><dt>验证方法</dt><dd><code>{drafts[index]!.verificationMethod}</code></dd></div>}
+            </dl></>
+          : <p className="muted">{loading ? '读取中…' : '意见内容待人工核对'}</p>}
+        {error && !published && <p role="alert" className="error">{error}</p>}
         {resolved && <p className="muted">已有结构化处理决定</p>}
-      </div>;
+      </details>;
     })}
     {review.verdict === 'block' && <p className="muted">{nextRun?.stage === 'develop'
       ? '已排队返回 develop 修复；后续 Run 显示在下方。'
@@ -149,15 +218,20 @@ export function HumanAction({ taskId, version, record, onDone }: { taskId: strin
     release: '发布', rollback: '回滚' };
   const action = record.request?.action;
   const actionText = action ? actionLabels[action] ?? action
-    : record.request?.proposedMandate?.allowedActions.join('、');
+    : record.request?.kind === 'functional_review' ? '跳过本次功能验收，进入 review'
+      : record.request?.proposedMandate?.allowedActions.join('、');
   return <div className="run-row task-run task-decision">
     <div className="task-run-heading"><strong>{isQuestion ? '问题' : '审批'}</strong>
       <Badge tone="warn">{isQuestion ? '待回答' : '待审批'}</Badge>
       <Chip color="gray" variant="caption">{isQuestion ? 'Agent 提问'
         : record.request?.kind === 'action' ? '动作审批'
-          : record.request?.kind === 'continue' ? '继续验证审批' : '范围变更'}</Chip></div>
-    {record.request?.kind === 'continue' && record.request.reason &&
-      <p className="task-review-summary">策略要求：{record.request.reason}</p>}
+          : record.request?.kind === 'continue' ? '继续验证审批'
+            : record.request?.kind === 'functional_review' ? '功能验证异常审批'
+            : record.request?.kind === 'manual_delivery' ? (record.request.verificationSkipped
+              ? '未验证人工移交审批' : '人工交付审批') : '范围变更'}</Chip></div>
+    {(record.request?.kind === 'continue' || record.request?.kind === 'manual_delivery' ||
+      record.request?.kind === 'functional_review') && record.request.reason &&
+      <p className="task-review-summary">{record.request.reason}</p>}
     {record.prompt && <p className="task-review-summary">{record.prompt}</p>}
     {record.request && <dl className="task-run-meta">
       <div><dt>受审 SHA</dt><dd><code>{record.request.sourceSha}</code></dd></div>
@@ -275,12 +349,32 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
   </div>;
 }
 
-export function TaskDetailPage({ id, actorId, roles }: { id: string; actorId: string; roles: string[] }) {
+export function TaskDetailPage({ id, actorId, roles, stage5WritesEnabled }: {
+  id: string; actorId: string; roles: string[]; stage5WritesEnabled: boolean;
+}) {
   const [detail, setDetail] = useState<Detail>();
   const [error, setError] = useState('');
   const [revision, setRevision] = useState(0);
   const [hostResult, setHostResult] = useState('');
   const [hostBusy, setHostBusy] = useState(false);
+  async function openChange(create: boolean) {
+    if (!detail) return;
+    setHostBusy(true); setHostResult('');
+    const path = `/api/tasks/${encodeURIComponent(id)}/open-change`;
+    const request = { method: 'POST', body: { expectedVersion: detail.task.version } };
+    try {
+      const result = await api<{ kind: 'scope_request' | 'action_request' | 'ready' }>(`${path}/prepare`, request);
+      if (result.kind === 'ready' && create) {
+        const opened = await api<{ kind: 'opened' | 'uncertain'; changeId?: string }>(`${path}/execute`, request);
+        setHostResult(opened.kind === 'opened' ? `已创建 PR/MR ${opened.changeId ?? ''}` : '创建结果待核实，可以再次尝试确认。');
+      } else {
+        setHostResult(result.kind === 'scope_request' ? '已发起创建 PR/MR 的范围审批，请在「待处理」中审批。'
+          : result.kind === 'action_request' ? '已发起创建 PR/MR 审批，请在「待处理」中审批。' : '预检通过，可以创建 PR/MR。');
+      }
+      setRevision(value => value + 1);
+    } catch (cause) { setHostResult(String(cause)); }
+    finally { setHostBusy(false); }
+  }
   async function refreshCodeHost() {
     setHostBusy(true); setHostResult('');
     try {
@@ -327,6 +421,12 @@ export function TaskDetailPage({ id, actorId, roles }: { id: string; actorId: st
   }, [id, revision]);
   const openDecisions = detail?.records.filter(item => item.status === 'open' &&
     ['question', 'approval_request'].includes(item.kind)) ?? [];
+  const handledApprovals = detail?.records.filter(item => item.kind === 'approval_request' &&
+    item.status !== 'open') ?? [];
+  const manualDelivery = detail?.records.filter(item => item.kind === 'approval_request' &&
+    item.request?.kind === 'manual_delivery').at(-1);
+  const manualSourceRun = detail?.runs.find(run => run.stage === 'develop' && run.status === 'succeeded' &&
+    run.commitSha === manualDelivery?.request?.sourceSha);
   const latestReview = detail?.records.filter(item => item.kind === 'review').at(-1);
   const reviewedCi = detail?.records.filter(item => item.kind === 'ci' &&
     item.subjectSha === latestReview?.subjectSha).at(-1);
@@ -342,23 +442,33 @@ export function TaskDetailPage({ id, actorId, roles }: { id: string; actorId: st
     item.request?.action === 'open_pr' && item.request.reviewRecordId === latestReview.id).at(-1);
   const prEffect = latestReview && detail?.records.filter(item => item.kind === 'effect' &&
     item.action === 'open_pr' && item.subjectSha === latestReview.subjectSha).at(-1);
+  const prScopeApproval = latestReview && openDecisions.find(item => item.request?.kind === 'scope_change' &&
+    item.request.sourceSha === latestReview.subjectSha && item.request.proposedMandate?.allowedActions.includes('open_pr'));
+  const manualPrReady = Boolean(detail && latestReview?.verdict === 'pass' && detail.task.state === 'ready_to_merge' &&
+    detail.task.mandate.authority.kind !== 'auto_pr');
+  const canOpenChange = manualPrReady && roles.includes('command') && stage5WritesEnabled &&
+    !prEffect?.receipt?.changeId && prEffect?.status !== 'done' && prEffect?.status !== 'pending' &&
+    prApproval?.status !== 'open';
   const showPrApprovalStage = latestReview?.verdict === 'pass' &&
-    (detail?.task.mandate.authority.kind === 'auto_pr' || prApproval || prEffect || reviewedCi);
+    (manualPrReady || prScopeApproval || detail?.task.mandate.authority.kind === 'auto_pr' || prApproval || prEffect || reviewedCi);
   const showPrDelivery = prApproval?.status === 'approved' || prEffect?.status === 'done';
   const prStageStatus = prEffect?.status === 'done' ? 'PR 已提交'
     : prEffect?.status === 'uncertain' ? '提交结果待核实'
     : prEffect?.status === 'failed' ? '提交失败'
     : prEffect?.status === 'pending' ? '正在提交 PR'
+    : prScopeApproval ? '等待范围审批'
     : prApproval?.status === 'approved' ? '已批准，等待提交'
     : prApproval?.status === 'rejected' ? '已驳回'
     : prApproval?.status === 'invalidated' ? '审批已失效'
     : prApproval?.status === 'open' ? '等待用户审批'
+    : manualPrReady ? '尚未发起审批'
     : detail?.task.state === 'waiting_human' ? '需要人工处理' : '准备审批中';
   const pendingMergeReceipt = detail?.records.some(item => item.kind === 'effect' && item.action === 'merge' &&
     ['pending', 'uncertain'].includes(item.status ?? ''));
   return <div className="stack detail-page"><div className="task-back-actions"><a className="back-link" href="#/tasks">← 返回任务列表</a>
     {detail && roles.includes('command') && <Commands detail={detail} actorId={actorId} onDone={() => setRevision(value => value + 1)} />}</div>
     {error && <p role="alert" className="error">{error}</p>}
+    {hostResult && <p role="status">{hostResult}</p>}
     {!detail && !error && <p>正在加载…</p>}
     {detail && <><header className="detail-heading"><span className="eyebrow">任务 / {detail.task.id}</span>
       <h1 title={detail.task.title}>{detail.task.title}</h1><div className="detail-meta"><Badge>{detail.task.state}</Badge>
@@ -386,6 +496,27 @@ export function TaskDetailPage({ id, actorId, roles }: { id: string; actorId: st
             ? <HumanAction key={item.id} taskId={id} version={detail.task.version} record={item} onDone={() => setRevision(value => value + 1)} />
             : <p key={item.id}>{item.prompt ?? item.request?.kind} · 当前凭据无决定权限</p>)
         : <p className="muted">暂无待决定事项</p>}</Card>
+      {handledApprovals.length > 0 && <Card><h2>已处理审批</h2>
+        {handledApprovals.map(item => <div className="run-row task-run" key={item.id}>
+          <div className="task-run-heading"><strong>{item.request?.kind === 'functional_review'
+            ? '功能验证异常：是否进入 review' : item.request?.kind ?? '审批请求'}</strong>
+            <Badge>{item.status === 'approved' ? '已批准' : item.status === 'rejected' ? '已驳回' : '已失效'}</Badge></div>
+          {item.request?.reason && <p className="task-review-summary">{item.request.reason}</p>}
+          {item.request?.sourceSha && <p className="muted">固定 SHA：<code>{item.request.sourceSha}</code></p>}
+        </div>)}</Card>}
+      {manualDelivery?.status === 'approved' && <Card><h2>人工交付</h2>
+        <p>{manualDelivery.request?.verificationSkipped
+          ? '此提交未执行配置校验。请人工复核后推送并创建 PR/MR；平台不会自动推送。'
+          : '本地构建与审查已通过。请人工推送并创建 PR/MR；平台不会自动推送。'}</p>
+        <p>待交付 SHA：<code>{manualDelivery.request?.sourceSha}</code></p>
+        {manualSourceRun && <p>提交所在工作区（相对 agent-platform 根目录）：
+          <code>.runtime/clones/{manualSourceRun.id}</code>。请先核对该目录的 HEAD 与上述 SHA，再推送到
+          <code>agent-platform/{manualSourceRun.id}</code> 分支并在代码托管平台创建 PR/MR。</p>}
+        {manualSourceRun && <pre><code>{`git -C .runtime/clones/${manualSourceRun.id} rev-parse HEAD\ngit -C .runtime/clones/${manualSourceRun.id} push origin ${manualDelivery.request?.sourceSha}:refs/heads/agent-platform/${manualSourceRun.id}`}</code></pre>}
+        {!manualSourceRun && <p role="alert">开发工作区未找到，请从执行记录核对提交来源后再交付。</p>}
+        <p className="muted">工作区会按保留策略清理；请及时保存需要交付的提交。</p>
+        <p className="muted">完成代码托管平台操作后，可用任务操作中的“标记完成”记录处理结果。</p>
+      </Card>}
       {pendingReview && pendingFindings.length > 0 && <Card><h2>审查意见待处理</h2>
         {pendingFindings.map(index => {
           const published = detail.records.find(record => record.kind === 'review_finding_publication' &&
@@ -413,6 +544,7 @@ export function TaskDetailPage({ id, actorId, roles }: { id: string; actorId: st
         <TabPanel id="execution" shouldForceMount className="stack task-tab-panel">
       <Card><h2>运行与会话</h2>{detail.runs.length ? detail.runs.map((run, index) => {
         const review = run.stage === 'review' ? detail.records.find(item => item.kind === 'review' && item.runId === run.id) : undefined;
+        const development = run.stage === 'develop' ? detail.records.find(item => item.kind === 'development' && item.runId === run.id) : undefined;
         const failureReason = ['succeeded', 'completed'].includes(run.status) ? undefined : run.reason;
         return <div className="run-row task-run" key={run.id}>
         <div className="task-run-heading"><strong>{run.stage}</strong><Badge>{run.status}</Badge>
@@ -425,12 +557,19 @@ export function TaskDetailPage({ id, actorId, roles }: { id: string; actorId: st
           {run.commitSha && <div><dt>提交 SHA</dt><dd><code>{run.commitSha}</code></dd></div>}
           {failureReason && <div className="task-run-reason"><dt>原因</dt><dd title={failureReason}><code>{failureReason}</code></dd></div>}
         </dl>}
-        {review && <ReviewStageDetails review={review} records={detail.records} nextRun={detail.runs[index + 1]} />}
+        {development?.diff?.available && !development.diff.truncated &&
+          (roles.includes('command') || roles.includes('approve')) && <DevelopmentDiff record={development} />}
+        {review && <ReviewStageDetails review={review} records={detail.records} nextRun={detail.runs[index + 1]}
+          canInspect={roles.includes('command') || roles.includes('approve')} />}
       </div>; }) : <p className="muted">尚无运行</p>}
         {showPrApprovalStage && <div className="run-row task-run"><div className="task-run-heading task-pr-heading">
           <strong>提交 PR 审批</strong><Chip color={prEffect?.status === 'done' ? 'lime'
             : prApproval?.status === 'rejected' || prEffect?.status === 'failed' ? 'rose' : 'yellow'}
             variant="caption">{prStageStatus}</Chip>
+          {canOpenChange && <Button disabled={hostBusy}
+            onClick={() => void openChange(prApproval?.status === 'approved')}>
+            {prApproval?.status === 'approved' ? '创建 PR/MR' : '发起 PR/MR 审批'}
+          </Button>}
           {showPrDelivery && roles.includes('command') && prEffect?.status === 'done' &&
             <Button variant="secondary" size="xs" iconOnly leadingIcon={RiRefreshLine} className="task-quiet-icon-button"
               aria-label={hostBusy ? '正在刷新平台检查' : '刷新平台检查'} title="刷新平台检查"
@@ -448,7 +587,7 @@ export function TaskDetailPage({ id, actorId, roles }: { id: string; actorId: st
             {prApproval?.request?.targetSha && <div><dt>目标 SHA</dt><dd><code>{prApproval.request.targetSha}</code></dd></div>}
             {prEffect?.receipt?.changeId && <div><dt>PR/MR</dt><dd><code>{prEffect.receipt.changeId}</code></dd></div>}
           </dl>
-          {prApproval?.status === 'open' && <p className="muted">请在“待处理”或“通知与审批”中决定。</p>}
+          {(prScopeApproval || prApproval?.status === 'open') && <p className="muted">请在“待处理”或“通知与审批”中决定。</p>}
           {prApproval?.status === 'rejected' && <p className="muted">审批已驳回，任务等待人工处理，不会自动返回 develop。</p>}
           </details>
           {showPrDelivery && <details className="task-stage-details task-pr-delivery"><summary>CI 与合并</summary>
@@ -458,24 +597,30 @@ export function TaskDetailPage({ id, actorId, roles }: { id: string; actorId: st
               <dl className="task-run-meta"><div><dt>源 SHA</dt><dd><code>{reviewedCi.subjectSha}</code></dd></div>
                 <div><dt>目标 SHA</dt><dd><code>{reviewedCi.targetSha}</code></dd></div>
                 <div><dt>平台状态</dt><dd>{reviewedCi.gate}</dd></div>
-                <div><dt>必需检查</dt><dd>{reviewedCi.requiredChecks?.join('、') || '未确认'}</dd></div></dl>
+                <div><dt>必需检查</dt><dd>{reviewedCi.requiredChecks?.join('、') || '未配置（跳过）'}</dd></div></dl>
               {reviewedCi.checks?.length ? <div className="task-review-checks">{reviewedCi.checks.map((check, index) =>
                 <div key={index}><strong>{check.name}</strong><Badge>{check.status}</Badge><span>{check.conclusion}</span>
                   <code>{check.commitSha}</code></div>)}</div> : null}
             </div> : <p className="muted">尚无平台检查或合并回执</p>}
             {mergedSha && <dl className="task-run-meta"><div className="task-review-wide"><dt>已核实合并提交</dt>
               <dd><code>{mergedSha}</code></dd></div></dl>}
-            {hostResult && <p role="status">{hostResult}</p>}
           </details>}
         </div>}</Card>
       <Card><details className="task-evidence-details"><summary><strong>开发证据</strong>
         <span className="task-evidence-expand">展开全部</span><span className="task-evidence-collapse">收起全部</span></summary>
-        {detail.records.some(item => item.kind === 'development' || item.kind === 'check')
-        ? detail.records.filter(item => item.kind === 'development' || item.kind === 'check').map(item =>
-          <div className="run-row task-evidence-item" key={item.id}>{item.kind === 'development' ? <>
+        {detail.records.some(item => ['development', 'check', 'group_verification'].includes(item.kind))
+        ? detail.records.filter(item => ['development', 'check', 'group_verification'].includes(item.kind)).map(item =>
+          <div className="run-row task-evidence-item" key={item.id}>{item.kind === 'group_verification' ? <>
+            <strong>项目组构建输入 · {item.projectKey}</strong>
+            <p>受审 SHA <code>{item.subjectSha}</code> · 构建文件 <code>{item.buildFile}</code> · SHA-256 <code>{item.buildFileSha256}</code>
+              {item.buildFileEvidence?.available && <> · 已保存构建文件快照</>}</p>
+            {item.changedModules?.length && <p>测试模块：{item.changedModules.map(module => <code key={module}>{module} </code>)}</p>}
+            {item.inputs?.map(input => <p key={input.repoKey}><code>{input.repoKey}</code>（{input.directory}）<code>{input.sha}</code></p>)}
+          </> : item.kind === 'development' ? <>
             <strong title={`提交 ${item.commitSha}`}>提交 {item.commitSha}</strong><p className="muted">基线 {item.baseSha} · 提交后复核：{item.postCheckVerified ? '通过' : item.postCheckError ?? '未通过'}</p>
             <p>Diff 记录 {item.diff?.recordId} · {item.diff?.sha256 ? `SHA-256 ${item.diff.sha256} · ${item.diff.bytes} 字节`
-              : item.diff?.truncated ? '文件超过预览上限' : '文件暂不可读取'}</p></> : <>
+              : item.diff?.truncated ? '文件超过预览上限' : '文件暂不可读取'}</p>
+          </> : <>
             <strong title={`检查 ${item.result} · ${[item.command, ...(item.args ?? [])].filter(Boolean).join(' ')}`}>
               检查 {item.result} · {[item.command, ...(item.args ?? [])].filter(Boolean).join(' ')}</strong>
             <p className="muted">受审 SHA {item.subjectSha} · 退出码 {item.exitCode ?? '未知'} · 终止确认：{item.terminationConfirmed ? '是' : '否'}</p>

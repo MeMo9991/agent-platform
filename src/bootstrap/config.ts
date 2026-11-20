@@ -1,7 +1,10 @@
 import { z } from 'zod';
-import { isAbsolute } from 'node:path';
+import { statSync } from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
 import { id } from '../shared/model.js';
 import { repositoryConfig, type CodeHost } from '../repository-ci/model.js';
+import { groupVerifiers } from '../agent/worker/group-verifiers.js';
+import { readCodeHostGroupToken, readCodeHostToken } from './code-host-credentials.js';
 import { reviewConfig } from '../authorization/policy/config.js';
 import type { ReleasePipeline } from '../repository-ci/model.js';
 import type { AgentRunner } from '../agent/worker/model.js';
@@ -15,11 +18,19 @@ export const projectGroup = z.object({ projectKey: id,
   repositories: z.array(repositoryConfig).default([]),
   repoKeys: z.array(id).optional(), // legacy configuration is accepted during migration
   searchRoot: id.refine(isAbsolute, 'Project search root must be absolute').optional(),
-  defaultRepoKey: id.optional() }).strict()
+  defaultRepoKey: id.optional(), verification: z.boolean().default(false),
+  functionalVerificationUrl: z.string().url().refine(value => {
+    const url = new URL(value);
+    return url.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(url.hostname) &&
+      !url.username && !url.password && !url.search && !url.hash;
+  }, 'Functional verification must use a local HTTP URL without credentials').optional() }).strict()
   .refine(value => !value.repoKeys || !value.repositories.length, 'repoKeys cannot accompany nested repositories')
   .transform(value => ({ ...value,
     repoKeys: value.repositories.length ? value.repositories.map(repo => repo.repoKey) : value.repoKeys ?? [] }))
   .superRefine((value, context) => {
+    if (value.functionalVerificationUrl && !value.verification)
+      context.addIssue({ code: 'custom', path: ['verification'],
+        message: 'Functional verification requires project group verification' });
     if (new Set(value.repoKeys).size !== value.repoKeys.length)
       context.addIssue({ code: 'custom', path: ['repoKeys'],
         message: `Project group ${value.projectKey} has duplicate repository keys` });
@@ -66,8 +77,34 @@ export const platformConfig = z.object({ repositories: z.array(repositoryConfig)
         value.releasePipelines.some(item => !repositories.some(repo => repo.repoKey === item.repoKey)))
       context.addIssue({ code: 'custom', message: 'Duplicate or unknown adapter registration' });
   }).transform(value => ({ ...value,
-    repositories: [...value.repositories, ...value.projectGroups.flatMap(group => group.repositories)] }));
+    projectGroups: value.projectGroups.map(group => ({ ...group,
+      repositories: group.repositories.map(repo => ({ ...repo, credentialGroupKey: group.projectKey })) })),
+    repositories: [...value.repositories, ...value.projectGroups.flatMap(group => group.repositories.map(repo =>
+      ({ ...repo, credentialGroupKey: group.projectKey })))] }));
 export type PlatformConfig = z.infer<typeof platformConfig>;
+export function configuredGroupVerification(group: PlatformConfig['projectGroups'][number]): boolean {
+  if (!group.verification || !group.repositories.length) return false;
+  const verifier = groupVerifiers[group.projectKey];
+  if (!verifier || (verifier.buildFile && !group.searchRoot)) return false;
+  try {
+    return (!verifier.buildFile || statSync(resolve(group.searchRoot!, verifier.buildFile)).isFile()) &&
+      group.repositories.every(repo => repo.localPath && statSync(resolve(repo.localPath)).isDirectory());
+  } catch { return false; }
+}
+export function configuredLocalVerification(repo: PlatformConfig['repositories'][number],
+  agentVerifyEnabled: boolean): boolean {
+  return Boolean(repo.localPath && repo.localChecks.length &&
+    (repo.verify?.mode === 'platform' || agentVerifyEnabled));
+}
+export function stage5PreflightRepositories(config: PlatformConfig,
+  environment: NodeJS.ProcessEnv = process.env): PlatformConfig['repositories'] {
+  return config.repositories.filter(repo => {
+    const name = /^env:([A-Za-z_][A-Za-z0-9_]*)$/.exec(repo.credentialsRef)?.[1];
+    return Boolean(('credentialGroupKey' in repo && typeof repo.credentialGroupKey === 'string'
+      ? readCodeHostGroupToken(repo.credentialGroupKey) : undefined) ??
+      readCodeHostToken(repo.repoKey) ?? (name && environment[name]));
+  });
+}
 export function selectCodeHost(repoKey: string, config: PlatformConfig, hosts: Readonly<Record<string, CodeHost | undefined>>): CodeHost {
   const repo = config.repositories.find(item => item.repoKey === repoKey);
   if (!repo) throw new Error(`Unknown repository ${repoKey}`);

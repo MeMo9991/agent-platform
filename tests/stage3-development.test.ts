@@ -46,6 +46,12 @@ test('development Git proof checks repository, ancestor, clean HEAD and nonempty
     assert.equal(proof.commitSha, git(workspace.path, 'rev-parse', 'HEAD'));
     assert.match(readFileSync(proof.diffRef, 'utf8'), /after/);
     await manager.verifyAfterChecks!(execution, proof.commitSha);
+    writeFileSync(join(workspace.path, 'file.txt'), 'final\n');
+    git(workspace.path, 'add', '.'); git(workspace.path, 'commit', '-qm', 'follow-up');
+    const followUp = await manager.verifyDevelopment!({ ...execution, commitSha: proof.commitSha }, workspace.baseSha);
+    assert.match(readFileSync(followUp.diffRef, 'utf8'), /-after/);
+    assert.match(readFileSync(followUp.cumulativeDiffRef!, 'utf8'), /-before/);
+    assert.match(readFileSync(followUp.cumulativeDiffRef!, 'utf8'), /\+final/);
     writeFileSync(join(workspace.path, 'file.txt'), 'uncommitted\n');
     await assert.rejects(manager.verifyDevelopment!(execution), /uncommitted/);
     await assert.rejects(manager.verifyAfterChecks!(execution, proof.commitSha), /changed during local checks/);
