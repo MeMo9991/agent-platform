@@ -80,6 +80,11 @@ export function createGitLabCodeHost(repo: Repository, fetcher: typeof fetch = f
         throw new Error('Created GitLab merge request does not match the requested SHA and target');
       return ref(merge, input.targetSha);
     },
+    async approveChange(change) {
+      if (change.provider !== 'gitlab' || change.repoKey !== repo.repoKey || !/^\d+$/.test(change.id))
+        throw new Error('GitLab change belongs to another repository');
+      await request(`/merge_requests/${change.id}/approve`, 'POST');
+    },
     async readChange(change) {
       if (change.provider !== 'gitlab' || change.repoKey !== repo.repoKey || !/^\d+$/.test(change.id))
         throw new Error('GitLab change belongs to another repository');
