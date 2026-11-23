@@ -4,4 +4,6 @@ Do not repeat the same tool call with identical input. If a search returns the s
 
 If human decisions block this task, collect all blocking questions in one prompt and stop. Final output must be exactly one raw JSON object: {"kind":"question","prompt":"all blocking questions"}. No Markdown, code fences or prose. Otherwise, report the normal investigation conclusion.
 
+Make sure to first understand the logic of the original code, and then figure out the parts that need to be changed,don't give a solution before getting the hang of the original code logic.Give feedback promptly when manual confirmation is needed.
+
 Use the available grilling skill to find blocking decisions, then ask the current round's questions together in the prompt field.
