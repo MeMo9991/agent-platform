@@ -25,7 +25,6 @@ npm run selfcheck
 服务入口是 `npm start`（先运行 `npm run build`）。启动前需设置 `AGENT_PLATFORM_AUTH_PROVIDER` 为受信 JavaScript 模块路径，该模块导出异步 `authorizationHeaders()`，返回当前请求所需的请求头；仓库尚未实现凭据获取与刷新。可用 `AGENT_PLATFORM_CONFIG`、`AGENT_PLATFORM_SCHEDULES`、`AGENT_PLATFORM_DATABASE` 覆盖三个默认路径。默认数据库位于 `.runtime/state/agent-platform.sqlite3`；自定义数据库所在目录必须归当前服务账号所有，且权限不能开放给其他账号。旧位置的数据库不会自动迁移，已有数据应在停服后备份并迁入私有目录。默认缺陷任务启动即扫描，此后每 300 秒扫描一次；停止时等待当前扫描完成并关闭数据库。每轮从第一页重扫，页码在并发增删时可能移动。真实接口演练待鉴权方案提供后进行。
 
 ### 本地 Qoder / 阶段五演练启动
-cat ~/.config/agent-platform/local-api.token | pbcopy
 先停止正在运行的服务，在同一个终端执行以下命令。令牌只在终端中输入，不写入仓库或命令历史。`.runtime/preview/schedules.json` 关闭 DevOps 轮询，因此这里的空鉴权模块只用于本地演练；真实 DevOps 来源须换成受信鉴权模块。
 
 ```zsh
@@ -61,7 +60,7 @@ fi
 
 在已导出 `QODERCN_PERSONAL_ACCESS_TOKEN` 的终端运行 `node --import tsx scripts/rehearse-qoder-write.ts`，可在 `.runtime/write-rehearsal/` 的一次性本地仓库演练真实 Qoder 修改、提交、diff 与隔离检查；脚本不访问 GitHub 远端，也不改动当前工作树。develop 的 Qoder 自身工具确认被跳过，工具仍限于 Read/Grep/Glob/Edit/Write/Bash，文件隔离由 macOS 沙箱执行。2026-11-08 的真实本地演练通过：基线 `93c3d56799d112a9cd36274108972fbcdec1782f`，提交 `f17ac9dc544af3db1afa73bca6da19da8cdcb879`，仅改 `probe.txt`，隔离 Git 检查通过且克隆干净；证据在 `.runtime/write-rehearsal/probe-6ajzqV/`。正式服务可在保留外部写操作关闭的同时设置 `AGENT_PLATFORM_QODER_WRITE_ENABLED=1` 与 `AGENT_PLATFORM_STAGE5_WORKER_ENABLED=1`；edit 审批会显示并要求 `maxAutoRisk=high`。完整 Task 的 develop → verify → review 链仍需单独演练。
 
-交互 API 默认只监听 `127.0.0.1:8765`，凭据首次启动时随机生成于 `~/.config/agent-platform/local-api.token`，文件要求仅当前用户可读。`GET /inbox` 查看待人事件、问题和任务；`GET /tasks/:id`、`GET /events/:id` 查看详情；`POST /routes`、`POST /answers`、`POST /approvals` 提交对应决定。`POST /tasks/reopen` 需 `reopen` 角色，提交旧 Task ID、关联调查 Task ID、调查 Run 与成功报告 ID、复现判定、受审 SHA、预期 iteration/更新时间、幂等键和理由；成功后旧 Task 进入新一轮只读调查，关联调查 Task 记移交并停止派活。所有请求均需 `Authorization: Bearer <凭据>`；请求体不能指定 actor 或角色。上述设置可在 `config/platform.json` 的 `interaction` 中配置。
+交互 API 默认只监听 `127.0.0.1:8765`，凭据首次启动时随机生成于 `~/.config/agent-platform/local-api.token`，文件要求仅当前用户可读。打开本机看板及其 `/api/*` 请求无需输入凭据；看板写操作仍按服务端配置的角色执行，浏览器跨来源请求会被拒绝。同机能访问本机端口的进程也能操作看板。独立交互端点仍需 `Authorization: Bearer <凭据>`：`GET /inbox` 查看待人事件、问题和任务；`GET /tasks/:id`、`GET /events/:id` 查看详情；`POST /routes`、`POST /answers`、`POST /approvals` 提交对应决定。`POST /tasks/reopen` 需 `reopen` 角色，提交旧 Task ID、关联调查 Task ID、调查 Run 与成功报告 ID、复现判定、受审 SHA、预期 iteration/更新时间、幂等键和理由；成功后旧 Task 进入新一轮只读调查，关联调查 Task 记移交并停止派活。请求体不能指定 actor 或角色。上述设置可在 `config/platform.json` 的 `interaction` 中配置。
 
 默认 DevOps 项目组未配置可用仓库，事件会进入人工复核。当前配置已启用 Qoder；四份阶段 Skill 已在 Git HEAD 中。每个 Run 使用独立的临时工作区（investigate 只做一次 `git clone`，后续阶段使用轻量副本），代码与 `.git` 都在该 Run 的目录内；复用与验证时核对克隆身份、origin 和提交。SkillLoader 只读取指定 Git 提交中的非空 Skill。本机 Qoder 1.1.83 曾验证最小 JSON 调用、指定提交 Skill 注入、图片附件，以及在生成的只读沙箱配置下由 `AgentRunner` 完成一次直接调查；原生 `--resume` 仅在旧克隆内成功，跨独立克隆找不到旧 Session。Runner 从流式输出保存原生 Session ID，只有首条助手输出或成功的最终结果才确认初始输入；初始化事件不能充当接收回执，提前退出则暂停待人核对。真实只读隔离边界已接入启动组装；浏览器登录凭据曾在服务端 `auth.getUserInfo` 返回 401；随后 QoderCN PAT 在终端直连时成功，但隔离 Run 因屏蔽用户设置中的 VPC 实例名，错误地向公共认证主机交换令牌并返回 400。现已在启动时只提取并校验 `vpcInstanceName`，通过显式 `--settings` 传给隔离 CLI，仍不加载用户插件和 Hook；2026-11-08 重启后的真实只读 investigate Run 已成功：PAT 交换与用户信息请求均在企业 VPC 主机返回 200，结果含仓库名，进程终止已确认，固定 SHA 工作区干净。阶段五 verify/review 及外部写演练仍须按结构化记录核验。可靠用量、生产写入隔离及完整 develop 结果仍未验证。本机暂不要求专用 OS 账号。具体阶段三证据见 `阶段三-Qoder验证记录.md`。
 

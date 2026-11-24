@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Diff, Hunk, parseDiff } from 'react-diff-view';
 import 'react-diff-view/style/index.css';
-import { RiCheckLine, RiCloseLine, RiEditLine, RiFileCopyLine, RiPauseLine, RiPlayLine, RiRefreshLine, RiRestartLine, RiUserLine } from '@remixicon/react';
+import { RiCheckLine, RiCloseLine, RiEditLine, RiFileCopyLine, RiPauseLine, RiPlayLine, RiRefreshLine, RiRestartLine } from '@remixicon/react';
 import { api } from '../app/api';
 import { Badge, Button, Card } from '../components/ui';
 import { Chip } from '@/components/base/badges/chip';
@@ -255,19 +255,16 @@ export function HumanAction({ taskId, version, record, onDone }: { taskId: strin
 
 function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string; onDone: () => void }) {
   const [expanded, setExpanded] = useState(false);
-  const dialog = useRef<HTMLDialogElement>(null);
-  const [split, setSplit] = useState('');
   const [error, setError] = useState('');
   const [receipt, setReceipt] = useState('');
   const [busy, setBusy] = useState(false);
   const commandKeys = useRef<Record<string, string>>({});
-  const [splitKey, setSplitKey] = useState(() => crypto.randomUUID());
   const [takeoverSummary, setTakeoverSummary] = useState('');
   const [takeoverDisposition, setTakeoverDisposition] = useState<'resume' | 'cancel'>('resume');
   const [codeChange, setCodeChange] = useState<'none' | 'committed'>('none');
   const [commitSha, setCommitSha] = useState('');
   const [takeoverKey, setTakeoverKey] = useState(() => crypto.randomUUID());
-  async function command(kind: 'pause' | 'resume' | 'retry' | 'cancel' | 'takeover' | 'confirm_termination' | 'complete', reason?: string) {
+  async function command(kind: 'pause' | 'resume' | 'retry' | 'cancel' | 'confirm_termination' | 'complete', reason?: string) {
     setError(''); setReceipt(''); setBusy(true);
     try {
       const key = commandKeys.current[kind] ??= crypto.randomUUID();
@@ -276,15 +273,6 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
           ...(reason ? { reason } : {}) } });
       delete commandKeys.current[kind];
       setReceipt(`命令已记录，任务版本 ${result.version}`); onDone();
-    } catch (cause) { setError(String(cause)); }
-    finally { setBusy(false); }
-  }
-  async function doSplit(event: FormEvent) {
-    event.preventDefault(); setError(''); setBusy(true);
-    try {
-      const result = await api<{ eventId: string }>(`/api/tasks/${encodeURIComponent(detail.task.id)}/split`,
-        { method: 'POST', body: { description: split, expectedVersion: detail.task.version, idempotencyKey: splitKey } });
-      setReceipt(`拆分事件已受理：${result.eventId}`); setSplit(''); setSplitKey(crypto.randomUUID()); dialog.current?.close(); onDone();
     } catch (cause) { setError(String(cause)); }
     finally { setBusy(false); }
   }
@@ -312,16 +300,15 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
       { kind: 'retry', label: '重试', icon: RiRestartLine },
       { kind: 'cancel', label: '取消', icon: RiCloseLine },
       { kind: 'complete', label: '标记完成', icon: RiCheckLine },
-      { kind: 'takeover', label: '人工接管', icon: RiUserLine },
     ] as const).map(({ kind, label, icon }) =>
       <Button key={kind} variant="secondary" size="xs" leadingIcon={icon}
-        title={(kind === 'pause' || kind === 'takeover') && !canInterrupt ? '当前状态或待处理请求不允许中断任务' : undefined}
-        disabled={busy || !!detail.task.owner || ((kind === 'pause' || kind === 'takeover') && !canInterrupt)}
+        title={kind === 'pause' && !canInterrupt ? '当前状态或待处理请求不允许中断任务' : undefined}
+        disabled={busy || !!detail.task.owner || (kind === 'pause' && !canInterrupt)}
         onClick={() => void command(kind)}>{label}</Button>)}
       {detail.runs.some(run => run.status === 'paused' && run.processTerminationUnconfirmed) &&
         <Button variant="secondary" size="xs" disabled={busy || !!detail.task.owner}
           onClick={() => void command('confirm_termination')}>确认进程终止</Button>}
-      <Button variant="secondary" size="xs" disabled={busy} onClick={() => dialog.current?.showModal()}>拆分任务</Button></div>}
+      </div>}
     {expanded && detail.task.state === 'paused' && detail.task.owner === actorId && <form onSubmit={finishTakeover} className="stack task-takeover-inline">
       <h3>提交接管结果</h3><label>处理摘要<textarea value={takeoverSummary}
         onChange={event => { setTakeoverSummary(event.target.value); setTakeoverKey(crypto.randomUUID()); }} required maxLength={2000} /></label>
@@ -338,14 +325,6 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
     {expanded && detail.task.owner && detail.task.owner !== actorId && <p className="muted">由 {detail.task.owner} 接管中</p>}
     {expanded && error && <p role="alert" className="error">{error.includes('version') ? '任务已更新，请刷新后重新决定' : error}</p>}
     {expanded && receipt && <p role="status">{receipt}</p>}
-    <dialog ref={dialog} className="task-split-dialog" aria-labelledby="task-split-title">
-      <h2 id="task-split-title">拆分任务</h2><form onSubmit={doSplit} className="stack">
-        <label>任务描述<textarea value={split} onChange={event => { setSplit(event.target.value); setSplitKey(crypto.randomUUID()); }}
-          required placeholder="描述独立问题或新增范围" /></label>
-        <div className="actions"><Button type="submit" variant="secondary" disabled={busy}>提交拆分事件</Button>
-          <Button type="button" variant="secondary" onClick={() => dialog.current?.close()}>取消</Button></div>
-      </form>{error && <p role="alert" className="error">{error}</p>}
-    </dialog>
   </div>;
 }
 
@@ -494,7 +473,7 @@ export function TaskDetailPage({ id, actorId, roles, stage5WritesEnabled }: {
         ? openDecisions.map(item =>
           (item.kind === 'question' ? roles.includes('answer') : roles.includes('approve'))
             ? <HumanAction key={item.id} taskId={id} version={detail.task.version} record={item} onDone={() => setRevision(value => value + 1)} />
-            : <p key={item.id}>{item.prompt ?? item.request?.kind} · 当前凭据无决定权限</p>)
+            : <p key={item.id}>{item.prompt ?? item.request?.kind} · 当前操作者无决定权限</p>)
         : <p className="muted">暂无待决定事项</p>}</Card>
       {handledApprovals.length > 0 && <Card><h2>已处理审批</h2>
         {handledApprovals.map(item => <div className="run-row task-run" key={item.id}>

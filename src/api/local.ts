@@ -59,13 +59,20 @@ export function startLocalApi(store: SqliteStore, coordinator: KernelCoordinator
         response.end(bytes); return;
       } catch { json(response, 404, { error: 'Dashboard is not built' }); return; }
     }
+    if (options.dashboard && publicPath.startsWith('/api/')) {
+      const host = request.headers.host;
+      if (!host || !/^(127\.0\.0\.1|localhost):\d+$/.test(host) ||
+          (request.headers.origin && request.headers.origin !== `http://${host}`)) {
+        json(response, 403, { error: 'Invalid dashboard origin' }); return;
+      }
+      if (await handleDashboard(request, response, store, coordinator, options.dashboard, options.roles)) return;
+    }
     const auth = request.headers.authorization;
     const provided = auth?.startsWith('Bearer ') ? auth.slice(7) : '';
     const digest = createHash('sha256').update(provided).digest();
     if (!provided || !timingSafeEqual(digest, expected)) { json(response, 401, { error: 'Unauthorized' }); return; }
     const path = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
     try {
-      if (options.dashboard && await handleDashboard(request, response, store, coordinator, options.dashboard, options.roles)) return;
       if (request.method === 'GET' && path === '/inbox') {
         const events = store.db.prepare("SELECT id,status FROM source_event WHERE status='needs_human' ORDER BY received_at,id").all();
         const requests = store.db.prepare("SELECT id,task_id AS taskId,kind,status FROM task_record WHERE kind IN ('question','approval_request') AND status='open' ORDER BY at,id").all();

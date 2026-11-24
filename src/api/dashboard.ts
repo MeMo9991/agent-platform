@@ -674,6 +674,7 @@ export async function handleDashboard(request: IncomingMessage, response: Server
       if (!roles.includes('command')) throw new Error('Command role required');
       const input = taskCommand.parse({ ...(await readBody(request, 65_536) as Record<string, unknown>),
         taskId: decodeURIComponent(commandMatch[1]!) });
+      if (input.kind === 'takeover') { send(response, 410, { error: 'Human takeover is no longer available' }); return true; }
       if (input.kind === 'split' || input.kind === 'takeover_result') throw new Error('Use the dedicated command endpoint');
       const result = await executeTaskCommand(store, options.runners ?? {}, options.actorId,
         input);
@@ -690,34 +691,7 @@ export async function handleDashboard(request: IncomingMessage, response: Server
     }
     const splitMatch = /^\/api\/tasks\/([^/]+)\/split$/.exec(path);
     if (request.method === 'POST' && splitMatch) {
-      if (!roles.includes('command')) throw new Error('Command role required');
-      const input = taskCommand.parse({ ...(await readBody(request, 65_536) as Record<string, unknown>),
-        kind: 'split', taskId: decodeURIComponent(splitMatch[1]!) });
-      if (input.kind !== 'split') throw new Error('Invalid split command');
-      const taskId = decodeURIComponent(splitMatch[1]!);
-      const parent = store.getTask(taskId);
-      if (!parent) throw new Error('Task not found');
-      if (!options.repoKeys.includes(parent.repoKey)) throw new Error('Repository is not authorized');
-      const sourceId = `manual:${parent.repoKey}`;
-      const digest = createHash('sha256').update(JSON.stringify([taskId, input.description])).digest('hex');
-      const existing = store.db.prepare('SELECT id FROM source_event WHERE source_id=? AND external_id=? AND revision=?')
-        .get(sourceId, `${options.actorId}:split:${input.idempotencyKey}`, '1');
-      if (existing) {
-        const eventId = String(existing.id);
-        if (store.get(eventId)?.metaData.contentDigest !== digest) throw new Error('Idempotency key belongs to another split');
-        send(response, 202, { eventId, duplicate: true, status: store.get(eventId)?.status }); return true;
-      }
-      checkVersion(store, taskId, input.expectedVersion);
-      const result = await createEventIngress(store, { [sourceId]: ['contentDigest'] }).accept({ sourceId,
-        externalId: `${options.actorId}:split:${input.idempotencyKey}`, revision: '1', kind: 'manual_task',
-        title: input.description.split('\n')[0]!.slice(0, 200), body: input.description,
-        repoKey: parent.repoKey, attachments: [], metaData: { contentDigest: digest } });
-      if (result.duplicate && store.get(result.eventId)?.metaData.contentDigest !== digest)
-        throw new Error('Idempotency key belongs to another split');
-      if (!result.duplicate) store.db.prepare("UPDATE source_event SET routing_data=? WHERE id=? AND status='pending' AND routing_data IS NULL")
-        .run(JSON.stringify({ excludedTaskId: taskId }), result.eventId);
-      send(response, 202, { eventId: result.eventId, duplicate: result.duplicate, status: store.get(result.eventId)?.status });
-      return true;
+      send(response, 410, { error: 'Task splitting is no longer available' }); return true;
     }
     send(response, 404, { error: 'Unknown endpoint' }); return true;
   } catch (error) {

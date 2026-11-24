@@ -36,9 +36,10 @@ test('task detail explains a stored verify check failure', async () => {
     const coordinator = createKernelCoordinator(store, {}, 'p1', 'manual', 'qoder', ['repo']);
     server = await startLocalApi(store, coordinator, { credentialFile: join(directory, 'token'),
       actorId: 'owner', roles: ['command'], dashboard: { actorId: 'owner', repoKeys: ['repo'] } });
-    const token = readFileSync(join(directory, 'token'), 'utf8');
-    const response = await fetch(`http://127.0.0.1:${server.port}/api/tasks/task`,
-      { headers: { authorization: `Bearer ${token}` } });
+    assert.equal((await fetch(`http://127.0.0.1:${server.port}/inbox`)).status, 401);
+    assert.equal((await fetch(`http://127.0.0.1:${server.port}/api/config`,
+      { headers: { origin: `http://127.0.0.1:${server.port}` } })).status, 200);
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/tasks/task`);
     assert.equal(response.status, 200);
     assert.equal((await response.json()).runs[0].reason,
       'Fixed-SHA check mvn failed (exit 1); inspect its check log');
@@ -47,15 +48,19 @@ test('task detail explains a stored verify check failure', async () => {
       .run('old-command', 'owner', 'task', 'retry', 'old', 1);
     store.db.prepare(`INSERT INTO subscription (task_id,source_id,target_kind,target_key,mode)
       VALUES (?,?,?,?,?)`).run('task', 'manual:repo', 'thread', 'thread', 'handle');
+    const denied = await fetch(`http://127.0.0.1:${server.port}/api/tasks/task`,
+      { method: 'DELETE', headers: { origin: 'https://example.com' } });
+    assert.equal(denied.status, 403);
+    assert.ok(store.getTask('task'));
     const deleted = await fetch(`http://127.0.0.1:${server.port}/api/tasks/task`,
-      { method: 'DELETE', headers: { authorization: `Bearer ${token}` } });
+      { method: 'DELETE' });
     assert.equal(deleted.status, 200);
     assert.equal(store.db.prepare('SELECT count(*) AS n FROM dashboard_command WHERE task_id=?').get('task')?.n, 0);
     assert.equal(store.db.prepare('SELECT count(*) AS n FROM subscription WHERE task_id=?').get('task')?.n, 0);
   } finally { await server?.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('stage four accepts one image task, routes it, versions commands and splits through Router', async () => {
+test('stage four accepts one image task, routes it and versions commands', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'agent-platform-stage4-'));
   const images = join(directory, 'images');
   const store = new SqliteStore(':memory:', { 'manual:repo': ['contentDigest'] });
@@ -101,7 +106,7 @@ test('stage four accepts one image task, routes it, versions commands and splits
       { headers: { authorization: `Bearer ${token}` } });
     assert.equal(image.status, 200);
     assert.equal(image.headers.get('content-type'), 'image/png');
-    assert.equal((await fetch(`http://127.0.0.1:${server.port}/api/events/${first.body.eventId}/images/${detail.body.events[0].attachments[0].id}`)).status, 401);
+    assert.equal((await fetch(`http://127.0.0.1:${server.port}/api/events/${first.body.eventId}/images/${detail.body.events[0].attachments[0].id}`)).status, 200);
     assert.equal((await request(`/api/tasks/${taskId}/commands`, { kind: 'pause', expectedVersion: 1,
       idempotencyKey: 'pause-old', reason: 'review' })).status, 409);
     const version = Number(detail.body.task.version);
@@ -111,20 +116,19 @@ test('stage four accepts one image task, routes it, versions commands and splits
     assert.equal(store.getTask(taskId)?.state, 'paused');
     assert.equal((await request(`/api/tasks/${taskId}/commands`, { kind: 'pause', expectedVersion: version,
       idempotencyKey: 'pause-1' })).status, 200);
+    assert.equal((await request(`/api/tasks/${taskId}/commands`, { kind: 'takeover',
+      expectedVersion: paused.body.version, idempotencyKey: 'takeover-disabled' })).status, 410);
+    assert.equal(store.getTask(taskId)?.owner, undefined);
     assert.equal(store.db.prepare('SELECT reason FROM dashboard_command WHERE idempotency_key=?').get('pause-1')?.reason,
       '操作人未填写原因');
     const split = await request(`/api/tasks/${taskId}/split`, { expectedVersion: paused.body.version,
       description: '独立的新增问题，需要单独调查', idempotencyKey: 'split-1' });
-    assert.equal(split.status, 202, JSON.stringify(split.body));
-    coordinator.processPending();
-    const child = store.db.prepare('SELECT id FROM task WHERE parent_task_id=?').get(taskId);
-    assert.ok(child);
-    assert.equal((await request(`/api/tasks/${taskId}/split`, { expectedVersion: 1,
-      description: '独立的新增问题，需要单独调查', idempotencyKey: 'split-1' })).body.eventId, split.body.eventId);
+    assert.equal(split.status, 410);
+    assert.equal(store.db.prepare('SELECT count(*) AS n FROM source_event WHERE external_id LIKE ?').get('%:split:%')?.n, 0);
   } finally { await server?.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('an answer-only credential cannot submit or command through the dashboard', async () => {
+test('an answer-only operator cannot submit or command through the dashboard', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'agent-platform-stage4-role-'));
   const store = new SqliteStore(':memory:');
   const coordinator = createKernelCoordinator(store, {}, 'p1', 'test', 'qoder', ['repo'], createTaskCandidateFinder(store));
@@ -133,8 +137,7 @@ test('an answer-only credential cannot submit or command through the dashboard',
     server = await startLocalApi(store, coordinator, { credentialFile: join(directory, 'token'),
       actorId: 'owner', roles: ['answer'], dashboard: { actorId: 'owner', repoKeys: ['repo'],
         imageDirectory: join(directory, 'images'), attachmentReaders: {} } });
-    const headers = { authorization: `Bearer ${readFileSync(join(directory, 'token'), 'utf8')}`,
-      'content-type': 'application/json' };
+    const headers = { 'content-type': 'application/json' };
     const base = `http://127.0.0.1:${server.port}`;
     const config = await (await fetch(`${base}/api/config`, { headers })).json();
     assert.deepEqual(config.roles, ['answer']);
