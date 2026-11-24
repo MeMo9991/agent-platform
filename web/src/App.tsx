@@ -1,7 +1,6 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useState } from 'react';
 import { RiAddLine, RiDashboardLine, RiFileList2Line, RiSettings3Line, RiShieldKeyholeLine } from '@remixicon/react';
-import { api, setToken, token } from './app/api';
-import { Button } from './components/ui';
+import { api } from './app/api';
 import { ManualSubmit } from './features/manual-submit';
 import { EventPage } from './pages/event';
 import { OverviewPage } from './pages/overview';
@@ -14,25 +13,16 @@ type Config = { actorId: string; repoKeys: string[]; unverifiedRepoKeys?: string
   projectKey: string; repoKeys: string[]; defaultRepoKey?: string }[]; roles: string[] };
 export default function App() {
   const [hash, setHash] = useState(location.hash || '#/');
-  const [credential, setCredential] = useState(token());
   const [config, setConfig] = useState<Config>();
   const [error, setError] = useState('');
   useEffect(() => { const update = () => setHash(location.hash || '#/');
     addEventListener('hashchange', update); return () => removeEventListener('hashchange', update); }, []);
-  useEffect(() => { if (!token()) return;
+  useEffect(() => {
     void api<Config>('/api/config').then(value => { setConfig(value); setError(''); })
       .catch(cause => { setConfig(undefined); setError(String(cause)); });
-  }, [credential]);
-  function authenticate(event: FormEvent) { event.preventDefault(); setToken(credential);
-    void api<Config>('/api/config').then(value => { setConfig(value); setError(''); })
-      .catch(cause => setError(String(cause))); }
-  if (!config) return <main className="login-page"><div className="login-card">
-    <div className="brand-mark"><RiShieldKeyholeLine aria-hidden /></div>
-    <span className="eyebrow">本机任务控制台</span>
-    <h1>进入工作台</h1><p className="muted">使用本机 API 凭据查看任务和待处理事项。</p>
-    <form onSubmit={authenticate} className="stack"><label>API 凭据<input type="password" value={credential}
-      onChange={event => setCredential(event.target.value)} autoComplete="off" required placeholder="粘贴凭据" /></label>
-      <Button type="submit" variant="primary">进入看板</Button></form>{error && <p role="alert" className="error">{error}</p>}
+  }, []);
+  if (!config) return <main className="login-page"><div className="login-card" role="status">
+    {error ? <p role="alert" className="error">看板加载失败：{error}</p> : <p>正在加载看板…</p>}
   </div></main>;
   const segments = hash.replace(/^#\//, '').split('/');
   const section = segments[0] === 'tasks' ? 'tasks' : segments[0] === 'new' ? 'new' : segments[0] === 'settings' ? 'settings' : 'overview';
@@ -41,8 +31,8 @@ export default function App() {
     : segments[0] === 'tasks' ? <TasksPage repoKeys={config.repoKeys} canDelete={config.roles.includes('command')} />
     : segments[0] === 'events' && segments[1] ? <EventPage id={decodeURIComponent(segments[1])} repoKeys={config.repoKeys}
       unverifiedRepoKeys={config.unverifiedRepoKeys ?? []} canRoute={config.roles.includes('route')} />
-    : segments[0] === 'new' ? config.roles.includes('submit') ? <ManualSubmit projectGroups={config.projectGroups} /> : <p>当前凭据没有提交任务权限。</p>
-    : segments[0] === 'settings' ? config.roles.includes('configure') ? <SettingsPage /> : <p>当前凭据没有配置权限。</p> : <OverviewPage canApprove={config.roles.includes('approve')} canAnswer={config.roles.includes('answer')} canRoute={config.roles.includes('route')} />;
+    : segments[0] === 'new' ? config.roles.includes('submit') ? <ManualSubmit projectGroups={config.projectGroups} /> : <p>当前操作者没有提交任务权限。</p>
+    : segments[0] === 'settings' ? config.roles.includes('configure') ? <SettingsPage /> : <p>当前操作者没有配置权限。</p> : <OverviewPage canApprove={config.roles.includes('approve')} canAnswer={config.roles.includes('answer')} canRoute={config.roles.includes('route')} />;
   const navigation = [
     { id: 'overview', href: '#/', label: '待办总览', icon: RiDashboardLine },
     { id: 'tasks', href: '#/tasks', label: '任务列表', icon: RiFileList2Line },
