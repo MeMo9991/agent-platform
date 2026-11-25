@@ -1,7 +1,7 @@
-import { unavailable } from '../shared/model.js';
-import type { AgentRunner } from '../agent/worker/model.js';
-import type { CodeHost, ReleasePipeline } from '../repository-ci/model.js';
-import type { SkillLoader } from '../skills/model.js';
+import { unavailable } from '../../shared/model.js';
+import type { AgentRunner } from '../../agent/worker/model.js';
+import type { CodeHost, ReleasePipeline } from '../../repository-ci/model.js';
+import type { SkillLoader } from '../../skills/model.js';
 
 export const unavailableAgent: AgentRunner = {
   capabilities: () => ({}),

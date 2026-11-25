@@ -11,13 +11,16 @@ export type PolicyOutcome = { decision: Decision; enforced: boolean; mode: Polic
 
 const rank: Record<Effect, number> = { allow: 0, 'require-approval': 1, deny: 2 };
 
-function defaultAudit(entry: Record<string, unknown>): void {
-  try {
-    mkdirSync('.runtime', { recursive: true, mode: 0o700 });
-    appendFileSync(resolve('.runtime', 'policy-decisions.jsonl'), `${JSON.stringify(entry)}\n`, { mode: 0o600 });
-  } catch { /* 审计失败不能影响门禁判定 */ }
+export function createPolicyAuditSink(root: string): AuditSink {
+  return entry => {
+    try {
+      mkdirSync(root, { recursive: true, mode: 0o700 });
+      appendFileSync(resolve(root, 'policy-decisions.jsonl'), `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+    } catch { /* 审计失败不能影响门禁判定 */ }
+  };
 }
 
+const defaultAudit = createPolicyAuditSink('.runtime');
 let audit: AuditSink = defaultAudit;
 export function shouldWarn(outcome?: PolicyOutcome): boolean {
   return Boolean(outcome && outcome.mode === 'warn' && outcome.decision.effect !== 'allow');

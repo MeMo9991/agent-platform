@@ -4,8 +4,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SqliteStore } from '../src/storage/sqlite/store.js';
-import { checkAgentLinks, runStartupTasks } from '../src/bootstrap/startup-tasks.js';
-import { platformConfig } from '../src/bootstrap/config.js';
+import { checkAgentLinks, runStartupTasks } from '../src/bootstrap/runtime/startup-tasks.js';
+import { platformConfig } from '../src/bootstrap/config/config.js';
 
 test('only enabled agents are checked and Qoder status requires a username', async () => {
   const linked = await checkAgentLinks({ agents: [

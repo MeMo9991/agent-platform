@@ -4,9 +4,9 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { projectGroup } from '../src/bootstrap/config.js';
+import { projectGroup } from '../src/bootstrap/config/config.js';
 import { repositoryConfig } from '../src/repository-ci/model.js';
-import { createRepositorySelector } from '../src/bootstrap/repository-selection.js';
+import { createRepositorySelector } from '../src/bootstrap/config/repository-selection.js';
 
 test('project repository selection uses verified local repos, then defaults to the primary service', () => {
   const directory = mkdtempSync(join(tmpdir(), 'agent-platform-project-'));

@@ -1,3 +1,4 @@
+import { mavenVerifier } from '../src/agent/worker/verifiers/maven.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -214,6 +215,8 @@ test('group verify executes configured command and records pinned repository inp
     store.saveRun({ id: 'group-run', taskId: task.id, iteration: 1, stage: 'verify',
       status: 'queued', priority: 0, attempt: 0, agentKind: 'qoder', commitSha: sha, createdAt: at });
     const coordinator = createKernelCoordinator(store, {}, 'p1', 'test', 'qoder', ['agent-platform']);
+    const verifier = mavenVerifier({ type: 'maven', scope: 'group', buildFile: manifest.buildFile,
+      testJvmArgs: ['-javaagent:${CACHE}/fixture-agent.jar'] }, {});
     const commands: string[] = [];
     let checkedInputs = false;
     let selectedTests = ['FocusedTest'];
@@ -237,8 +240,8 @@ test('group verify executes configured command and records pinned repository inp
           workspacePath: value.workspacePath, mode: 'read' as const, adapterVersion: 'test', configDigest: 'digest' }; },
         runCheck(value) { commands.push(`${value.command} ${value.args.join(' ')}`);
           assert.equal(value.cwd, copy);
-          assert.equal(value.env?.JAVA_TOOL_OPTIONS,
-            `-Djava.io.tmpdir=${join(copy, '.agent-cache')}`);
+          assert.equal(value.env?.MAVEN_OPTS,
+            `-Dmaven.repo.local=${join(copy, '.agent-cache')}`);
           const logRef = join(directory, 'group.log');
           writeFileSync(logRef, 'passed\n');
           return { completion: Promise.resolve({ result: 'passed' as const, exitCode: 0,
@@ -246,14 +249,8 @@ test('group verify executes configured command and records pinned repository inp
         },
       },
       localChecks: { 'agent-platform': [] },
-      groupChecks: { 'agent-platform': [
-        { command: 'mvn', args: ['-f', 'Build/pom.xml', '-pl', '${CHANGED_MODULES}',
-          '-am', '-DskipTests', 'install'], timeoutMs: 5000 },
-        { command: 'mvn', args: ['-f', 'Build/pom.xml', '-pl', '${CHANGED_MODULES}',
-          '-DargLine=-javaagent:${CACHE}/mockito.jar', '-Dtest=${CHANGED_TESTS}', 'verify'], timeoutMs: 5000 }] },
-      verifyPlans: { 'agent-platform': { mode: 'platform', workspace: 'copy', prepare: [],
-        env: { JAVA_TOOL_OPTIONS: '-Djava.io.tmpdir=${CACHE}' },
-        cacheKeyFiles: [] } },
+      groupChecks: { 'agent-platform': verifier.checks },
+      verifyPlans: { 'agent-platform': verifier.verify },
       skillRepoPath: 'agent-platform', skillCommitSha: sha, maxRunMs: 60_000,
       checkLogDirectory: join(directory, 'logs'), enabledStages: ['verify'],
       limits: { maxConcurrentRuns: 2, perRepoConcurrentRuns: 2, perAgentConcurrentRuns: 2, reservedHumanResume: 1 } });
@@ -261,8 +258,8 @@ test('group verify executes configured command and records pinned repository inp
     assert.deepEqual(store.getRun('group-run')?.groupManifest, manifest);
     assert.equal(await manager.poll(), 1);
     assert.deepEqual(commands, [
-      'mvn -f Build/pom.xml -pl ../service/domain -am -DskipTests install',
-      `mvn -f Build/pom.xml -pl ../service/domain -DargLine=-javaagent:${join(copy, '.agent-cache')}/mockito.jar -Dtest=FocusedTest verify`]);
+      'mvn -B -ntp -f Build/pom.xml -pl ../service/domain -am -DskipTests install',
+      `mvn -B -ntp -f Build/pom.xml -pl ../service/domain -Dtest=FocusedTest -Dsurefire.failIfNoSpecifiedTests=false -DargLine=-javaagent:${join(copy, '.agent-cache')}/fixture-agent.jar verify`]);
     assert.equal(checkedInputs, true);
     assert.equal(store.getTask(task.id)?.state, 'reviewing');
     assert.equal(store.db.prepare("SELECT count(*) AS n FROM task_record WHERE kind='group_verification'").get()?.n, 1);
@@ -275,6 +272,6 @@ test('group verify executes configured command and records pinned repository inp
     assert.equal(await manager.poll(), 1);
     assert.equal(store.getRun('group-run-without-tests')?.status, 'succeeded');
     assert.deepEqual(commands.slice(2), [
-      'mvn -f Build/pom.xml -pl ../service/domain -am -DskipTests install']);
+      'mvn -B -ntp -f Build/pom.xml -pl ../service/domain -am -DskipTests install']);
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });

@@ -1,0 +1,16 @@
+# 复制为 local.yaml 后，只填写这个实例需要的配置。
+platform:
+  # agents:
+  #   - kind: qoder
+  #     enabled: true
+  #     model: auto  # 可省略，沿用 Qoder CLI 的模型选择。
+  projectGroups:
+    - projectKey: sample-project
+      repositories:
+        - repoKey: sample-repo
+          provider: github
+          hostUrl: https://github.com
+          projectRef: example-org/sample-repo
+          targetBranch: main
+          credentialsRef: unconfigured
+schedules: []

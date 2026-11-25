@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import type { EventIngress } from '../event/model.js';
-import { baseUrl, credential, fullSha, jsonRequest } from '../repository-ci/providers/http.js';
-import type { PlatformConfig } from './config.js';
+import type { EventIngress } from '../../event/model.js';
+import { baseUrl, credential, fullSha, jsonRequest } from '../../repository-ci/providers/http.js';
+import type { PlatformConfig } from '../config/config.js';
 import type { TaskHandler } from './scheduler.js';
 
 const pull = z.object({ number: z.number().int().positive(), title: z.string().min(1), body: z.string().nullable(),

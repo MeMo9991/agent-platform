@@ -1,6 +1,6 @@
 import type { z } from 'zod';
 import type { repositoryConfig } from '../model.js';
-import { readCodeHostGroupToken, readCodeHostToken } from '../../bootstrap/code-host-credentials.js';
+import { readCodeHostGroupToken, readCodeHostToken } from '../../bootstrap/credentials/code-host-credentials.js';
 
 export type Repository = z.infer<typeof repositoryConfig> & { credentialGroupKey?: string };
 export function credential(repo: Repository): string {

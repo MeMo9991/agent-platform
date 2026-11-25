@@ -2,19 +2,27 @@
   "name": "agent-platform",
   "version": "0.1.0",
   "private": true,
-  "workspaces": ["web"],
+  "workspaces": [
+    "web"
+  ],
   "type": "module",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
     "build": "tsc && npm --workspace web run build",
     "start": "node dist/bootstrap/main.js",
+    "config:migrate": "node --import tsx src/bootstrap/main.ts --migrate-preview",
     "selfcheck": "node dist/bootstrap/selfcheck.js",
     "prune-workspaces": "node --import tsx scripts/prune-workspaces.ts",
     "repair-missing-development": "node --import tsx scripts/repair-missing-development.ts"
   },
-  "dependencies": { "zod": "^4.1.0" },
+  "dependencies": {
+    "yaml": "^2.9.1",
+    "zod": "^4.1.0"
+  },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "tsx": "^4.20.0",

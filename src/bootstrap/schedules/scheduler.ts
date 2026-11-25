@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
-import { id } from '../shared/model.js';
+import { id } from '../../shared/model.js';
 
 const scheduleBase = z.object({ id, enabled: z.boolean(),
   intervalSeconds: z.number().int().min(1).max(2_147_483), runOnStart: z.boolean(), projectKey: id });

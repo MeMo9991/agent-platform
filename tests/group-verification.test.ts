@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createGitWorkspaceManager } from '../src/agent/worker/workspace.js';
-import { platformConfig, configuredGroupVerification } from '../src/bootstrap/config.js';
+import { platformConfig, projectGroup, configuredGroupVerifier } from '../src/bootstrap/config/config.js';
 import { changedMavenModules, changedMavenTests } from '../src/agent/worker/maven-modules.js';
 
 test('changed Maven tests select only added or edited test classes', async () => {
@@ -47,23 +47,25 @@ test('group verification snapshots every repository and detects changed check in
   try {
     const first = repository(root, 'service-a', 'a');
     const second = repository(root, 'service-b', 'b');
-    mkdirSync(join(root, 'CloudBom'));
-    writeFileSync(join(root, 'CloudBom', 'pom.xml'), '<project>aggregate</project>\n');
+    mkdirSync(join(root, 'build'));
+    writeFileSync(join(root, 'build', 'pom.xml'), '<project>aggregate</project>\n');
     const repos = { a: first, b: second };
-    const config = platformConfig.parse({ projectGroups: [{ projectKey: 'devops-project-cloudbom', searchRoot: root,
+    const config = platformConfig.parse({ projectGroups: [{ projectKey: 'other-maven-project', searchRoot: root,
       repositories: Object.entries(repos).map(([repoKey, repo]) => ({ repoKey, provider: 'gitlab',
         hostUrl: 'https://git.example', projectRef: `team/${repoKey}`, targetBranch: 'dev',
         requiredChecks: [], credentialsRef: 'unconfigured', localPath: repo.path })),
-      verification: true }],
+      verification: { type: 'maven', scope: 'group', buildFile: 'build/pom.xml' } }],
       agents: [], budget: { maxRunMs: 1000 }, policyRef: 'p1' });
-    assert.equal(configuredGroupVerification(config.projectGroups[0]!), true);
-    assert.equal(configuredGroupVerification({ ...config.projectGroups[0]!, verification: false }), false);
+    const verifier = configuredGroupVerifier(config.projectGroups[0]!);
+    assert.equal(verifier?.buildFile, 'build/pom.xml');
+    assert.equal(verifier?.moduleSelection, 'changed-maven');
+    assert.equal(configuredGroupVerifier({ ...config.projectGroups[0]!, verification: false }), undefined);
     assert.equal(platformConfig.safeParse({ ...config, projectGroups: [{ ...config.projectGroups[0]!, verification: { checks: [] } }] }).success, false);
     const runtime = join(root, 'runtime');
     const workspace = createGitWorkspaceManager(repos, runtime, () => 'a',
       run => run.stage === 'verify' ? join(runtime, 'clones', 'develop') : undefined,
-      undefined, undefined, { a: { projectKey: 'devops-project-cloudbom', searchRoot: root,
-        buildFile: 'CloudBom/pom.xml', repositories: repos } });
+      undefined, undefined, { a: { projectKey: 'other-maven-project', searchRoot: root,
+        buildFile: 'build/pom.xml', repositories: repos } });
     const now = new Date().toISOString();
     const develop = { id: 'develop', taskId: 'task', iteration: 1, stage: 'develop' as const,
       status: 'running' as const, priority: 0, attempt: 0, createdAt: now };
@@ -85,11 +87,32 @@ test('group verification snapshots every repository and detects changed check in
     writeFileSync(join(copy.path, 'service-b', 'pom.xml'), 'tampered\n');
     await assert.rejects(workspace.verifyGroupCheckCopy!(running), /changed during checks/);
     writeFileSync(join(copy.path, 'service-b', 'pom.xml'), '<project>b</project>\n');
-    writeFileSync(join(copy.path, 'CloudBom', 'pom.xml'), 'tampered\n');
+    writeFileSync(join(copy.path, 'build', 'pom.xml'), 'tampered\n');
     await assert.rejects(workspace.verifyGroupCheckCopy!(running), /build file changed/);
-    writeFileSync(join(copy.path, 'CloudBom', 'pom.xml'), '<project>aggregate</project>\n');
+    writeFileSync(join(copy.path, 'build', 'pom.xml'), '<project>aggregate</project>\n');
     writeFileSync(copy.groupManifest!.buildFileRef, 'tampered\n');
     await assert.rejects(workspace.verifyGroupCheckCopy!(running), /build evidence changed/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('repository Maven and npm verification are selected by type for arbitrary projects', () => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-platform-typed-group-'));
+  try {
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    const base = { projectKey: 'any-project', repositories: [{ repoKey: 'any-repo', provider: 'gitlab',
+      hostUrl: 'https://git.example', projectRef: 'team/repo', targetBranch: 'main',
+      credentialsRef: 'unconfigured', localPath: root }] };
+    const maven = configuredGroupVerifier(projectGroup.parse({ ...base, verification: { type: 'maven' } }));
+    assert.equal(maven?.buildFile, undefined);
+    assert.equal(maven?.checks[0]?.args.at(-1), 'verify');
+    assert.equal(maven?.checks[0]?.args.includes('${CHANGED_MODULES}'), false);
+    assert.equal(maven?.checks[0]?.args.some(arg => arg.includes('mockito')), false);
+    const checks = [{ command: 'npm', args: ['test'], timeoutMs: 60_000 }];
+    const npm = configuredGroupVerifier(projectGroup.parse({ ...base, verification: { type: 'npm', checks } }));
+    assert.deepEqual(npm?.checks, checks);
+    assert.deepEqual(npm?.verify.prepare[0]?.args.slice(0, 2), ['ci', '--ignore-scripts']);
+    assert.equal(projectGroup.safeParse({ ...base, verification: { type: 'maven', buildFile: '../pom.xml' } }).success, false);
+    assert.equal(projectGroup.safeParse({ ...base, verification: { type: 'maven', scope: 'group' } }).success, false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

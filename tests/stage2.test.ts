@@ -10,8 +10,8 @@ import { createDefectSource, defectMetadataFields, normalizeDefect, parseDefectD
 import { createDefectApiReaders } from '../src/event/sources/devops/client.js';
 import { createDevopsAttachmentReader } from '../src/event/sources/devops/attachment.js';
 import { pollSource } from '../src/event/poll.js';
-import { startConfiguredSchedules } from '../src/bootstrap/start-schedules.js';
-import { loadScheduleConfig } from '../src/bootstrap/scheduler.js';
+import { startConfiguredSchedules } from '../src/bootstrap/schedules/start-schedules.js';
+import { loadScheduleConfig } from '../src/bootstrap/schedules/scheduler.js';
 
 const config = { sourceId: 'devops-assigned', businessProjectId: 4655971863, pageSize: 2 };
 const item = (id: number) => ({ id, subject: `缺陷 ${id}`, businessProjectId: config.businessProjectId,

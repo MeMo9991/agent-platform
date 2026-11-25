@@ -1,36 +1,19 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { lstatSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { isAbsolute } from 'node:path';
 import { z } from 'zod';
-import { platformConfig, stage5PreflightRepositories, type PlatformConfig } from '../bootstrap/config.js';
-import { scheduleConfig, type ScheduleConfig } from '../bootstrap/scheduler.js';
-import { validateScheduledSources } from '../bootstrap/start-schedules.js';
-import { devopsCredentials, readCredentials, writeCredentials, credentialsExist } from '../bootstrap/devops-credentials.js';
-import { readCodeHostGroupToken, readCodeHostToken, writeCodeHostGroupToken } from '../bootstrap/code-host-credentials.js';
-import { reviewConfig } from '../authorization/policy/config.js';
-import { readQoderPat, writeQoderPat } from '../bootstrap/qoder-credentials.js';
+import { stage5PreflightRepositories, type PlatformConfig } from '../bootstrap/config/config.js';
+import { readConfigDocuments, type ConfigPaths } from '../bootstrap/config/documents.js';
+import { devopsCredentials, readCredentials, writeCredentials } from '../bootstrap/credentials/devops-credentials.js';
+import { readCodeHostGroupToken, readCodeHostToken, writeCodeHostGroupToken } from '../bootstrap/credentials/code-host-credentials.js';
+import { readQoderPat, writeQoderPat } from '../bootstrap/credentials/qoder-credentials.js';
 
-export const settingsGroup = z.enum(['projectGroups', 'projectGroupToken', 'schedules', 'agents', 'qoderPat', 'budget', 'policyRef', 'releasePipelines', 'port', 'review', 'devopsCredentials']);
+export const settingsGroup = z.enum(['projectGroupToken', 'qoderPat', 'devopsCredentials']);
 export type SettingsGroup = z.infer<typeof settingsGroup>;
-export type SettingsPaths = { platform: string; schedules: string };
+export type SettingsPaths = ConfigPaths;
+export type SettingsSnapshot = Pick<ReturnType<typeof readConfigDocuments>, 'platform' | 'schedules' | 'revision'> & {
+  capabilities?: { stage5Worker: boolean; qoderWrite: boolean; stage5Writes: boolean };
+};
+type SettingsContext = { active?: SettingsSnapshot; externalDevopsAuth?: boolean };
 
-type Loaded = { platform: PlatformConfig; platformRaw: Record<string, unknown>; schedules: ScheduleConfig;
-  revision: string; platformBytes: string; scheduleBytes: string };
-function load(paths: SettingsPaths): Loaded {
-  const platformBytes = readFileSync(paths.platform, 'utf8');
-  const scheduleBytes = readFileSync(paths.schedules, 'utf8');
-  const platformRaw = JSON.parse(platformBytes) as Record<string, unknown>;
-  return { platform: platformConfig.parse(platformRaw), platformRaw,
-    schedules: scheduleConfig.parse(JSON.parse(scheduleBytes)),
-    revision: createHash('sha256').update(platformBytes).update('\0').update(scheduleBytes).digest('hex'),
-    platformBytes, scheduleBytes };
-}
-function validatePair(platform: PlatformConfig, schedules: ScheduleConfig): void {
-  validateScheduledSources(platform, schedules);
-  if (!platform.agents.some(agent => agent.kind === 'qoder') ||
-      platform.agents.some(agent => agent.enabled && agent.kind !== 'qoder'))
-    throw new Error('Only Qoder is available in this stage');
-}
 function publicRepositories(repositories: PlatformConfig['repositories']) {
   return repositories.map(repo => {
     const { credentialsRef: _protected, credentialGroupKey: _group, ...visible } = repo as typeof repo &
@@ -52,132 +35,63 @@ function publicProjectGroups(platform: PlatformConfig) {
     tokenConfigured: Boolean(readCodeHostGroupToken(group.projectKey)) ||
       (group.repositories.length > 0 && group.repositories.every(repo => configuredRepositories.has(repo.repoKey))) }));
 }
-export function readSettings(paths: SettingsPaths) {
-  const { platform, schedules, revision } = load(paths);
-  const creds = readCredentials();
-  return { revision, restartRequired: true,
+export function readSettings(paths: SettingsPaths, { active, externalDevopsAuth }: SettingsContext = {}) {
+  let persisted: SettingsSnapshot | undefined;
+  let configurationError: string | undefined;
+  try { persisted = readConfigDocuments(paths); }
+  catch (error) {
+    if (!active) throw error;
+    configurationError = (error as Error).message;
+  }
+  const { platform, schedules, revision, capabilities } = active ?? persisted!;
+  let devopsCredentialsConfigured = false;
+  let devopsCredentialError: string | undefined;
+  if (!externalDevopsAuth) {
+    try { devopsCredentialsConfigured = Boolean(readCredentials()); }
+    catch { devopsCredentialError = 'Cannot read the local DevOps credentials'; }
+  }
+  return { revision, configurationSource: 'local' in paths ? 'local' : 'legacy',
+    configurationFile: 'local' in paths ? (paths.local.endsWith('.json') ? 'config/local.json' : 'config/local.yaml') : undefined,
+    pendingRestart: Boolean(active && persisted && active.revision !== persisted.revision), configurationError,
     groups: { projectGroups: publicProjectGroups(platform), schedules: schedules.tasks,
       agents: platform.agents, budget: platform.budget, policyRef: platform.policyRef,
-      releasePipelines: platform.releasePipelines, port: platform.interaction?.port,
-      review: platform.review ?? reviewConfig.parse({}),
-      devopsCredentials: creds ? { authorization: '(已配置，留空保持不变)', cookie: '(已配置，留空保持不变)' }
-        : { authorization: '', cookie: '' } },
+      releasePipelines: platform.releasePipelines, review: platform.review ?? null,
+      instance: { port: platform.interaction?.port, capabilities },
+    },
     protected: { actorId: platform.interaction?.actorId, roles: platform.interaction?.roles,
       credentialFileConfigured: Boolean(platform.interaction?.credentialFile),
-      devopsCredentialsConfigured: credentialsExist(), qoderPatConfigured: Boolean(readQoderPat()) } };
+      devopsCredentialSource: externalDevopsAuth ? 'external' : 'local',
+      devopsCredentialsConfigured, devopsCredentialError,
+      qoderPatConfigured: Boolean(readQoderPat()) },
+  };
 }
 
-function writeAtomicBytes(path: string, bytes: string, expectedBytes: string): void {
-  const target = resolve(path);
-  const info = lstatSync(target);
-  if (!info.isFile() || info.isSymbolicLink()) throw new Error('Configuration target must be a regular file');
-  if (readFileSync(target, 'utf8') !== expectedBytes) throw new Error('Configuration changed; reload before saving');
-  const temporary = resolve(dirname(target), `.${randomUUID()}.tmp`);
-  try {
-    writeFileSync(temporary, bytes, { flag: 'wx', mode: info.mode & 0o777 });
-    if (readFileSync(target, 'utf8') !== expectedBytes) throw new Error('Configuration changed; reload before saving');
-    renameSync(temporary, target);
-  } finally { rmSync(temporary, { force: true }); }
-}
-function writeAtomic(path: string, value: unknown, expectedBytes: string): void {
-  writeAtomicBytes(path, `${JSON.stringify(value, null, 2)}\n`, expectedBytes);
-}
-export function saveSettings(paths: SettingsPaths, group: SettingsGroup, expectedRevision: string, value: unknown) {
-  const current = load(paths);
-  if (current.revision !== expectedRevision) throw new Error('Configuration version changed; reload before saving');
+export function saveSettings(paths: SettingsPaths, group: SettingsGroup, expectedRevision: string, value: unknown,
+  { active, externalDevopsAuth }: SettingsContext = {}) {
+  const { revision, platform } = active ?? readConfigDocuments(paths);
+  if (revision !== expectedRevision) throw new Error('Configuration version changed; reload before saving');
   if (group === 'qoderPat') {
     const { token } = z.object({ token: z.string().trim() }).strict().parse(value);
     writeQoderPat(token);
-    return { revision: current.revision, restartRequired: false };
+    return { revision, restartRequired: false };
   }
   if (group === 'projectGroupToken') {
     const input = z.object({ projectKey: z.string().min(1), token: z.string().min(1).max(4096)
       .regex(/^[\x21-\x7e]+$/) }).strict().parse(value);
-    const target = current.platform.projectGroups.find(item => item.projectKey === input.projectKey);
+    const target = platform.projectGroups.find(item => item.projectKey === input.projectKey);
     if (!target) throw new Error('Project group is not configured');
     if (new Set(target.repositories.map(repo => repo.provider)).size > 1)
       throw new Error('Project group repositories must use one code host provider');
     writeCodeHostGroupToken(input.projectKey, input.token);
-    return { revision: current.revision, restartRequired: true };
+    return { revision, restartRequired: true };
   }
-  if (group === 'devopsCredentials') {
-    const input = value as Record<string, unknown>;
-    const existing = readCredentials();
-    const authorization = typeof input.authorization === 'string' && !input.authorization.startsWith('(已配置')
-      ? input.authorization : existing?.authorization;
-    const cookie = typeof input.cookie === 'string' && !input.cookie.startsWith('(已配置')
-      ? input.cookie : existing?.cookie;
-    if (!authorization || !cookie) throw new Error('DevOps credentials require both authorization and cookie');
-    writeCredentials({ authorization, cookie });
-    return { revision: load(paths).revision, restartRequired: false };
-  }
-  const nextPlatform: Record<string, unknown> = { ...current.platformRaw };
-  const nextSchedules: Record<string, unknown> = { ...current.schedules };
-  const renames = new Map<string, string>();
-  if (group === 'schedules') nextSchedules.tasks = value;
-  else if (group === 'projectGroups') {
-    if (!Array.isArray(value)) throw new Error('Project groups must be an array');
-    const incomingKeys = new Set(value.map(item => item?.projectKey));
-    nextPlatform.projectGroups = value.map((item: unknown) => {
-      if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Invalid project group');
-      const group = item as Record<string, unknown>;
-      const { searchRootConfigured: _configured, tokenConfigured: _token, ...fields } = group;
-      void _configured;
-      if (!Array.isArray(group.repositories)) throw new Error('Project repositories must be an array');
-      const knownKeys = group.repositories.map((repo: Record<string, unknown>) => repo?.repoKey)
-        .filter((key): key is string => typeof key === 'string' &&
-          current.platform.repositories.some(repo => repo.repoKey === key));
-      const previous = current.platform.projectGroups.find(existing => existing.projectKey === group.projectKey) ??
-        current.platform.projectGroups.find(existing => !incomingKeys.has(existing.projectKey) &&
-          knownKeys.length > 0 && knownKeys.every(key => existing.repoKeys.includes(key)));
-      if (previous && previous.projectKey !== group.projectKey) {
-        if (renames.has(previous.projectKey)) throw new Error(`Project group ${previous.projectKey} split is ambiguous`);
-        renames.set(previous.projectKey, String(group.projectKey));
-      }
-      const clearSearchRoot = group.searchRoot === null;
-      const searchRoot = clearSearchRoot ? undefined : group.searchRoot ?? previous?.searchRoot;
-      if (group.searchRootConfigured === true && !clearSearchRoot && !searchRoot)
-        throw new Error(`Project group ${String(group.projectKey)} reports searchRootConfigured but has no saved searchRoot; provide an absolute searchRoot or set it to null`);
-      const repositories = group.repositories.map((item: unknown) => {
-        if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Invalid repository');
-        const repo = item as Record<string, unknown>;
-        const old = current.platform.repositories.find(existing => existing.repoKey === repo.repoKey);
-        if ('credentialsRef' in repo) throw new Error('Repository credential references are protected');
-        const { localPathConfigured: _path, credentialsRefConfigured: _credential,
-          credentialGroupKey: _group, ...visible } = repo;
-        void _path; void _credential;
-        return { ...visible, credentialsRef: old?.credentialsRef ?? 'unconfigured',
-          localPath: repo.localPath === null ? undefined : repo.localPath ?? old?.localPath };
-      });
-      return { ...fields, repositories, searchRoot,
-        verification: group.verification === null ? undefined : group.verification ?? previous?.verification,
-        functionalVerificationUrl: group.functionalVerificationUrl === null ? undefined
-          : group.functionalVerificationUrl ?? previous?.functionalVerificationUrl };
-    });
-    if (renames.size) nextSchedules.tasks = current.schedules.tasks.map(task => ({ ...task,
-      projectKey: renames.get(task.projectKey) ?? task.projectKey }));
-  }
-  else if (group === 'review') {
-    if (value === null) delete nextPlatform.review;
-    else nextPlatform.review = reviewConfig.parse(value);
-  }
-  else if (group === 'port') {
-    if (!nextPlatform.interaction || typeof nextPlatform.interaction !== 'object') throw new Error('Interaction is not configured');
-    nextPlatform.interaction = { ...nextPlatform.interaction, port: value };
-  } else nextPlatform[group] = value;
-  const platform = platformConfig.parse(nextPlatform);
-  const schedules = scheduleConfig.parse(nextSchedules);
-  validatePair(platform, schedules);
-  if (group === 'schedules') writeAtomic(paths.schedules, schedules, current.scheduleBytes);
-  else if (renames.size) {
-    const nextPlatformBytes = `${JSON.stringify(nextPlatform, null, 2)}\n`;
-    writeAtomicBytes(paths.platform, nextPlatformBytes, current.platformBytes);
-    try { writeAtomic(paths.schedules, schedules, current.scheduleBytes); }
-    catch (error) {
-      try { writeAtomicBytes(paths.platform, current.platformBytes, nextPlatformBytes); }
-      catch (rollbackError) { throw new AggregateError([error, rollbackError], 'Could not restore project group configuration'); }
-      throw error;
-    }
-  } else writeAtomic(paths.platform, nextPlatform, current.platformBytes);
-  return { revision: load(paths).revision, restartRequired: true };
+  if (externalDevopsAuth) throw new Error('DevOps credentials are managed by the external authorization provider');
+  const input = devopsCredentials.partial().parse(value);
+  if (!input.authorization && !input.cookie) throw new Error('Provide at least one DevOps credential');
+  const existing = input.authorization && input.cookie ? undefined : readCredentials();
+  const authorization = input.authorization ?? existing?.authorization;
+  const cookie = input.cookie ?? existing?.cookie;
+  if (!authorization || !cookie) throw new Error('DevOps credentials require both authorization and cookie');
+  writeCredentials({ authorization, cookie });
+  return { revision, restartRequired: false };
 }

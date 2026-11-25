@@ -3,7 +3,8 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { SqliteStore } from '../src/storage/sqlite/store.js';
-import { acquireInstanceLock } from '../src/bootstrap/instance-lock.js';
+import { loadConfiguration } from '../src/bootstrap/config/load.js';
+import { acquireInstanceLock } from '../src/bootstrap/runtime/instance-lock.js';
 
 const taskId = (() => {
   const index = process.argv.indexOf('--task');
@@ -11,8 +12,7 @@ const taskId = (() => {
 })();
 const apply = process.argv.includes('--apply');
 if (!taskId) throw new Error('Usage: repair-missing-development.ts --task <taskId> [--apply]');
-const database = resolve(process.env.AGENT_PLATFORM_DATABASE ?? '.runtime/state/agent-platform.sqlite3');
-const runtimeRoot = resolve(process.env.AGENT_PLATFORM_RUNTIME_ROOT ?? '.runtime');
+const { database, runtimeRoot } = loadConfiguration(process.cwd());
 const lock = apply ? await acquireInstanceLock(database, () => {}) : undefined;
 const store = new SqliteStore(database);
 try {

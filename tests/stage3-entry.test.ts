@@ -4,6 +4,7 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { createServer } from 'node:net';
 import { SqliteStore } from '../src/storage/sqlite/store.js';
 
 const root = resolve(import.meta.dirname, '..');
@@ -59,9 +60,9 @@ test('formal entry rejects a second process before database recovery and release
     writeFileSync(provider, 'export async function authorizationHeaders() { return {}; }\n');
     execFileSync('npm', ['run', 'build'], { cwd: root, stdio: 'inherit' });
     const env = { ...process.env, AGENT_PLATFORM_CONFIG: config, AGENT_PLATFORM_SCHEDULES: schedules,
-      AGENT_PLATFORM_DATABASE: database, AGENT_PLATFORM_AUTH_PROVIDER: provider };
-    const launch = (auth = provider) => spawn(process.execPath, ['dist/bootstrap/main.js'], {
-      cwd: root, env: { ...env, AGENT_PLATFORM_AUTH_PROVIDER: auth }, stdio: ['ignore', 'pipe', 'pipe'],
+      AGENT_PLATFORM_DATABASE: database, AGENT_PLATFORM_AUTH_PROVIDER: provider, GIT_DIR: join(root, '.git') };
+    const launch = (auth = provider) => spawn(process.execPath, [join(root, 'dist/bootstrap/main.js')], {
+      cwd: directory, env: { ...env, AGENT_PLATFORM_AUTH_PROVIDER: auth }, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let first: ChildProcess | undefined;
     let third: ChildProcess | undefined;
@@ -107,3 +108,47 @@ test('formal entry rejects a second process before database recovery and release
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+test('an unreachable code host disables external delivery without taking down the dashboard', { timeout: 20_000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-platform-host-preflight-'));
+  let service: ChildProcess | undefined;
+  try {
+    const reservation = createServer();
+    await new Promise<void>(resolveListening => reservation.listen(0, '127.0.0.1', resolveListening));
+    const address = reservation.address();
+    assert.ok(address && typeof address !== 'string');
+    const port = address.port;
+    await new Promise<void>((resolveClose, reject) => reservation.close(error => error ? reject(error) : resolveClose()));
+
+    const config = join(directory, 'config');
+    mkdirSync(config);
+    writeFileSync(join(config, 'local.json'), JSON.stringify({
+      capabilities: { stage5Writes: true },
+      platform: { interaction: { port, credentialFile: join(directory, 'local.token') },
+        repositories: [{ repoKey: 'unreachable-host', provider: 'gitlab', hostUrl: 'https://git.example',
+          projectRef: 'team/app', targetBranch: 'main', credentialsRef: 'env:FIXTURE_GITLAB_TOKEN' }],
+      },
+    }));
+    const preload = join(directory, 'fail-fetch.mjs');
+    writeFileSync(preload, `globalThis.fetch = async () => {
+      throw new TypeError('fetch failed', { cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }) });
+    };`);
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+      !key.startsWith('AGENT_PLATFORM_') && !['JAVA_HOME', 'MAVEN_SETTINGS', 'DEVOPS_CREDENTIALS_PATH'].includes(key)));
+    service = spawn(process.execPath, ['--import', preload, join(root, 'dist/bootstrap/main.js')], {
+      cwd: directory, env: { ...env, GIT_DIR: join(root, '.git'), FIXTURE_GITLAB_TOKEN: 'fixture-token',
+        AGENT_PLATFORM_CODE_HOST_CREDENTIALS_PATH: join(directory, 'code-host.json') }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    service.stderr?.on('data', chunk => { stderr += String(chunk); });
+    await waitForReady(service);
+    const response = await fetch(`http://127.0.0.1:${port}/api/config`);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as { stage5WritesEnabled: boolean }).stage5WritesEnabled, false);
+    assert.match(stderr, /unreachable-host/);
+    assert.match(stderr, /UND_ERR_SOCKET/);
+  } finally {
+    await stop(service);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

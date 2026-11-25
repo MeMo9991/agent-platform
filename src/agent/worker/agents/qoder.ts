@@ -2,7 +2,7 @@ import type { ChildProcess } from 'node:child_process';
 import { lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
-import type { AgentRunner } from '../model.js';
+import { agentModel, type AgentRunner } from '../model.js';
 import type { z } from 'zod';
 import type { runRequest } from '../model.js';
 import type { executionAttestation } from '../model.js';
@@ -18,7 +18,7 @@ export const unavailableQoderLauncher: IsolatedProcessLauncher = {
   launch() { throw new Error('Qoder OS isolation has not passed the real-process probe'); },
 };
 
-export function createQoderRunner(launcher: IsolatedProcessLauncher, logDirectory: string): AgentRunner {
+export function createQoderRunner(launcher: IsolatedProcessLauncher, logDirectory: string, model?: string): AgentRunner {
   const logPath = (runId: string, sessionId: string) => {
     if (!/^[A-Za-z0-9_-]+$/.test(runId) || !sessionId) throw new Error('Invalid Qoder log identity');
     return resolve(logDirectory, `${runId}-${createHash('sha256').update(sessionId).digest('hex')}.json`);
@@ -83,7 +83,7 @@ export function createQoderRunner(launcher: IsolatedProcessLauncher, logDirector
       const args = ['-p', '--input-format', 'text', '--output-format', 'stream-json', '--cwd', request.workspace.path,
         '--permission-mode', request.stage === 'develop' ? 'bypass_permissions' : 'dont_ask',
         '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-        '--setting-sources', 'user',
+        '--setting-sources', 'user', ...(model === undefined ? [] : ['--model', model]),
         '--append-system-prompt', buildQoderSystemPrompt(request),
         ...(['investigate', 'verify', 'review'].includes(request.stage) ? ['--tools', 'Read', 'Grep', 'Glob', 'Skill',
           '--allowed-tools', 'Read,Grep,Glob,Skill'] : []),
@@ -99,22 +99,27 @@ export function createQoderRunner(launcher: IsolatedProcessLauncher, logDirector
         stdout: '', stderr: '', exitCode: undefined as number | undefined,
         resultRef: undefined as string | undefined, error: undefined as string | undefined };
       let sessionId: string | undefined;
+      let reportedModel: string | undefined;
       let pending = '';
       let sawValidResult = false;
       let settled = false;
       let closed = false;
       let resolveClosed!: () => void;
       const closedProcess = new Promise<void>(resolve => { resolveClosed = resolve; });
-      let resolveStart!: (value: { sessionId: string }) => void;
+      type StartResult = Awaited<ReturnType<AgentRunner['start']>>;
+      let resolveStart!: (value: StartResult) => void;
       let rejectStart!: (error: Error) => void;
-      const started = new Promise<{ sessionId: string }>((resolve, reject) => {
+      const started = new Promise<StartResult>((resolve, reject) => {
         resolveStart = resolve; rejectStart = reject;
       });
       const reject = (reason: string) => {
         if (!settled) { settled = true; rejectStart(new Error(reason)); }
       };
       const accept = () => {
-        if (sessionId && !settled) { settled = true; resolveStart({ sessionId }); }
+        if (sessionId && !settled) {
+          settled = true;
+          resolveStart({ sessionId, ...(reportedModel ? { model: reportedModel } : {}) });
+        }
       };
       const parseLine = (line: string) => {
         let event: Record<string, unknown>;
@@ -128,6 +133,8 @@ export function createQoderRunner(launcher: IsolatedProcessLauncher, logDirector
           sessionId = event.session_id;
           sessions.set(sessionId, state);
         }
+        if (sessionId && event.session_id === sessionId && event.type === 'system' && event.subtype === 'init')
+          reportedModel = agentModel.safeParse(event.model).data;
         if (event.type === 'assistant') accept();
         if (event.type === 'result') {
           if (event.session_id === sessionId && event.subtype === 'success' && event.is_error === false &&

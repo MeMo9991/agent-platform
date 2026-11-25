@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
-import type { RepositorySelection } from '../event/sources/devops/defects.js';
+import type { RepositorySelection } from '../../event/sources/devops/defects.js';
 import type { PlatformConfig } from './config.js';
 
 export function createRepositorySelector(group: PlatformConfig['projectGroups'][number],

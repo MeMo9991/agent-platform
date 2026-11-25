@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startWorkerLoop } from '../src/bootstrap/worker-loop.js';
-import { acquireInstanceLock } from '../src/bootstrap/instance-lock.js';
+import { startWorkerLoop } from '../src/bootstrap/runtime/worker-loop.js';
+import { acquireInstanceLock } from '../src/bootstrap/runtime/instance-lock.js';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

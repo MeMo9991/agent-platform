@@ -77,9 +77,10 @@ export const runRequest = z.object({ taskId: id, runId: id, stage: runStage, man
   timeoutMs: z.number().int().positive() });
 export type AgentInput = z.infer<typeof agentInput>;
 export type AgentEvent = z.infer<typeof agentEvent>;
+export const agentModel = id.max(200).regex(/^(?!-)[^\u0000-\u001f\u007f]+$/u, 'Invalid agent model name');
 export interface AgentRunner {
   capabilities(): Record<string, 'supported' | 'unsupported' | 'unverified'>;
-  start(request: z.infer<typeof runRequest>): Promise<{ sessionId: string }>;
+  start(request: z.infer<typeof runRequest>): Promise<{ sessionId: string; model?: string }>;
   resume(request: z.infer<typeof runRequest>): Promise<{ sessionId: string } | { kind: 'unsupported' }>;
   send(sessionId: string, input: AgentInput): Promise<{ kind: 'accepted' | 'unsupported' }>;
   read(sessionId: string): Promise<z.infer<typeof agentSnapshot>>;
