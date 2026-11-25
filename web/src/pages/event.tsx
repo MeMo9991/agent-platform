@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
+import { Textarea } from '@/components/base/textarea/textarea';
 import { api, imageUrl } from '../app/api';
 import { Badge, Button, Card } from '../components/ui';
 import type { Event, Task } from '../shared/types';
@@ -15,6 +16,7 @@ export function EventPage({ id, repoKeys, unverifiedRepoKeys, canRoute }: { id: 
   unverifiedRepoKeys: string[]; canRoute: boolean }) {
   const [event, setEvent] = useState<Event>();
   const [choice, setChoice] = useState('new_task');
+  const [ignoreReason, setIgnoreReason] = useState('');
   const [taskId, setTaskId] = useState('');
   const [parentTaskId, setParentTaskId] = useState('');
   const [repoKey, setRepoKey] = useState(repoKeys[0] ?? '');
@@ -41,11 +43,12 @@ export function EventPage({ id, repoKeys, unverifiedRepoKeys, canRoute }: { id: 
   async function route(submit: FormEvent) {
     submit.preventDefault(); setError('');
     try {
-      const value = await api<{ taskId?: string }>(`/api/events/${encodeURIComponent(id)}/routes`, { method: 'POST',
-        body: { choice, reason: '人工路由', idempotencyKey: decisionKey,
+      const value = await api<{ taskId?: string; event?: Event }>(`/api/events/${encodeURIComponent(id)}/routes`, { method: 'POST',
+        body: { choice, reason: choice === 'ignored' ? ignoreReason.trim() : '人工路由', idempotencyKey: decisionKey,
           ...(choice === 'existing_task' ? { taskId } : choice === 'new_task' ? { repoKey: selectedRepoKey,
             ...(parentTaskId ? { parentTaskId } : {}) } : {}) } });
-      setResult(value.taskId ? `已关联任务 ${value.taskId}` : '路由决定已受理');
+      setResult(choice === 'ignored' ? '已忽略事件' : value.taskId ? `已关联任务 ${value.taskId}` : '路由决定已受理');
+      if (value.event) setEvent(value.event);
       setDecisionKey(crypto.randomUUID());
     } catch (cause) { setError(String(cause)); }
   }
@@ -76,7 +79,10 @@ export function EventPage({ id, repoKeys, unverifiedRepoKeys, canRoute }: { id: 
             setParentTaskId(change.target.value); setDecisionKey(crypto.randomUUID()); }}>
             <option value="">不关联</option>{event.routing?.candidates.map(item =>
               <option key={item.taskId} value={item.taskId}>候选任务 {item.taskId}</option>)}</select></label>}
-          <Button type="submit" disabled={choice === 'new_task' && !allowedRepoKeys.length}>提交决定</Button></form></Card>}
+          {choice === 'ignored' && <Textarea label="忽略原因" value={ignoreReason} maxLength={500} rows={3}
+            onChange={value => { setIgnoreReason(value); setDecisionKey(crypto.randomUUID()); }} />}
+          <Button type="submit" disabled={(choice === 'new_task' && !allowedRepoKeys.length) ||
+            (choice === 'ignored' && !ignoreReason.trim())}>提交决定</Button></form></Card>}
       {result && <p role="status">{result}</p>}</>}
   </div>;
 }

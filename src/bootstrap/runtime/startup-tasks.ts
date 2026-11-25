@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { PlatformConfig } from './config.js';
-import type { SqliteStore } from '../storage/sqlite/store.js';
+import type { PlatformConfig } from '../config/config.js';
+import type { SqliteStore } from '../../storage/sqlite/store.js';
 import { pruneWorkspaces, type PruneWorkspacesResult } from './prune-workspaces.js';
 
 const exec = promisify(execFile);

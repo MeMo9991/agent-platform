@@ -1,171 +1,92 @@
-import { useEffect, useState } from 'react';
-import { RiAlertLine, RiArrowRightUpLine, RiInbox2Line, RiLoader4Fill, RiPulseLine } from '@remixicon/react';
+import { useEffect, useId, useState, type ReactNode } from 'react';
+import { RiAlertLine, RiChat3Line, RiInbox2Line, RiShieldCheckLine } from '@remixicon/react';
 import { api } from '../app/api';
-import { Badge, Button, Card } from '../components/ui';
-import { Checkbox } from '@/components/base/checkbox/checkbox';
-import type { Detail, Event, RecordItem, Task } from '../shared/types';
-import { HumanAction } from './task-detail';
+import type { Event, RecordItem, Task } from '../shared/types';
 
-type Overview = { pendingEvents: number; humanEvents: number; openRequests: number;
-  failedTasks: number; runningWorkers: number; queuedRuns: number; enabledSources: number; workerCapacity: number | null };
-type Inbox = { events: Event[]; requests: RecordItem[]; tasks: Task[];
-  notices?: { id: string; title: string; detail: string; checkedAt: string }[] };
-function PrApproval({ request, onDone }: { request: RecordItem; onDone: (decision: 'approve' | 'reject') => void }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  async function decide(decision: 'approve' | 'reject') {
-    setBusy(true); setError('');
-    try {
-      const detail = await api<Detail>(`/api/tasks/${encodeURIComponent(request.taskId)}`);
-      if (!detail.records.some(item => item.id === request.id && item.status === 'open' &&
-        item.request?.sourceSha === request.request?.sourceSha &&
-        item.request?.targetSha === request.request?.targetSha)) throw new Error('审批目标已变化，请刷新');
-      await api(`/api/tasks/${encodeURIComponent(request.taskId)}/approvals`, { method: 'POST',
-        body: { expectedVersion: detail.task.version, value: { requestId: request.request!.id,
-          decision, idempotencyKey: crypto.randomUUID() } } });
-      onDone(decision);
-    } catch (cause) { setError(String(cause)); }
-    finally { setBusy(false); }
-  }
-  return <div className="action-box" key={request.id}>
-    <p><strong>提交 PR 待审批</strong> · 任务 {request.taskId}</p>
-    <p className="muted">源 SHA {request.request?.sourceSha} · 目标 {request.request?.targetBranch}@{request.request?.targetSha}</p>
-    <p><a href={`#/tasks/${encodeURIComponent(request.taskId)}`}>查看任务、验证和审查证据</a></p>
-    <div className="actions"><Button variant="primary" disabled={busy} onClick={() => void decide('approve')}>批准后提交 PR</Button>
-      <Button disabled={busy} onClick={() => void decide('reject')}>驳回</Button></div>
-    {error && <p role="alert" className="error">{error}</p>}
-  </div>;
+type Overview = { pendingEvents: number; runningWorkers: number; enabledSources: number; workerCapacity: number | null };
+type InboxNotice = { id: string; title: string; detail: string; checkedAt: string };
+type Inbox = { events: Event[]; requests: RecordItem[]; tasks: Task[]; notices?: InboxNotice[] };
+const taskStates: Record<string, string> = { failed: '失败', blocked: '受阻', paused: '已暂停', waiting_human: '等待人工' };
+const approvalTitles: Record<string, string> = {
+  continue: '继续验证审批', functional_review: '功能验证异常审批', manual_delivery: '人工交付审批',
+};
+const actions: Record<string, string> = { open_pr: '提交 PR', merge: '合并', release: '发布', rollback: '回滚' };
+function requestTitle(request: RecordItem) {
+  const proposal = request.request;
+  if (request.kind === 'question') return 'Agent 提问';
+  if (proposal?.action) return `${actions[proposal.action] ?? proposal.action}审批`;
+  return approvalTitles[proposal?.kind ?? ''] ?? '范围变更审批';
 }
 
-function PendingQuestion({ request, revision, onDone }: { request: RecordItem; revision: number; onDone: () => void }) {
-  const [detail, setDetail] = useState<Detail>();
-  const [error, setError] = useState('');
-  useEffect(() => { let live = true;
-    void api<Detail>(`/api/tasks/${encodeURIComponent(request.taskId)}`)
-      .then(value => { if (live) { setDetail(value); setError(''); } })
-      .catch(cause => { if (live) setError(String(cause)); });
-    return () => { live = false; };
-  }, [request.taskId, revision]);
-  const current = detail?.records.find(item => item.id === request.id && item.status === 'open');
-  return <div className="stack" key={request.id}>
-    <a href={`#/tasks/${encodeURIComponent(request.taskId)}`}>任务 {request.taskId} →</a>
-    {current && detail ? <HumanAction key={`${request.id}-${detail.task.version}`} taskId={request.taskId}
-      version={detail.task.version} record={current} onDone={onDone} />
-      : error ? <p role="alert" className="error">{error}</p> : <p className="muted">正在加载问题…</p>}
-  </div>;
+function BoardColumn({ title, count, tone, icon: Icon, children }: {
+  title: string; count: number; tone: string; icon: typeof RiAlertLine; children: ReactNode;
+}) {
+  const heading = useId();
+  return <section className="inbox-lane" data-tone={tone} aria-labelledby={heading}>
+    <header className="inbox-lane-heading"><Icon aria-hidden /><h2 id={heading}>{title}</h2><span>{count}</span></header>
+    {count ? <ul role="list" className="inbox-cards">{children}</ul> : <p className="inbox-lane-empty">暂无{title}</p>}
+  </section>;
 }
 
-export function OverviewPage({ canApprove, canAnswer, canRoute }: {
-  canApprove: boolean; canAnswer: boolean; canRoute: boolean }) {
+function taskActionsUrl(id: string) {
+  return `#/tasks/${encodeURIComponent(id)}/actions`;
+}
+
+function BoardCard({ title, meta, label, href }: { title: string; meta: string; label?: string; href?: string }) {
+  const content = <>
+    <strong dir="auto">{title}</strong><span dir="auto">{meta}</span>
+    {label && <span className="inbox-card-label">{label}</span>}
+  </>;
+  return <li className="inbox-card">
+    {href ? <a href={href} className="inbox-card-action">{content}</a>
+      : <div className="inbox-card-content">{content}</div>}
+  </li>;
+}
+
+export function OverviewPage() {
   const [overview, setOverview] = useState<Overview>();
   const [inbox, setInbox] = useState<Inbox>();
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
-  const [revision, setRevision] = useState(0);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [ignoring, setIgnoring] = useState(false);
   useEffect(() => { let live = true;
     const refresh = () => Promise.all([api<Overview>('/api/overview'), api<Inbox>('/api/inbox')])
       .then(([o, i]) => { if (live) { setOverview(o); setInbox(i); setError(''); } })
       .catch(cause => { if (live) setError(String(cause)); });
     void refresh(); const timer = setInterval(refresh, 5000);
     return () => { live = false; clearInterval(timer); };
-  }, [revision]);
-  useEffect(() => { if (!inbox) return;
-    const live = new Set(inbox.events.map(event => event.id));
-    setSelected(current => {
-      const next = new Set([...current].filter(id => live.has(id)));
-      return next.size === current.size ? current : next;
-    });
-  }, [inbox]);
-  const selectedCount = selected.size;
-  const allSelected = Boolean(inbox?.events.length) && selectedCount === inbox!.events.length;
-  function toggle(id: string) {
-    setSelected(current => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }
-  async function ignoreEvents(eventIds: string[]) {
-    if (!eventIds.length || ignoring) return;
-    const reason = window.prompt('忽略原因（会写入路由审计记录）', '无效待办，批量忽略');
-    if (reason === null) return;
-    const trimmed = reason.trim();
-    if (!trimmed) { setError('忽略原因不能为空'); return; }
-    setIgnoring(true); setError(''); setNotice('');
-    try {
-      const result = await api<{ ignored: string[]; failed: { eventId: string; error: string }[] }>(
-        '/api/events/ignore', { method: 'POST',
-          body: { eventIds, reason: trimmed, batchKey: crypto.randomUUID() } });
-      const ignored = new Set(result.ignored);
-      setInbox(current => current && ignored.size
-        ? { ...current, events: current.events.filter(event => !ignored.has(event.id)) } : current);
-      setOverview(current => current && ignored.size
-        ? { ...current, humanEvents: Math.max(0, current.humanEvents - ignored.size) } : current);
-      setSelected(current => new Set([...current].filter(id => !ignored.has(id))));
-      setNotice(result.failed.length
-        ? `已忽略 ${result.ignored.length} 条，${result.failed.length} 条失败：${result.failed[0]?.error ?? ''}`
-        : `已忽略 ${result.ignored.length} 条待处理事件`);
-      setRevision(value => value + 1);
-    } catch (cause) { setError(String(cause)); }
-    finally { setIgnoring(false); }
-  }
-  return <div className="stack overview"><header className="page-heading"><div><span className="eyebrow">工作台 / 任务流</span>
-    <h1>待办总览</h1><p className="muted">优先处理人的决定，再查看受阻任务与运行队列。</p></div>
+  }, []);
+  const questions = inbox?.requests.filter(request => request.kind === 'question') ?? [];
+  const approvals = inbox?.requests.filter(request => request.kind !== 'question') ?? [];
+  const taskTitle = new Map(inbox?.tasks.map(task => [task.id, task.title]));
+  return <div className="stack overview"><header className="page-heading"><div>
+    <h1>待办总览</h1></div>
     <span className="live-indicator"><span /> 每 5 秒更新</span></header>
     {error && <p role="alert" className="error">{error}</p>}
-    {notice && <p role="status">{notice}</p>}
     {!overview && !error && <p>正在加载工作台…</p>}
-    {overview && <><div className="stats">
-      <Card className="metric-card metric-people"><div className="metric-top"><span>待你处理</span><RiInbox2Line aria-hidden /></div><strong>{overview.openRequests + overview.humanEvents}</strong><small>事件与审批请求</small></Card>
-      <Card className="metric-card metric-blocked"><div className="metric-top"><span>受阻任务</span><RiAlertLine aria-hidden /></div><strong>{overview.failedTasks}</strong><small>失败、阻塞或暂停</small></Card>
-      <Card className="metric-card metric-queued"><div className="metric-top"><span>排队运行</span><RiLoader4Fill aria-hidden /></div><strong>{overview.queuedRuns}</strong><small>等待 Worker 处理</small></Card>
-      <Card className="metric-card metric-worker"><div className="metric-top"><span>Worker 使用</span><RiPulseLine aria-hidden /></div><strong>{overview.runningWorkers}<em> / {overview.workerCapacity ?? '—'}</em></strong><small>当前运行 / 可用名额</small></Card>
-    </div><div className="system-strip"><span className="system-dot" /> 系统概况 <span>来源 {overview.enabledSources} 个已启用</span><span>待路由事件 {overview.pendingEvents} 条</span></div></>}
-    <div className="overview-grid"><Card className="queue-card queue-people queue-events"><div className="card-heading"><div><span className="eyebrow">人工路由</span><h2>待处理事件</h2></div><a href="#/tasks" aria-label="查看任务列表"><RiArrowRightUpLine aria-hidden /></a></div>
-      {canRoute && inbox?.events.length ? <div className="queue-bulk">
-        <Checkbox aria-label="全选待处理事件" isSelected={allSelected}
-          isIndeterminate={!allSelected && selectedCount > 0} isDisabled={ignoring}
-          onChange={() => setSelected(allSelected ? new Set()
-            : new Set(inbox.events.map(event => event.id)))} />
-        <Button size="xs" variant="secondary" className="h-6 rounded-md px-1.5 text-body-medium" disabled={!selectedCount || ignoring}
-          onClick={() => void ignoreEvents([...selected])}>{ignoring ? '忽略中…' : '忽略所选'}</Button>
-        <span className="queue-bulk-count">{selectedCount
-          ? `已选 ${selectedCount} / ${inbox.events.length} 条` : `共 ${inbox.events.length} 条待处理`}</span>
-      </div> : null}
-      {inbox?.notices?.length ? <div className="item-list">{inbox.notices.map(notice =>
-        <div className="item-row" key={notice.id}>
-          <span className="item-icon"><RiAlertLine aria-hidden /></span>
-          <span className="item-main"><strong>{notice.title}</strong>
-            <small>{notice.detail} · 检查于 {new Date(notice.checkedAt).toLocaleString()}</small></span>
-          <Badge tone="warn">未连接</Badge>
-        </div>)}</div> : null}
-      {inbox?.events.length ? <div className="item-list">{inbox.events.map(event => <div className="item-row" key={event.id}>
-        {canRoute && <Checkbox aria-label={`选择事件：${event.title}`} isSelected={selected.has(event.id)}
-          onChange={() => toggle(event.id)} />}
-        <a className="item-link" href={`#/events/${encodeURIComponent(event.id)}`}>
-          <span className="item-icon"><RiInbox2Line aria-hidden /></span><span className="item-main"><strong>{event.title}</strong><small>{event.sourceId}</small></span></a>
-        <Badge tone="warn">待路由</Badge></div>)}</div>
-        : inbox?.notices?.length ? null
-        : <div className="empty-state"><RiInbox2Line aria-hidden /><strong>没有待处理事件</strong><span>新事件出现后会显示在这里</span></div>}</Card>
-      <Card className="queue-card queue-people"><div className="card-heading"><div><span className="eyebrow">人工决定</span><h2>通知与审批</h2></div></div>
-      {inbox?.requests.length ? <div className="item-list">{inbox.requests.map(request =>
-        canAnswer && request.kind === 'question'
-          ? <PendingQuestion key={request.id} request={request} revision={revision}
-            onDone={() => setRevision(value => value + 1)} />
-          : canApprove && request.request?.kind === 'action' && request.request.action === 'open_pr'
-          ? <PrApproval key={request.id} request={request} onDone={decision => {
-            setNotice(decision === 'approve' ? '已批准，平台将重新校验并创建 PR' : '已驳回，平台不会提交 PR');
-            setRevision(value => value + 1);
-          }} />
-          : <a className="item-row" key={request.id} href={`#/tasks/${encodeURIComponent(request.taskId)}`}>
-        <span className="item-icon"><RiPulseLine aria-hidden /></span><span className="item-main"><strong>{request.kind === 'question' ? 'Agent 提问待审查' : request.request?.kind ?? '审批请求'}</strong><small>任务 {request.taskId}</small></span>
-        <Badge tone="warn">{request.kind === 'question' ? '待回答' : '待审批'}</Badge></a>)}</div>
-        : <div className="empty-state"><RiPulseLine aria-hidden /><strong>暂无需要你的决定</strong><span>需要回答或审批时会集中展示</span></div>}</Card></div>
-    <Card className="queue-card queue-blocked"><div className="card-heading"><div><span className="eyebrow">处理异常</span><h2>受阻任务</h2></div><a href="#/tasks">查看全部任务 →</a></div>
-      {inbox?.tasks.length ? <div className="item-list">{inbox.tasks.map(task => <a className="item-row" key={task.id} href={`#/tasks/${encodeURIComponent(task.id)}`}>
-        <span className="item-icon"><RiAlertLine aria-hidden /></span><span className="item-main"><strong>{task.title}</strong><small>{task.repoKey} · 更新于 {new Date(task.updatedAt).toLocaleString()}</small></span><Badge>{task.state}</Badge></a>)}</div>
-        : <div className="empty-state compact"><RiAlertLine aria-hidden /><strong>没有受阻任务</strong></div>}</Card>
+    {overview && <div className="system-strip">
+      <span className="system-dot" aria-hidden /> 系统概况
+      <span>来源 {overview.enabledSources} 个已启用</span>
+      <span>待路由事件 {overview.pendingEvents} 条</span>
+      <span>Worker 使用 {overview.runningWorkers} / {overview.workerCapacity ?? '—'}</span>
+    </div>}
+    {inbox && <div className="inbox-board">
+      <BoardColumn title="待处理事件" count={inbox.events.length + (inbox.notices?.length ?? 0)} tone="events" icon={RiInbox2Line}>
+        {inbox.notices?.map(item => <BoardCard key={item.id} title={item.title} meta={item.detail} label="未连接" />)}
+        {inbox.events.map(event => <BoardCard key={event.id} title={event.title} meta={event.sourceId}
+          href={event.taskId ? taskActionsUrl(event.taskId) : `#/events/${encodeURIComponent(event.id)}`} />)}
+      </BoardColumn>
+      <BoardColumn title="待回答" count={questions.length} tone="questions" icon={RiChat3Line}>
+        {questions.map(request => <BoardCard key={request.id} title={taskTitle.get(request.taskId) ?? requestTitle(request)}
+          meta={`任务 ${request.taskId.slice(0, 8)}`} href={taskActionsUrl(request.taskId)} />)}
+      </BoardColumn>
+      <BoardColumn title="待审批" count={approvals.length} tone="approvals" icon={RiShieldCheckLine}>
+        {approvals.map(request => <BoardCard key={request.id} title={requestTitle(request)}
+          meta={taskTitle.get(request.taskId) ?? `任务 ${request.taskId.slice(0, 8)}`}
+          href={taskActionsUrl(request.taskId)} />)}
+      </BoardColumn>
+      <BoardColumn title="受阻任务" count={inbox.tasks.length} tone="blocked" icon={RiAlertLine}>
+        {inbox.tasks.map(task => <BoardCard key={task.id} title={task.title} meta={task.repoKey}
+          label={taskStates[task.state] ?? task.state} href={taskActionsUrl(task.id)} />)}
+      </BoardColumn>
+    </div>}
   </div>;
 }

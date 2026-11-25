@@ -6,3 +6,6 @@ web/dist/
 *.sqlite3-wal
 .DS_Store
 .runtime/
+.env
+/config/local.json
+/config/local.yaml

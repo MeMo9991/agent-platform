@@ -5,7 +5,7 @@ import { copyFile, lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } fro
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { qoderPatPath, readQoderPat } from '../../bootstrap/qoder-credentials.js';
+import { qoderPatPath, readQoderPat } from '../../bootstrap/credentials/qoder-credentials.js';
 import type { ExecutionBoundary } from './manager.js';
 import type { IsolatedProcessLauncher } from './agents/qoder.js';
 

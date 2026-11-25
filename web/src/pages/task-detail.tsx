@@ -196,7 +196,7 @@ function ReviewStageDetails({ review, records, nextRun, canInspect }: { review: 
   </details>;
 }
 
-export function HumanAction({ taskId, version, record, onDone }: { taskId: string; version: number;
+function HumanAction({ taskId, version, record, onDone }: { taskId: string; version: number;
   record: RecordItem; onDone: () => void }) {
   const [content, setContent] = useState('');
   const [error, setError] = useState('');
@@ -328,14 +328,21 @@ function Commands({ detail, actorId, onDone }: { detail: Detail; actorId: string
   </div>;
 }
 
-export function TaskDetailPage({ id, actorId, roles, stage5WritesEnabled }: {
-  id: string; actorId: string; roles: string[]; stage5WritesEnabled: boolean;
+export function TaskDetailPage({ id, actorId, roles, stage5WritesEnabled, manualCloneRoot = '.runtime/clones',
+  initialTab = 'overview' }: {
+  id: string; actorId: string; roles: string[]; stage5WritesEnabled: boolean; manualCloneRoot?: string;
+  initialTab?: 'overview' | 'actions';
 }) {
   const [detail, setDetail] = useState<Detail>();
   const [error, setError] = useState('');
   const [revision, setRevision] = useState(0);
   const [hostResult, setHostResult] = useState('');
   const [hostBusy, setHostBusy] = useState(false);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const loaded = Boolean(detail);
+  useEffect(() => {
+    if (initialTab === 'actions' && loaded) heading.current?.focus();
+  }, [initialTab, loaded]);
   async function openChange(create: boolean) {
     if (!detail) return;
     setHostBusy(true); setHostResult('');
@@ -406,6 +413,8 @@ export function TaskDetailPage({ id, actorId, roles, stage5WritesEnabled }: {
     item.request?.kind === 'manual_delivery').at(-1);
   const manualSourceRun = detail?.runs.find(run => run.stage === 'develop' && run.status === 'succeeded' &&
     run.commitSha === manualDelivery?.request?.sourceSha);
+  const manualClone = manualSourceRun && `${manualCloneRoot}/${manualSourceRun.id}`;
+  const quotedManualClone = manualClone && "'" + manualClone.replaceAll("'", "'\\''") + "'";
   const latestReview = detail?.records.filter(item => item.kind === 'review').at(-1);
   const reviewedCi = detail?.records.filter(item => item.kind === 'ci' &&
     item.subjectSha === latestReview?.subjectSha).at(-1);
@@ -444,15 +453,16 @@ export function TaskDetailPage({ id, actorId, roles, stage5WritesEnabled }: {
     : detail?.task.state === 'waiting_human' ? '需要人工处理' : '准备审批中';
   const pendingMergeReceipt = detail?.records.some(item => item.kind === 'effect' && item.action === 'merge' &&
     ['pending', 'uncertain'].includes(item.status ?? ''));
-  return <div className="stack detail-page"><div className="task-back-actions"><a className="back-link" href="#/tasks">← 返回任务列表</a>
+  return <div className="stack detail-page"><div className="task-back-actions"><a className="back-link" href={initialTab === 'actions' ? '#/' : '#/tasks'}>
+      {initialTab === 'actions' ? '← 返回待办总览' : '← 返回任务列表'}</a>
     {detail && roles.includes('command') && <Commands detail={detail} actorId={actorId} onDone={() => setRevision(value => value + 1)} />}</div>
     {error && <p role="alert" className="error">{error}</p>}
     {hostResult && <p role="status">{hostResult}</p>}
     {!detail && !error && <p>正在加载…</p>}
     {detail && <><header className="detail-heading"><span className="eyebrow">任务 / {detail.task.id}</span>
-      <h1 title={detail.task.title}>{detail.task.title}</h1><div className="detail-meta"><Badge>{detail.task.state}</Badge>
+      <h1 ref={heading} tabIndex={-1} title={detail.task.title}>{detail.task.title}</h1><div className="detail-meta"><Badge>{detail.task.state}</Badge>
       <span>{detail.task.repoKey}</span><span>第 {detail.task.iteration} 轮</span><span>版本 {detail.task.version}</span></div></header>
-      <Tabs key={id} defaultSelectedKey="overview">
+      <Tabs key={`${id}:${initialTab}`} defaultSelectedKey={initialTab}>
         <div className="task-tabs-scroll"><TabList aria-label="任务详情分组">
           <Tab id="overview">概览</Tab>
           <Tab id="actions" count={pendingCount}>待处理</Tab>
@@ -489,9 +499,9 @@ export function TaskDetailPage({ id, actorId, roles, stage5WritesEnabled }: {
           : '本地构建与审查已通过。请人工推送并创建 PR/MR；平台不会自动推送。'}</p>
         <p>待交付 SHA：<code>{manualDelivery.request?.sourceSha}</code></p>
         {manualSourceRun && <p>提交所在工作区（相对 agent-platform 根目录）：
-          <code>.runtime/clones/{manualSourceRun.id}</code>。请先核对该目录的 HEAD 与上述 SHA，再推送到
+          <code>{manualClone}</code>。请先核对该目录的 HEAD 与上述 SHA，再推送到
           <code>agent-platform/{manualSourceRun.id}</code> 分支并在代码托管平台创建 PR/MR。</p>}
-        {manualSourceRun && <pre><code>{`git -C .runtime/clones/${manualSourceRun.id} rev-parse HEAD\ngit -C .runtime/clones/${manualSourceRun.id} push origin ${manualDelivery.request?.sourceSha}:refs/heads/agent-platform/${manualSourceRun.id}`}</code></pre>}
+        {manualSourceRun && <pre><code>{`git -C ${quotedManualClone} rev-parse HEAD\ngit -C ${quotedManualClone} push origin ${manualDelivery.request?.sourceSha}:refs/heads/agent-platform/${manualSourceRun.id}`}</code></pre>}
         {!manualSourceRun && <p role="alert">开发工作区未找到，请从执行记录核对提交来源后再交付。</p>}
         <p className="muted">工作区会按保留策略清理；请及时保存需要交付的提交。</p>
         <p className="muted">完成代码托管平台操作后，可用任务操作中的“标记完成”记录处理结果。</p>
@@ -566,7 +576,7 @@ export function TaskDetailPage({ id, actorId, roles, stage5WritesEnabled }: {
             {prApproval?.request?.targetSha && <div><dt>目标 SHA</dt><dd><code>{prApproval.request.targetSha}</code></dd></div>}
             {prEffect?.receipt?.changeId && <div><dt>PR/MR</dt><dd><code>{prEffect.receipt.changeId}</code></dd></div>}
           </dl>
-          {(prScopeApproval || prApproval?.status === 'open') && <p className="muted">请在“待处理”或“通知与审批”中决定。</p>}
+          {(prScopeApproval || prApproval?.status === 'open') && <p className="muted">请在「待处理」中决定。</p>}
           {prApproval?.status === 'rejected' && <p className="muted">审批已驳回，任务等待人工处理，不会自动返回 develop。</p>}
           </details>
           {showPrDelivery && <details className="task-stage-details task-pr-delivery"><summary>CI 与合并</summary>

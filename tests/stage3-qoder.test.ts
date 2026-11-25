@@ -67,6 +67,7 @@ test('develop grants only the built-in tools needed to edit and commit in its sa
   const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(),
     kill: () => true }) as unknown as ChildProcess;
   const runner = createQoderRunner({ verified: true, launch(_command, args) {
+    assert.deepEqual(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2), ['--model', 'auto']);
     assert.equal(args.filter(arg => arg === '--append-system-prompt').length, 1);
     assert.equal(args[args.indexOf('--permission-mode') + 1], 'bypass_permissions');
     assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /Commit authorized changes.*Git worktree clean/);
@@ -77,7 +78,7 @@ test('develop grants only the built-in tools needed to edit and commit in its sa
       ['--tools', 'Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash', 'Skill',
         '--allowed-tools', 'Read,Grep,Glob,Edit,Write,Bash,Skill']);
     return { process: child, terminate: () => true, isTerminated: () => true };
-  } }, directory);
+  } }, directory, 'auto');
   try {
     const started = runner.start({ taskId: 'task', runId: 'run', stage: 'develop', repoKey: 'repo',
       mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Edit', allowedActions: ['edit'],
@@ -91,7 +92,7 @@ test('develop grants only the built-in tools needed to edit and commit in its sa
     child.stdout?.emit('data', JSON.stringify({ type: 'result', subtype: 'success',
       session_id: 'develop-session', result: 'Done', is_error: false }) + '\n');
     child.emit('close', 0);
-    await started;
+    assert.deepEqual(await started, { sessionId: 'develop-session' });
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -177,6 +178,7 @@ test('Qoder confirms input only after assistant output and keeps an early exit p
     assert.doesNotMatch(args[args.indexOf('--append-system-prompt') + 1]!, /Bug/);
     assert.match(args.at(-1)!, /Bug/);
     assert.equal(args[args.indexOf('--output-format') + 1], 'stream-json');
+    assert.equal(args.includes('--model'), false);
     assert.equal(args[args.indexOf('--permission-mode') + 1], 'dont_ask');
     assert.equal(args[args.indexOf('--setting-sources') + 1], 'user');
     assert.deepEqual(args.slice(args.indexOf('--tools'), args.indexOf('--tools') + 7),
@@ -206,16 +208,16 @@ test('Qoder confirms input only after assistant output and keeps an early exit p
     writeFileSync(outsidePath, Buffer.from('89504e470d0a1a0a00000000', 'hex'));
     await assert.rejects(runner.start({ ...request, attachmentPaths: [outsidePath] }), /outside the Run input directory/);
     let completed = false;
-    const starting = runner.start(request).then(() => { completed = true; });
+    const starting = runner.start(request).then(receipt => { completed = true; return receipt; });
     await Promise.resolve();
     assert.equal(launched, true);
     assert.equal(completed, false);
-    child.stdout?.emit('data', JSON.stringify({ type: 'system', subtype: 'init', session_id: 'native-1' }) + '\n');
+    child.stdout?.emit('data', JSON.stringify({ type: 'system', subtype: 'init', session_id: 'native-1', model: 'Auto' }) + '\n');
     await Promise.resolve();
     assert.equal(completed, false);
     child.stdout?.emit('data', JSON.stringify({ type: 'assistant', session_id: 'native-1',
       message: { content: [{ type: 'text', text: 'Investigating' }] } }) + '\n');
-    await starting;
+    assert.deepEqual(await starting, { sessionId: 'native-1', model: 'Auto' });
     let cancellationConfirmed = false;
     const cancelling = runner.cancel('native-1').then(value => { cancellationConfirmed = true; return value; });
     await Promise.resolve();

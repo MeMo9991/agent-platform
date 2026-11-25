@@ -1,4 +1,4 @@
-import type { PlatformConfig } from '../../bootstrap/config.js';
+import type { PlatformConfig } from '../../bootstrap/config/config.js';
 import type { CodeHost } from '../model.js';
 import { createGitHubCodeHost } from './github.js';
 import { createGitLabCodeHost } from './gitlab.js';

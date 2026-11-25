@@ -10,12 +10,12 @@ import type { AttachmentReader } from '../event/model.js';
 import { createEventIngress } from '../event/ingress.js';
 import { answer, approvalDecision, routeReviewDecision } from '../interaction/model.js';
 import type { AgentRunner } from '../agent/worker/model.js';
-import type { AgentLinkStatus } from '../bootstrap/startup-tasks.js';
+import type { AgentLinkStatus } from '../bootstrap/runtime/startup-tasks.js';
 import { isBlockingReview } from '../agent/task/workflow.js';
 import { id } from '../shared/model.js';
 import { completeTakeover, executeTaskCommand, type TakeoverEvidencePorts } from './task-command.js';
 import { taskCommand } from '../interaction/task-command.js';
-import { readSettings, saveSettings, settingsGroup, type SettingsPaths } from './settings.js';
+import { readSettings, saveSettings, settingsGroup, type SettingsPaths, type SettingsSnapshot } from './settings.js';
 
 const submit = z.object({ projectKey: z.string().min(1).optional(), repoKey: z.string().min(1).optional(),
   body: z.string().trim().min(1).max(20_000),
@@ -218,6 +218,9 @@ export type DashboardOptions = { actorId: string; repoKeys: readonly string[];
   imageDirectory: string; attachmentReaders: Readonly<Record<string, AttachmentReader>>;
   runners?: Readonly<Record<string, AgentRunner | undefined>>; workerCapacity?: number;
   evidenceRoot?: string; takeoverEvidence?: TakeoverEvidencePorts; settingsPaths?: SettingsPaths;
+  settingsSnapshot?: SettingsSnapshot;
+  externalDevopsAuth?: boolean;
+  manualCloneRoot?: string;
   agentLinks?: readonly AgentLinkStatus[];
   stage5OpenChange?: { prepare(taskId: string, expectedVersion: number): Promise<{
     kind: 'scope_request' | 'action_request' | 'ready'; requestId?: string;
@@ -240,19 +243,25 @@ export async function handleDashboard(request: IncomingMessage, response: Server
         projectGroups: Object.entries(options.projectGroups ?? {}).map(([projectKey, group]) =>
           ({ projectKey, repoKeys: group.repoKeys, defaultRepoKey: group.defaultRepoKey })),
         roles,
+        manualCloneRoot: roles.includes('command') ? options.manualCloneRoot : undefined,
         stage5WritesEnabled: options.stage5WritesEnabled === true }); return true;
     }
     if (path === '/api/settings' && request.method === 'GET') {
       if (!roles.includes('configure') || !options.settingsPaths) throw new Error('Configure role required');
-      send(response, 200, readSettings(options.settingsPaths)); return true;
+      send(response, 200, readSettings(options.settingsPaths, { active: options.settingsSnapshot,
+        externalDevopsAuth: options.externalDevopsAuth })); return true;
     }
     const settingMatch = /^\/api\/settings\/([^/]+)$/.exec(path);
     if (settingMatch && request.method === 'PUT') {
       if (!roles.includes('configure') || !options.settingsPaths) throw new Error('Configure role required');
-      const group = settingsGroup.parse(settingMatch[1]);
+      const group = settingsGroup.safeParse(settingMatch[1]);
+      if (!group.success) {
+        send(response, 405, { error: 'Edit the local configuration files and restart the service' }); return true;
+      }
       const input = z.object({ expectedRevision: z.string().length(64), value: z.unknown() }).strict()
         .parse(await readBody(request, 1024 * 1024));
-      send(response, 200, saveSettings(options.settingsPaths, group, input.expectedRevision, input.value)); return true;
+      send(response, 200, saveSettings(options.settingsPaths, group.data, input.expectedRevision, input.value,
+        { active: options.settingsSnapshot, externalDevopsAuth: options.externalDevopsAuth })); return true;
     }
     if (request.method === 'GET' && path === '/api/overview') {
       const count = (sql: string) => Number(store.db.prepare(sql).get()?.n ?? 0);

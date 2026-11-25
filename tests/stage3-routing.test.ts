@@ -364,7 +364,7 @@ test('verified runner receives linked input once and only its explicit receipt h
     let wrongFinishedRun = false;
     const manager = createWorkerManager({ store, coordinator, enabledAgents: ['qoder'],
       runners: { qoder: { capabilities: () => ({ start: 'supported', send: 'supported' }),
-        async start() { return { sessionId: 'session-1' }; }, async resume() { return { kind: 'unsupported' }; },
+        async start() { return { sessionId: 'session-1', model: 'Auto' }; }, async resume() { return { kind: 'unsupported' }; },
         async send(_session, input) { if (input.kind === 'source_followup') sent.push(input.eventId);
           return { kind: 'accepted' }; },
         async read() { return wrongFinishedRun ? { kind: 'finished', runId: 'different-run', exitCode: 0,
@@ -379,7 +379,9 @@ test('verified runner receives linked input once and only its explicit receipt h
       skillRepoPath: 'agent-platform', skillCommitSha: 'a'.repeat(40), maxRunMs: 60_000,
       limits: { maxConcurrentRuns: 2, perRepoConcurrentRuns: 2, perAgentConcurrentRuns: 2, reservedHumanResume: 1 } });
     assert.equal(await manager.tick(), true);
-    assert.equal(store.getRun(String(store.db.prepare('SELECT id FROM run').get()?.id))?.execution?.adapterVersion, 'test');
+    const running = store.getRun(String(store.db.prepare('SELECT id FROM run').get()?.id));
+    assert.equal(running?.execution?.adapterVersion, 'test');
+    assert.equal(running?.model, 'Auto');
     const followup = store.accept({ ...event, externalId: 'followup', revision: '2' });
     coordinator.processPending();
     await manager.poll();

@@ -12,9 +12,9 @@ import { agentEvent, agentInput, agentUsage, run } from '../src/agent/worker/mod
 import { approvalDecision, approvalRequest, humanResponse, routeReviewDecision } from '../src/interaction/model.js';
 import { routeDecision } from '../src/agent/router/model.js';
 import { skillRef } from '../src/skills/model.js';
-import { configuredLocalVerification, platformConfig, selectAgentRunner, selectCodeHost, selectReleasePipeline, selectSource, stage5PreflightRepositories } from '../src/bootstrap/config.js';
+import { configuredLocalVerification, platformConfig, selectAgentRunner, selectCodeHost, selectReleasePipeline, selectSource, stage5PreflightRepositories } from '../src/bootstrap/config/config.js';
 import { denyUnconfigured, investigationMandate } from '../src/authorization/model.js';
-import { unavailableAgent, unavailableCodeHost, unavailableReleasePipeline } from '../src/bootstrap/ports.js';
+import { unavailableAgent, unavailableCodeHost, unavailableReleasePipeline } from '../src/bootstrap/config/ports.js';
 import { releaseRequest, releaseSnapshot } from '../src/repository-ci/model.js';
 import { kernelSignal } from '../src/agent/kernel/model.js';
 

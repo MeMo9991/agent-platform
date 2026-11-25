@@ -1,6 +1,6 @@
 import { lstat, readdir, realpath, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import type { SqliteStore } from '../storage/sqlite/store.js';
+import type { SqliteStore } from '../../storage/sqlite/store.js';
 
 const activeRunStatuses = new Set(['queued', 'running', 'waiting_human', 'paused']);
 const terminalTaskStates = new Set(['closed', 'cancelled', 'released']);

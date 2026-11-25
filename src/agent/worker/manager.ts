@@ -128,9 +128,11 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
       if (!path.startsWith(`${workspaceRoot}/`)) throw new Error('Cache key file is outside the workspace');
       let data: Buffer;
       try {
-        const info = await stat(path);
+        const canonical = await realpath(path);
+        if (!canonical.startsWith(`${await realpath(workspaceRoot)}/`)) throw new Error('Cache key file is outside the workspace');
+        const info = await stat(canonical);
         if (!info.isFile() || info.size > 2 * 1024 * 1024) throw new Error('Cache key file is not a regular file');
-        data = await readFile(path);
+        data = await readFile(canonical);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
         throw error;
@@ -774,7 +776,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
         input: { kind: 'task' as const, runId: claimed.id, prompt: reviewContract,
           sourceEventIds: initialEventIds }, execution: attestation,
         attachmentPaths, timeoutMs: input.maxRunMs };
-      let started: { sessionId: string } | { kind: 'unsupported' };
+      let started: Awaited<ReturnType<AgentRunner['start']>> | { kind: 'unsupported' };
       if (humanResume && claimed.sessionId && runner.capabilities().resume === 'supported' &&
           runner.capabilities().send === 'supported')
         started = await runner.resume(request);
@@ -789,6 +791,7 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
       launchedSession = started.sessionId;
       launchedRunner = runner;
       input.store.replaceRun({ ...claimed, sessionId: started.sessionId, workspaceRef: workspace.path,
+        ...(startedNewSession ? { model: started.model } : {}),
         commitSha: workspace.baseSha, execution: attestation }, 'running');
       if (humanResume && claimed.sessionId && started.sessionId !== claimed.sessionId)
         input.store.saveRecord({ id: randomUUID(), taskId: task.id, runId: claimed.id,

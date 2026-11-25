@@ -1,6 +1,21 @@
-import type { CheckCommand, VerifyConfig } from '../../repository-ci/model.js';
-import { agentPlatformVerifier } from './verifiers/agent-platform.js';
-import { cloudbomVerifier } from './verifiers/cloudbom.js';
+import { isAbsolute } from 'node:path';
+import { z } from 'zod';
+import { checkCommand, type CheckCommand, type VerifyConfig } from '../../repository-ci/model.js';
+import { id } from '../../shared/model.js';
+import { mavenVerifier } from './verifiers/maven.js';
+import { npmVerifier } from './verifiers/npm.js';
+
+export const groupVerification = z.discriminatedUnion('type', [
+  z.strictObject({ type: z.literal('maven'), scope: z.enum(['repository', 'group']).default('repository'),
+    buildFile: id.refine(file => !isAbsolute(file) && !file.includes('\\') && file.split('/').every(
+      segment => segment !== '' && segment !== '.' && segment !== '..'),
+    'Maven buildFile must be a relative path inside its workspace').default('pom.xml'),
+    testJvmArgs: z.array(id).optional() }),
+  z.strictObject({ type: z.literal('npm'), checks: z.array(checkCommand.strict()).min(1) }),
+]);
+export type GroupVerification = z.infer<typeof groupVerification>;
+export type MavenVerification = Extract<GroupVerification, { type: 'maven' }>;
+export type NpmVerification = Extract<GroupVerification, { type: 'npm' }>;
 
 export interface GroupVerifier {
   buildFile?: string;
@@ -9,20 +24,7 @@ export interface GroupVerifier {
   verify: VerifyConfig;
 }
 
-// Register one implementation per project group. Configuration only enables it.
-export const groupVerifiers: Readonly<Record<string, GroupVerifier>> = {
-  'agent-platform': agentPlatformVerifier,
-  'devops-project-cloudbom': cloudbomVerifier,
-};
-
-export function groupVerifier(projectKey: string): GroupVerifier | undefined {
-  const verifier = groupVerifiers[projectKey];
-  if (projectKey !== 'devops-project-cloudbom' || !verifier) return verifier;
-  const settings = process.env.AGENT_PLATFORM_CLOUDBOM_MAVEN_SETTINGS;
-  const javaHome = process.env.AGENT_PLATFORM_CLOUDBOM_JAVA_HOME;
-  return { ...verifier,
-    checks: settings ? verifier.checks.map(check => ({ ...check,
-      args: ['-gs', settings, ...check.args] })) : verifier.checks,
-    verify: javaHome ? { ...verifier.verify, env: { ...verifier.verify.env, JAVA_HOME: javaHome } }
-      : verifier.verify };
+export function groupVerifier(verification: GroupVerification): GroupVerifier {
+  if (verification.type === 'npm') return npmVerifier(verification);
+  return mavenVerifier(verification, { settings: process.env.MAVEN_SETTINGS, javaHome: process.env.JAVA_HOME });
 }

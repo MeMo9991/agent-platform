@@ -4,8 +4,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadScheduleConfig, scheduleConfig, startSchedules } from '../src/bootstrap/scheduler.js';
-import { startConfiguredSchedules } from '../src/bootstrap/start-schedules.js';
+import { loadScheduleConfig, scheduleConfig, startSchedules } from '../src/bootstrap/schedules/scheduler.js';
+import { startConfiguredSchedules } from '../src/bootstrap/schedules/start-schedules.js';
 
 test('schedule file binds scans to project groups and rejects duplicate identities', () => {
   const config = loadScheduleConfig('config/schedules.json');

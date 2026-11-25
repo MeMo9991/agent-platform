@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync }
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SqliteStore } from '../src/storage/sqlite/store.js';
-import { pruneWorkspaces } from '../src/bootstrap/prune-workspaces.js';
+import { pruneWorkspaces } from '../src/bootstrap/runtime/prune-workspaces.js';
 import type { Task } from '../src/agent/task/model.js';
 import type { Run } from '../src/agent/worker/model.js';
 

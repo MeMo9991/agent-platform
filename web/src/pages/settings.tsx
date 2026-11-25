@@ -1,117 +1,140 @@
 import { useEffect, useState } from 'react';
+import { RiRefreshLine } from '@remixicon/react';
 import { api } from '../app/api';
 import { Button } from '@/components/base/buttons/button';
 import { Textarea } from '@/components/base/textarea/textarea';
 import { Card } from '../components/ui';
-import { cx } from '@/utils/cx';
 
-type Group = 'projectGroups' | 'schedules' | 'agents' | 'budget' | 'policyRef' | 'releasePipelines' | 'review' | 'devopsCredentials';
-type Settings = { revision: string; restartRequired: boolean; groups: Record<Group, unknown>;
-  protected: { qoderPatConfigured?: boolean } };
-type ProjectGroupCredential = { projectKey: string; repositories: unknown[]; tokenConfigured: boolean };
-const categories: { id: string; title: string; groups: { id: Group; title: string; hint: string }[] }[] = [
-  { id: 'projects', title: '项目组', groups: [
-    { id: 'projectGroups', title: '项目组与仓库', hint: '配置项目和仓库的详细设置' }] },
-  { id: 'scans', title: '定时扫描', groups: [
-    { id: 'schedules', title: '发现事件的任务', hint: '每项用 projectKey 指向项目组。DevOps 缺陷填写 businessProjectId；GitHub PR 扫描使用 github-pr-poll。任务 id 是稳定的事件来源 ID。' }] },
-  { id: 'credentials', title: '外部认证', groups: [
-    { id: 'devopsCredentials', title: 'DevOps 凭据', hint: 'DevOps API 的 Authorization 和 Cookie。保存后立即生效，无需重启。' }] },
+type Group = 'instance' | 'projectGroups' | 'schedules' | 'agents' | 'budget' | 'policyRef' |
+  'releasePipelines' | 'review' | 'devopsCredentials';
+type Settings = {
+  revision: string; configurationSource: 'local' | 'legacy'; configurationFile?: string; pendingRestart: boolean; configurationError?: string;
+  groups: Record<Exclude<Group, 'devopsCredentials'>, unknown> & { projectGroups: ProjectGroupCredential[] };
+  protected: { qoderPatConfigured: boolean; devopsCredentialsConfigured: boolean;
+    devopsCredentialSource: 'local' | 'external'; devopsCredentialError?: string };
+};
+type ProjectGroupCredential = { projectKey: string; tokenConfigured: boolean };
+type CredentialGroup = 'qoderPat' | 'projectGroupToken' | 'devopsCredentials';
+const categories: { id: string; title: string; groups: { id: Group; title: string; hint?: string }[] }[] = [
+  { id: 'instance', title: '实例', groups: [{ id: 'instance', title: '端口与当前能力' }] },
+  { id: 'projects', title: '项目组', groups: [{ id: 'projectGroups', title: '项目组与仓库' }] },
+  { id: 'scans', title: '定时扫描', groups: [{ id: 'schedules', title: '事件扫描任务' }] },
   { id: 'agents', title: 'Agent 与预算', groups: [
-    { id: 'agents', title: 'Agent', hint: '当前阶段仅支持 Qoder。' },
-    { id: 'budget', title: '运行预算', hint: '运行时长、并发上限及人工恢复保留名额。' },
-    { id: 'policyRef', title: '策略引用', hint: '任务采用的策略版本引用。' }] },
+    { id: 'agents', title: 'Agent' }, { id: 'budget', title: '运行预算' }] },
+  { id: 'credentials', title: '外部认证', groups: [{ id: 'devopsCredentials', title: 'DevOps 凭据' }] },
   { id: 'review', title: '校验策略', groups: [
-    { id: 'review', title: 'review 校验策略', hint: 'mode：off/shadow/warn/enforce；gates：edit/openPr/merge；limits：maxFiles/maxChangedLines；contentDeny 为追加的禁止内容。通用层不含仓库路径规则；保存后重启生效。' }] },
+    { id: 'policyRef', title: '策略引用' }, { id: 'review', title: '审查策略' }] },
   { id: 'release', title: '发布映射', groups: [
-    { id: 'releasePipelines', title: '发布流水线', hint: '仓库、环境与流水线配置引用。' }] },
+    { id: 'releasePipelines', title: '发布流水线', hint: '映射已保留，发布执行尚未接入。' }] },
 ];
 
 export function SettingsPage() {
   const [settings, setSettings] = useState<Settings>();
-  const [category, setCategory] = useState(categories[0]!.id);
-  const [drafts, setDrafts] = useState<Partial<Record<Group, string>>>({});
-  const [busy, setBusy] = useState<Group>();
-  const [busyProject, setBusyProject] = useState<string>();
+  const [busy, setBusy] = useState<string>();
   const [projectTokens, setProjectTokens] = useState<Record<string, string>>({});
   const [qoderPat, setQoderPat] = useState('');
-  const [savingQoderPat, setSavingQoderPat] = useState(false);
+  const [authorization, setAuthorization] = useState('');
+  const [cookie, setCookie] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const load = () => api<Settings>('/api/settings').then(value => {
-    setSettings(value);
-    setDrafts(Object.fromEntries(Object.entries(value.groups).map(([key, item]) => [key, JSON.stringify(item, null, 2)])));
-    setError('');
-  });
-  useEffect(() => { void load().catch(cause => setError(String(cause))); }, []);
-  async function save(group: Group) {
-    if (!settings) return;
-    setBusy(group); setError(''); setNotice('');
+  const [feedbackGroup, setFeedbackGroup] = useState<Group>();
+  const load = () => api<Settings>('/api/settings').then(value => { setSettings(value); setError(''); });
+  const reload = () => void load().catch(cause => { setFeedbackGroup(undefined); setError(String(cause)); });
+  useEffect(reload, []);
+
+  async function save(group: CredentialGroup, value: unknown, clear: () => void, message: string, id: string = group) {
+    if (!settings || busy) return;
+    setBusy(id); setError(''); setNotice('');
+    setFeedbackGroup(group === 'qoderPat' ? 'agents' : group === 'projectGroupToken' ? 'projectGroups' : group);
     try {
-      const value = JSON.parse(drafts[group] ?? 'null') as unknown;
       await api(`/api/settings/${group}`, { method: 'PUT', body: { expectedRevision: settings.revision, value } });
-      await load(); setNotice('配置已保存。重启服务后生效。');
+      clear();
+      setNotice(message);
+      await load();
     } catch (cause) { setError(String(cause)); }
     finally { setBusy(undefined); }
   }
-  async function saveProjectToken(projectKey: string) {
-    if (!settings || !projectTokens[projectKey]?.trim()) return;
-    setBusyProject(projectKey); setError(''); setNotice('');
-    try {
-      await api('/api/settings/projectGroupToken', { method: 'PUT', body: { expectedRevision: settings.revision,
-        value: { projectKey, token: projectTokens[projectKey] } } });
-      setProjectTokens(current => ({ ...current, [projectKey]: '' }));
-      await load(); setNotice('项目组 Token 已保存。重启服务后生效。');
-    } catch (cause) { setError(String(cause)); }
-    finally { setBusyProject(undefined); }
-  }
-  async function saveQoderPat() {
-    if (!settings || !qoderPat.trim()) return;
-    setSavingQoderPat(true); setError(''); setNotice('');
-    try {
-      await api('/api/settings/qoderPat', { method: 'PUT', body: { expectedRevision: settings.revision,
-        value: { token: qoderPat } } });
-      setQoderPat('');
-      setSettings(current => current && { ...current, protected: { ...current.protected, qoderPatConfigured: true } });
-      setNotice('QoderCN PAT 已保存，下次开发运行生效。');
-    } catch (cause) { setError(String(cause)); }
-    finally { setSavingQoderPat(false); }
-  }
-  const active = categories.find(item => item.id === category)!;
-  return <div className="stack settings-page"><header className="page-heading"><div><span className="eyebrow">工作台 / 本机配置</span>
-    <h1>配置</h1><p className="muted">维护项目组、定时扫描、Agent、预算与校验策略 · 每组单独保存，重启服务后生效</p></div></header>
-    <div className="settings-layout"><nav className="settings-nav" aria-label="配置分类">{categories.map(item =>
-      <button key={item.id} type="button" className={cx('settings-nav-item', category === item.id && 'active')}
-        aria-current={category === item.id ? 'page' : undefined} onClick={() => { setCategory(item.id); setError(''); setNotice(''); }}>{item.title}</button>)}</nav>
-      <div className="settings-content">
-        {error && <p role="alert" className="error">{error} <Button size="xs" variant="secondary" onClick={() => void load().catch(cause => setError(String(cause)))}>重新载入</Button></p>}
-        {notice && <p role="status" className="settings-notice">{notice}</p>}
-        {!settings && !error && <p>正在加载配置…</p>}
-        {settings && <><h2 className="settings-category-title">{active.title}</h2>{active.groups.map(group => <Card key={group.id} className="settings-card">
-          <div className="settings-card-header"><div><h3>{group.title}</h3><p>{group.hint}</p></div>
-            <Button size="small" variant="primary" disabled={busy !== undefined || drafts[group.id] === JSON.stringify(settings.groups[group.id], null, 2)}
-              onClick={() => void save(group.id)}>{busy === group.id ? '保存中…' : '保存此组'}</Button></div>
-          <Textarea aria-label={`${group.title} JSON`} value={drafts[group.id] ?? ''} onChange={value => setDrafts(current => ({ ...current, [group.id]: value }))}
-            rows={Math.min(18, Math.max(4, (drafts[group.id]?.split('\n').length ?? 4) + 1))} resize="vertical" className="font-mono"
-            fieldClassName="bg-background-primary-default border border-separator-border" />
-          {group.id === 'agents' && <div className="settings-token-row">
-            <label>QoderCN PAT
-              <input type="password" autoComplete="new-password" value={qoderPat} maxLength={4096}
-                placeholder={settings.protected.qoderPatConfigured ? '已配置；输入新值可替换' : '输入 QoderCN 专用 PAT'}
-                onChange={event => setQoderPat(event.target.value)} />
-            </label>
-            <Button size="small" variant="primary" disabled={savingQoderPat || !qoderPat.trim()}
-              onClick={() => void saveQoderPat()}>{savingQoderPat ? '保存中…' : '保存 PAT'}</Button>
-          </div>}
-          {group.id === 'projectGroups' && ((settings.groups.projectGroups ?? []) as ProjectGroupCredential[]).map(project =>
-            <div className="settings-token-row" key={project.projectKey}>
-              <label>{project.projectKey} · 仓库 Token
-                <input type="password" autoComplete="new-password" value={projectTokens[project.projectKey] ?? ''}
-                  placeholder={project.tokenConfigured ? '已配置；留空保持不变' : '输入项目组 Token'}
-                  onChange={event => setProjectTokens(current => ({ ...current, [project.projectKey]: event.target.value }))} /></label>
-              <Button size="small" variant="primary" disabled={busy !== undefined || busyProject !== undefined ||
-                !projectTokens[project.projectKey]?.trim()}
-                onClick={() => void saveProjectToken(project.projectKey)}>{busyProject === project.projectKey ? '保存中…' : '保存 Token'}</Button>
-            </div>)}
-        </Card>)}</>}
-      </div></div></div>;
+
+  const devopsConfigured = settings?.protected.devopsCredentialsConfigured;
+  return <div className="stack settings-page"><header className="page-heading">
+    <div><h1>配置</h1><p className="muted">
+      {settings?.configurationSource === 'legacy'
+        ? '在启动时指定的配置文件修改运行配置，重启后生效。'
+        : `在 ${settings?.configurationFile ?? 'config/local.yaml'} 修改运行配置，重启后生效。`}
+    </p></div>
+    <Button size="small" variant="ghost" iconOnly leadingIcon={RiRefreshLine}
+      aria-label="刷新配置" title="刷新配置" onClick={reload} />
+  </header>
+    <div className="settings-content">
+      {error && !feedbackGroup && <p role="alert" className="error">{error}</p>}
+      {settings?.configurationError && <p role="alert" className="error">配置文件校验失败，服务继续使用启动时的配置。{settings.configurationError}</p>}
+      {settings?.pendingRestart && <p role="status">文件已修改，重启后生效。下方显示当前生效的配置。</p>}
+      {!settings && !error && <p role="status">正在加载配置…</p>}
+      {settings && categories.map(category => <section key={category.id} className="settings-section"
+        aria-labelledby={`settings-${category.id}`}>
+        <h2 id={`settings-${category.id}`} className="settings-category-title">{category.title}</h2>
+        {category.groups.map(group => {
+          const json = group.id === 'devopsCredentials' ? undefined : JSON.stringify(settings.groups[group.id], null, 2);
+          return <Card key={group.id} className="settings-card">
+            <div className="settings-card-header"><div><h3>{group.title}</h3>{group.hint && <p>{group.hint}</p>}</div></div>
+            {json !== undefined && <Textarea isReadOnly aria-label={`${group.title} JSON`} value={json}
+              rows={Math.min(18, Math.max(3, json.split('\n').length))} resize="vertical" className="font-mono"
+              fieldClassName="bg-background-primary-default border border-separator-border" />}
+            {group.id === 'devopsCredentials' && (settings.protected.devopsCredentialSource === 'external'
+              ? <p>当前由外部鉴权模块提供凭据。</p>
+              : <>
+                {settings.protected.devopsCredentialError && <p role="alert">本机凭据无法读取，请重新录入两项。</p>}
+                <p className="muted">{devopsConfigured ? '已配置。留空保留原值。' : '首次设置请填写两项。'}保存后在下次请求使用。</p>
+                <div className="settings-token-row">
+                  <label>Authorization
+                    <input type="password" autoComplete="new-password" value={authorization}
+                      onChange={event => setAuthorization(event.target.value)} />
+                  </label>
+                  <label>Cookie
+                    <input type="password" autoComplete="new-password" value={cookie}
+                      onChange={event => setCookie(event.target.value)} />
+                  </label>
+                  <Button size="small" variant="primary" disabled={Boolean(busy) ||
+                    (devopsConfigured ? !authorization.trim() && !cookie.trim() : !authorization.trim() || !cookie.trim())}
+                    onClick={() => void save('devopsCredentials', {
+                      authorization: authorization.trim() || undefined, cookie: cookie.trim() || undefined,
+                    }, () => { setAuthorization(''); setCookie(''); }, 'DevOps 凭据已更新，下次请求生效。')}>
+                    {busy === 'devopsCredentials' ? '保存中…' : '保存凭据'}</Button>
+                </div>
+              </>)}
+            {group.id === 'agents' && <div className="settings-token-row">
+              <label>QoderCN PAT
+                <input type="password" autoComplete="new-password" value={qoderPat} maxLength={4096}
+                  placeholder={settings.protected.qoderPatConfigured ? '已配置，输入新值可替换' : '输入 QoderCN 专用 PAT'}
+                  onChange={event => setQoderPat(event.target.value)} />
+              </label>
+              <Button size="small" variant="primary" disabled={Boolean(busy) || !qoderPat.trim()}
+                onClick={() => void save('qoderPat', { token: qoderPat }, () => setQoderPat(''),
+                  'QoderCN PAT 已更新，下次写模式 Run 生效。')}>
+                {busy === 'qoderPat' ? '保存中…' : '保存 PAT'}</Button>
+            </div>}
+            {group.id === 'projectGroups' && settings.groups.projectGroups.map(project => {
+              const key = project.projectKey;
+              const id = `projectGroupToken:${key}`;
+              const token = projectTokens[key] ?? '';
+              return <div className="settings-token-row" key={key}>
+                <label>{key} · 仓库 Token
+                  <input type="password" autoComplete="new-password" value={token}
+                    placeholder={project.tokenConfigured ? '已配置，输入新值可替换' : '输入项目组 Token'}
+                    onChange={event => setProjectTokens(current => ({ ...current, [key]: event.target.value }))} />
+                </label>
+                <Button size="small" variant="primary" disabled={Boolean(busy) || !token.trim()}
+                  onClick={() => void save('projectGroupToken', { projectKey: key, token: token.trim() },
+                    () => setProjectTokens(current => ({ ...current, [key]: '' })),
+                    '仓库 Token 已更新。下次请求使用新值，外部写入范围在重启预检后更新。', id)}>
+                  {busy === id ? '保存中…' : '保存 Token'}</Button>
+              </div>;
+            })}
+            {feedbackGroup === group.id && error && <p role="alert" className="error">{error}</p>}
+            {feedbackGroup === group.id && notice && <p role="status" className="settings-notice">{notice}</p>}
+          </Card>;
+        })}
+      </section>)}
+    </div>
+  </div>;
 }

@@ -1,14 +1,14 @@
 import { z } from 'zod';
 import { statSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
-import { id } from '../shared/model.js';
-import { repositoryConfig, type CodeHost } from '../repository-ci/model.js';
-import { groupVerifiers } from '../agent/worker/group-verifiers.js';
-import { readCodeHostGroupToken, readCodeHostToken } from './code-host-credentials.js';
-import { reviewConfig } from '../authorization/policy/config.js';
-import type { ReleasePipeline } from '../repository-ci/model.js';
-import type { AgentRunner } from '../agent/worker/model.js';
-import type { PollingSource, PushSource } from '../event/model.js';
+import { id } from '../../shared/model.js';
+import { repositoryConfig, type CodeHost } from '../../repository-ci/model.js';
+import { groupVerification, groupVerifier } from '../../agent/worker/group-verifiers.js';
+import { readCodeHostGroupToken, readCodeHostToken } from '../credentials/code-host-credentials.js';
+import { reviewConfig } from '../../authorization/policy/config.js';
+import type { ReleasePipeline } from '../../repository-ci/model.js';
+import { agentModel, type AgentRunner } from '../../agent/worker/model.js';
+import type { PollingSource, PushSource } from '../../event/model.js';
 
 export type RegisteredSource =
   | { mode: 'polling'; source: PollingSource }
@@ -18,7 +18,7 @@ export const projectGroup = z.object({ projectKey: id,
   repositories: z.array(repositoryConfig).default([]),
   repoKeys: z.array(id).optional(), // legacy configuration is accepted during migration
   searchRoot: id.refine(isAbsolute, 'Project search root must be absolute').optional(),
-  defaultRepoKey: id.optional(), verification: z.boolean().default(false),
+  defaultRepoKey: id.optional(), verification: z.union([z.boolean(), groupVerification]).default(false),
   functionalVerificationUrl: z.string().url().refine(value => {
     const url = new URL(value);
     return url.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(url.hostname) &&
@@ -31,6 +31,13 @@ export const projectGroup = z.object({ projectKey: id,
     if (value.functionalVerificationUrl && !value.verification)
       context.addIssue({ code: 'custom', path: ['verification'],
         message: 'Functional verification requires project group verification' });
+    if (typeof value.verification === 'object') {
+      if (value.verification.type === 'maven' && value.verification.scope === 'group' && !value.searchRoot)
+        context.addIssue({ code: 'custom', path: ['searchRoot'], message: 'Maven group verification requires searchRoot' });
+      if (!value.repositories.length || value.repositories.some(repo => !repo.localPath))
+        context.addIssue({ code: 'custom', path: ['repositories'],
+          message: 'Group verification requires nested repositories with localPath' });
+    }
     if (new Set(value.repoKeys).size !== value.repoKeys.length)
       context.addIssue({ code: 'custom', path: ['repoKeys'],
         message: `Project group ${value.projectKey} has duplicate repository keys` });
@@ -46,19 +53,20 @@ const sourceConfig = z.object({ id, kind: id, configRef: id, enabled: z.boolean(
 export const devopsDefectSource = sourceConfig.safeExtend({
   kind: z.literal('devops-defect'), projectKey: id, devops: devopsSourceConfig,
 });
-export const platformConfig = z.object({ repositories: z.array(repositoryConfig).default([]),
+export const platformFields = { repositories: z.array(repositoryConfig).default([]),
   projectGroups: z.array(projectGroup).default([]), sources: z.array(sourceConfig).default([]),
-  agents: z.array(z.object({ kind: id, enabled: z.boolean() })),
+  agents: z.array(z.object({ kind: id, enabled: z.boolean(), model: agentModel.optional() })),
   interaction: z.object({ actorId: id, roles: z.array(z.enum(['answer', 'route', 'approve', 'reopen', 'submit', 'command', 'configure'])),
     credentialFile: id, port: z.number().int().min(1).max(65535) }).optional(),
   review: reviewConfig.optional(),
-  cache: z.object({ root: id.default('.runtime/caches') }).optional(),
+  cache: z.object({ root: id.optional() }).optional(),
   releasePipelines: z.array(z.object({ repoKey: id, environment: id, configRef: id })).default([]),
   budget: z.object({ maxRunMs: z.number().int().positive(), maxConcurrentRuns: z.number().int().positive().default(2),
     perRepoConcurrentRuns: z.number().int().positive().default(2),
     perAgentConcurrentRuns: z.number().int().positive().default(2),
     reservedHumanResume: z.number().int().nonnegative().default(1) }).refine(
-      value => value.reservedHumanResume < value.maxConcurrentRuns, 'Resume reservation must leave a normal slot'), policyRef: id })
+      value => value.reservedHumanResume < value.maxConcurrentRuns, 'Resume reservation must leave a normal slot'), policyRef: id };
+export const platformConfig = z.object(platformFields)
   .superRefine((value, context) => {
     const repositories = [...value.repositories, ...value.projectGroups.flatMap(group => group.repositories)];
     const groups = new Map(value.projectGroups.map(group => [group.projectKey, group.repoKeys]));
@@ -82,14 +90,18 @@ export const platformConfig = z.object({ repositories: z.array(repositoryConfig)
     repositories: [...value.repositories, ...value.projectGroups.flatMap(group => group.repositories.map(repo =>
       ({ ...repo, credentialGroupKey: group.projectKey })))] }));
 export type PlatformConfig = z.infer<typeof platformConfig>;
-export function configuredGroupVerification(group: PlatformConfig['projectGroups'][number]): boolean {
-  if (!group.verification || !group.repositories.length) return false;
-  const verifier = groupVerifiers[group.projectKey];
-  if (!verifier || (verifier.buildFile && !group.searchRoot)) return false;
+export function configuredGroupVerifier(group: PlatformConfig['projectGroups'][number]) {
+  if (typeof group.verification !== 'object' || !group.repositories.length) return undefined;
+  const verification = group.verification;
+  const verifier = groupVerifier(verification);
+  if (verifier.buildFile && !group.searchRoot) return undefined;
   try {
-    return (!verifier.buildFile || statSync(resolve(group.searchRoot!, verifier.buildFile)).isFile()) &&
-      group.repositories.every(repo => repo.localPath && statSync(resolve(repo.localPath)).isDirectory());
-  } catch { return false; }
+    if ((!verifier.buildFile || statSync(resolve(group.searchRoot!, verifier.buildFile)).isFile()) &&
+        group.repositories.every(repo => repo.localPath && statSync(resolve(repo.localPath)).isDirectory() &&
+        (verification.type !== 'maven' || verification.scope === 'group' ||
+          statSync(resolve(repo.localPath, verification.buildFile)).isFile()))) return verifier;
+  } catch { return undefined; }
+  return undefined;
 }
 export function configuredLocalVerification(repo: PlatformConfig['repositories'][number],
   agentVerifyEnabled: boolean): boolean {
