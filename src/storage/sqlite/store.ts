@@ -1,10 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import { normalizedEvent, sourceEvent, validateMetadataFields, type EventRepository, type MetadataFields, type NormalizedEvent, type SourceEvent } from '../../event/model.js';
+import { associationFor, normalizedEvent, sourceEvent, validateMetadataFields, type EventRepository, type MetadataFields, type NormalizedEvent, type SourceEvent } from '../../event/model.js';
 import { task, taskRecord, type Task, type TaskRecord } from '../../agent/task/model.js';
 import { subscription, type Subscription } from '../../agent/task/model.js';
 import { routeDecision } from '../../agent/router/model.js';
-import { transitionTask } from '../../agent/task/transition.js';
+import { continuationReopenStates, transitionTask } from '../../agent/task/transition.js';
 import { isBlockingReview } from '../../agent/task/workflow.js';
 import type { TaskTransitionResult } from '../../agent/task/transition.js';
 import type { z } from 'zod';
@@ -16,12 +16,14 @@ import { migration2 } from './migrations/002.js';
 import { migration3 } from './migrations/003.js';
 import { migration4 } from './migrations/004.js';
 import { migration5 } from './migrations/005.js';
-import { migrateDevopsRevisions } from './migrations/006.js';
-import { defectRevision } from '../../event/sources/devops/defects.js';
+import { migrateSourceRevisions } from './migrations/006.js';
+import { migrateEventAssociations } from './migrations/007.js';
 import { approvalRequest, approvalDecision, answer } from '../../interaction/model.js';
 import type { routeReviewDecision } from '../../interaction/model.js';
 import type { RoutePlan } from '../../agent/kernel/task-loop.js';
 import type { CandidateRow } from '../../agent/router/candidate-finder.js';
+import { investigationMandate } from '../../authorization/model.js';
+import { queuedRun } from '../../agent/kernel/task-loop.js';
 import { hasCodeChangeIntent } from '../../authorization/auto-pr.js';
 
 export class SqliteStore implements EventRepository {
@@ -40,7 +42,8 @@ export class SqliteStore implements EventRepository {
         if (version < 3) this.db.exec(migration3);
         if (version < 4) this.db.exec(migration4);
         if (version < 5) this.db.exec(migration5);
-        if (version < 6) migrateDevopsRevisions(this.db, id => this.get(id));
+        if (version < 6) migrateSourceRevisions(this.db, id => this.get(id));
+        if (version < 7) migrateEventAssociations(this.db, id => this.get(id));
         this.db.exec(`PRAGMA user_version=${schemaVersion}`);
       });
     } catch (error) { this.db.close(); throw error; }
@@ -64,21 +67,37 @@ export class SqliteStore implements EventRepository {
     const value = normalizedEvent.parse(input);
     validateMetadataFields(value, this.allowedMetaDataFields);
     return this.transaction(() => {
-      const source = this.db.prepare('SELECT enabled,kind FROM event_source WHERE id=?').get(value.sourceId);
+      const source = this.db.prepare('SELECT enabled FROM event_source WHERE id=?').get(value.sourceId);
       if (source?.enabled !== 1) throw new Error(`Source ${value.sourceId} is not registered or enabled`);
+      const eventId = randomUUID();
+      delete value.metaData.associationCycle;
+      const association = associationFor(value);
+      if (association?.continueTask && value.objectKey) {
+        const previous = this.db.prepare(`SELECT id FROM source_event
+          WHERE source_id=? AND external_id=? AND object_key=? AND json_extract(meta_data,'$.association.scope')=?
+          ORDER BY rowid DESC LIMIT 1`).get(value.sourceId, value.externalId, value.objectKey, association.scope);
+        const prior = previous ? this.get(String(previous.id)) : undefined;
+        const cycle = prior && associationFor(prior)?.phase === association.phase && prior.metaData.associationCycle;
+        value.metaData.associationCycle = typeof cycle === 'string' ? cycle : eventId;
+        value.revision = `${value.metaData.associationCycle}:${value.revision}`;
+      }
       const existing = this.db.prepare('SELECT id FROM source_event WHERE source_id=? AND external_id=? AND revision=?')
         .get(value.sourceId, value.externalId, value.revision);
       if (existing) {
         const eventId = String(existing.id);
-        if (source.kind === 'devops-defect' && value.kind === 'bug' && value.attachments.length &&
-            value.revision === defectRevision(value)) {
+        const stored = value.attachments.some(ref => ref.stableKey) ? this.get(eventId) : undefined;
+        if (stored &&
+            stored.attachments.length === value.attachments.length &&
+            stored.attachments.every((ref, i) => {
+              const incoming = value.attachments[i]!;
+              return ref.kind === incoming.kind && (ref.stableKey ?? ref.sourceRef) === (incoming.stableKey ?? incoming.sourceRef);
+            })) {
           const attachments = JSON.stringify(value.attachments);
           this.db.prepare('UPDATE source_event SET attachments_json=? WHERE id=? AND attachments_json<>?')
             .run(attachments, eventId, attachments);
         }
         return { eventId, duplicate: true };
       }
-      const eventId = randomUUID();
       this.db.prepare(`INSERT INTO source_event
         (id,source_id,external_id,revision,kind,title,body,thread_key,object_key,repo_key,url,occurred_at,attachments_json,meta_data,status,received_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(eventId, value.sourceId, value.externalId, value.revision,
@@ -123,7 +142,12 @@ export class SqliteStore implements EventRepository {
         subscription: subscription.parse({ taskId: row.task_id, sourceId: row.source_id,
           targetKind: row.target_kind, targetKey: row.target_key, mode: row.mode }),
         task: task.parse(JSON.parse(String(row.payload_json))),
-      })));
+      }))).filter(match => typeof event.metaData.associationCycle !== 'string' ||
+        Boolean(this.db.prepare(`SELECT 1 FROM task_record r JOIN source_event e ON e.id=r.event_id
+          WHERE r.task_id=? AND r.kind='event_link' AND json_extract(r.payload_json,'$.mode')='handle'
+          AND e.source_id=? AND e.external_id=? AND e.object_key=?
+          AND json_extract(e.meta_data,'$.association.scope')=? LIMIT 1`)
+          .get(match.task.id, event.sourceId, event.externalId, event.objectKey ?? '', associationFor(event)?.scope ?? '')));
   }
   candidateRows(repoKey: string, excludedTaskId: string, limit: number): CandidateRow[] {
     return this.db.prepare(`SELECT t.id,substr(t.title,1,2049) AS title,substr(t.scope,1,2049) AS scope,
@@ -216,7 +240,29 @@ export class SqliteStore implements EventRepository {
           throw new Error('Route owner task does not allow investigation');
         if (event.repoKey && owner.repoKey !== event.repoKey)
           throw new Error('Route owner task belongs to another repository');
-        if (['released', 'closed', 'cancelled'].includes(owner.state))
+        if (plan.continuation) {
+          const { policyVersion, agentKind } = plan.continuation;
+          const firstInCycle = event.metaData.associationCycle === event.id;
+          const matches = this.subscriptionMatches(event).filter(match => match.subscription.mode === 'handle');
+          if (typeof event.metaData.associationCycle !== 'string' || matches.length !== 1 ||
+              matches[0]?.task.id !== owner.id || owner.state === 'cancelled' ||
+              owner.mandate.policyVersion !== policyVersion)
+            throw new Error('Continuation event owner or policy changed');
+          if (firstInCycle && continuationReopenStates.has(owner.state)) {
+            if (this.hasActiveRun(owner.id) || this.hasOpenHumanRequest(owner.id))
+              throw new Error('Continuation event cannot reopen a busy Task');
+            const next: Task = { ...owner, state: 'queued', iteration: owner.iteration + 1, baseRef: undefined,
+              updatedAt: at, mandate: investigationMandate(event.id, owner.repoKey, owner.scope, policyVersion, 'source-continuation') };
+            const changed = this.db.prepare(`UPDATE task SET state=?,iteration=?,mandate=?,base_ref=NULL,updated_at=?,payload_json=?
+              WHERE id=? AND state=? AND iteration=? AND updated_at=?`)
+              .run(next.state, next.iteration, JSON.stringify(next.mandate), at, JSON.stringify(task.parse(next)),
+                owner.id, owner.state, owner.iteration, owner.updatedAt);
+            if (changed.changes !== 1) throw new Error('Task changed before reopening from source feedback');
+            this.saveRecord({ id: randomUUID(), taskId: owner.id, kind: 'state_change', eventId: event.id, from: owner.state,
+              to: 'queued', reason: '来源反馈重新启动调查', actor: { kind: 'system', id: event.sourceId }, at });
+            this.saveRun(queuedRun(next, 'investigate', event.id, randomUUID(), agentKind, at));
+          }
+        } else if (['released', 'closed', 'cancelled'].includes(owner.state))
           throw new Error('Route owner task is closed or cancelled');
         if (plan.taskId !== owner.id || plan.task) throw new Error('Route plan owner changed');
         taskId = owner.id;

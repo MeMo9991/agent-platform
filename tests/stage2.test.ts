@@ -32,7 +32,8 @@ test('detail adapter extracts visible text and opaque image reference', () => {
   assert.equal(event.title, '缺陷 1');
   assert.equal(event.body, '[缺陷描述]：中文详情\n[重现步骤]：点击按钮');
   assert.deepEqual(event.attachments, [{ id: 'f2588fdaaacd4f7d975e615e64ec03d0', kind: 'image',
-    sourceRef: 'devops-file/0390cd20012045eabb6f934eb3bb5432/f2588fdaaacd4f7d975e615e64ec03d0' }]);
+    sourceRef: 'devops-file/0390cd20012045eabb6f934eb3bb5432/f2588fdaaacd4f7d975e615e64ec03d0',
+    stableKey: 'devops-file/0390cd20012045eabb6f934eb3bb5432' }]);
   assert.equal(event.repoKey, undefined);
   assert.equal(event.metaData.descriptionId, 'description-1');
   assert.equal(event.revision, normalizeDefect(parsed.item, config, parsed.description).revision);
@@ -87,8 +88,11 @@ test('version five DevOps duplicates are archived without recreating the routed 
     store.registerSource(config.sourceId, 'devops-defect', 'fixture', true);
     const parsed = parseDefectDetail(detail(1), 1, config.businessProjectId);
     const event = normalizeDefect(parsed.item, config, parsed.description);
-    const first = store.accept({ ...event, revision: 'old-revision-1' }).eventId;
-    const second = store.accept({ ...event, revision: 'old-revision-2' }).eventId;
+    const { association, ...historicalMeta } = event.metaData;
+    const historical = { ...event, metaData: historicalMeta,
+      attachments: event.attachments.map(({ stableKey, ...ref }) => ref) };
+    const first = store.accept({ ...historical, revision: 'old-revision-1' }).eventId;
+    const second = store.accept({ ...historical, revision: 'old-revision-2' }).eventId;
     store.db.prepare("UPDATE source_event SET status='done' WHERE id=?").run(first);
     store.db.prepare("UPDATE source_event SET status='needs_human' WHERE id=?").run(second);
     store.db.exec('PRAGMA user_version=5');
@@ -96,6 +100,8 @@ test('version five DevOps duplicates are archived without recreating the routed 
 
     const upgraded = new SqliteStore(path, metadata);
     try {
+      assert.deepEqual(upgraded.get(first)?.metaData.association, association);
+      assert.equal(upgraded.get(first)?.attachments[0]?.stableKey, event.attachments[0]?.stableKey);
       assert.deepEqual(upgraded.accept(event), { eventId: first, duplicate: true });
       assert.equal(upgraded.get(second)?.status, 'done');
       assert.deepEqual(upgraded.get(second)?.routingData, {
@@ -110,13 +116,17 @@ test('HTTP readers send list and detail requests without storing credentials', a
   const calls: Array<{ url: string; body: Record<string, unknown>; auth: string | null }> = [];
   const request: typeof fetch = async (input, init) => {
     const headers = new Headers(init?.headers);
-    calls.push({ url: String(input), body: JSON.parse(String(init?.body)), auth: headers.get('Authorization') });
+    calls.push({ url: String(input), body: init?.body ? JSON.parse(String(init.body)) : {}, auth: headers.get('Authorization') });
     return new Response(JSON.stringify({ code: '200', success: true }), { status: 200 });
   };
   const readers = createDefectApiReaders(config, async () => ({ Authorization: 'Bearer test-only' }), request);
   await readers.readPage(1);
   await readers.readDetail(11406133);
-  assert.deepEqual(calls.map(call => call.url.split('/').at(-1)), ['list', 'query']);
+  await readers.readComments(11406133);
+  assert.deepEqual(calls.map(call => new URL(call.url).pathname.split('/').at(-1)), ['list', 'query', 'treeList']);
+  assert.deepEqual(calls[0]?.body.statusIdList, [3166016, 3166017, 3166019]);
+  assert.equal(new URL(calls[2]!.url).searchParams.get('itemId'), '11406133');
+  assert.equal(new URL(calls[2]!.url).searchParams.get('businessProjectId'), String(config.businessProjectId));
   assert.equal(calls[0]?.body.pageNum, 1);
   assert.equal(calls[1]?.body.itemId, 11406133);
   assert.equal(calls[1]?.body.businessProjectId, String(config.businessProjectId));
@@ -202,4 +212,28 @@ test('configured DevOps task starts and reads list and detail through the regist
       event.metaData.repositorySelection]), [['11406133', 'agent-platform', 'default']]);
     reopened.close();
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Open and Reopen feedback keeps DevOps comment threads with the original defect text', async () => {
+  const comment = (id: number, text: string, children: unknown[] | null = null) => ({
+    id, itemId: 1, gmtCreated: `2026-11-25T11:34:0${id}.000+00:00`,
+    content: JSON.stringify(['root', {}, ['p', {}, ['span', {}, text]]]), children,
+  });
+  for (const statusId of [3166017, 3166019]) {
+    let refuse = true;
+    const source = createDefectSource(config, async () => page(1, [item(1)], 1),
+      async () => ({ ...detail(1), data: { ...detail(1).data, statusId } }), undefined, async id => {
+        assert.equal(id, 1);
+        if (refuse) throw new Error('Comments unavailable');
+        return { code: '200', success: true, data: [comment(3, '可以'), comment(1, '下周五', [comment(2, '测试')])] };
+      });
+    await assert.rejects(source.read(), /Comments unavailable/);
+    refuse = false;
+    const { events: [feedback] } = await source.read();
+    assert.equal(feedback?.metaData.statusId, statusId);
+    assert.deepEqual(feedback?.metaData.association,
+      { scope: String(config.businessProjectId), phase: String(statusId), continueTask: true });
+    assert.match(feedback!.body, /中文详情[\s\S]+- 下周五\n  - 回复：测试\n- 可以$/);
+    assert.equal(feedback?.attachments.length, 1);
+  }
 });

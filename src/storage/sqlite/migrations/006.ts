@@ -2,7 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { defectRevision } from '../../../event/sources/devops/defects.js';
 import type { SourceEvent } from '../../../event/model.js';
 
-export function migrateDevopsRevisions(db: DatabaseSync, readEvent: (id: string) => SourceEvent | undefined): void {
+export function migrateSourceRevisions(db: DatabaseSync, readEvent: (id: string) => SourceEvent | undefined): void {
   const rows = db.prepare(`SELECT e.id FROM source_event e JOIN event_source s ON s.id=e.source_id
     WHERE s.kind='devops-defect' AND e.kind='bug' AND json_array_length(e.attachments_json)>0
     ORDER BY e.status='done' DESC, e.received_at DESC, e.rowid DESC`).all();

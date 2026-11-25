@@ -3,9 +3,16 @@ import { id, timestamp } from '../shared/model.js';
 
 export const attachmentRef = z.object({
   id, kind: z.enum(['image', 'file']), sourceRef: id,
-  mimeType: id.optional(), expiresAt: timestamp.optional(),
-}).strict().refine(value => !/^https?:\/\//i.test(value.sourceRef) && !/[?#]/.test(value.sourceRef), 'sourceRef must be an opaque credential-free locator');
+  stableKey: id.optional(), mimeType: id.optional(), expiresAt: timestamp.optional(),
+}).strict().refine(value => [value.sourceRef, value.stableKey].every(ref =>
+  ref === undefined || (!/^https?:\/\//i.test(ref) && !/[?#]/.test(ref))),
+  'Attachment references must be opaque credential-free locators');
 export type AttachmentRef = z.infer<typeof attachmentRef>;
+
+const eventAssociation = z.object({ scope: id, phase: id, continueTask: z.boolean() }).strict();
+export function associationFor(event: { metaData: Record<string, unknown> }) {
+  return event.metaData.association === undefined ? undefined : eventAssociation.parse(event.metaData.association);
+}
 
 export const normalizedEvent = z.object({
   sourceId: id, externalId: id, revision: id, kind: id, title: id, body: z.string(),
@@ -21,6 +28,8 @@ export const normalizedEvent = z.object({
 export type NormalizedEvent = z.infer<typeof normalizedEvent>;
 export type MetadataFields = Readonly<Record<string, readonly string[]>>;
 export function validateMetadataFields(event: NormalizedEvent, allowed: MetadataFields): void {
+  if (associationFor(event)?.continueTask && !event.objectKey)
+    throw new Error('Task continuation requires an object key');
   const fields = allowed[event.sourceId];
   if (!fields || Object.keys(event.metaData).some(key => !fields.includes(key))) throw new Error(`Unapproved metaData field for source ${event.sourceId}`);
 }

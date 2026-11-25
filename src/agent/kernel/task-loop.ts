@@ -58,6 +58,7 @@ export interface RoutePlan {
   transitions?: readonly { state: TaskState; reason: string }[];
   subscriptions?: readonly Subscription[];
   investigationApprovalId?: string;
+  continuation?: { policyVersion: string; agentKind: string };
 }
 
 export function planRoute(event: SourceEvent, decision: RouteDecision, owner: Task | undefined,

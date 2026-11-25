@@ -1039,3 +1039,55 @@ test.skip('empty or missing pinned Skill fails Run and blocks Task before worksp
     assert.equal(store.db.prepare('SELECT state FROM task').get()?.state, 'blocked');
   } finally { store.close(); }
 });
+
+test('Source continuation reopens the same completed Task once per observed status transition', () => {
+  const fields = ['association', 'snapshotTime'];
+  const store = new SqliteStore(':memory:', { [sourceId]: fields });
+  try {
+    store.registerSource(sourceId, 'fixture', 'fixture', true);
+    const loop = createEventLoop(store, { [sourceId]: 'agent-platform' }, 'p1', 'fixture-rule', 'qoder');
+    const snapshot = (phase: string, body = event.body, gmtModified = '2026-11-25T10:00:00Z', project = 42) =>
+      ({ ...event, objectKey: event.externalId, revision: `${phase}:${body}`, body,
+        metaData: { association: { scope: String(project), phase, continueTask: phase !== 'initial' }, snapshotTime: gmtModified } });
+    store.accept(snapshot('initial'));
+    assert.equal(loop.processOne(), true);
+    const taskId = String(store.db.prepare('SELECT id FROM task').get()?.id);
+    const finish = () => {
+      for (const row of store.db.prepare("SELECT id FROM run WHERE status='queued'").all()) {
+        const run = store.getRun(String(row.id))!;
+        store.replaceRun({ ...run, status: 'cancelled' }, 'queued');
+      }
+      store.saveTransition(taskId, 'closed', '已交付', new Date().toISOString(), crypto.randomUUID(),
+        { kind: 'human', id: 'owner' });
+    };
+    store.setTaskBaseRef(taskId, 'a'.repeat(40));
+    finish();
+    assert.equal(store.getTask(taskId)?.baseRef, 'a'.repeat(40));
+
+    const open = store.accept(snapshot('open', '复测失败'));
+    assert.equal(loop.processOne(), true);
+    const reopened = store.getTask(taskId)!;
+    assert.equal(reopened.iteration, 2);
+    assert.equal(reopened.state, 'queued');
+    assert.deepEqual(reopened.mandate.allowedActions, ['investigate']);
+    assert.equal(reopened.baseRef, undefined);
+    assert.equal(store.db.prepare("SELECT event_id FROM task_record WHERE task_id=? AND kind='event_link' AND event_id=?")
+      .get(taskId, open.eventId)?.event_id, open.eventId);
+    assert.equal(store.db.prepare('SELECT count(*) AS n FROM task').get()?.n, 1);
+    assert.deepEqual(store.accept(snapshot('open', '复测失败', '2026-11-25T10:05:00Z')),
+      { eventId: open.eventId, duplicate: true });
+    finish();
+    store.accept(snapshot('open', '复测失败，补充说明'));
+    assert.equal(loop.processOne(), true);
+    assert.equal(store.getTask(taskId)?.iteration, 2);
+
+    store.accept(snapshot('reopen', '再次复测失败'));
+    assert.equal(loop.processOne(), true);
+    assert.equal(store.getTask(taskId)?.iteration, 3);
+    assert.equal(store.db.prepare("SELECT count(*) AS n FROM run WHERE status='queued'").get()?.n, 1);
+    const other = store.accept(snapshot('open', '其他项目', '2026-11-25T10:06:00Z', 43));
+    assert.equal(loop.processOne(), true);
+    assert.equal(store.get(other.eventId)?.status, 'needs_human');
+    assert.equal(store.db.prepare('SELECT count(*) AS n FROM task').get()?.n, 1);
+  } finally { store.close(); }
+});
