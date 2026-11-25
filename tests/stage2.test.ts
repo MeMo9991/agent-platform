@@ -37,6 +37,8 @@ test('detail adapter extracts visible text and opaque image reference', () => {
   assert.equal(event.metaData.descriptionId, 'description-1');
   assert.equal(event.revision, normalizeDefect(parsed.item, config, parsed.description).revision);
   assert.notEqual(event.revision, normalizeDefect({ ...parsed.item, subject: '修改后的缺陷' }, config, parsed.description).revision);
+  assert.notEqual(event.revision, normalizeDefect(parsed.item, config,
+    parseDescription(description.replace('0390cd20012045eabb6f934eb3bb5432', 'a'.repeat(32)))).revision);
   assert.throws(() => parseDefectDetail(detail(1), 2, config.businessProjectId));
   assert.throws(() => parseDescription(JSON.stringify(['img', { src: 'https://evil.example/file' }])));
 });
@@ -46,6 +48,7 @@ test('two-page scan persists pending events, deduplicates repeats and recovers a
   const path = join(directory, 'events.sqlite3');
   const metadata = { [config.sourceId]: [...defectMetadataFields] };
   let failPageTwo = true;
+  let attachmentToken = 'a'.repeat(32);
   try {
     const store = new SqliteStore(path, metadata);
     store.registerSource(config.sourceId, 'devops-defect', 'devops-assigned-config', true);
@@ -54,12 +57,14 @@ test('two-page scan persists pending events, deduplicates repeats and recovers a
       async number => {
         if (number === 2 && failPageTwo) throw new Error('page two failed');
         return number === 1 ? page(1, [item(1), item(2)]) : page(2, [item(3)]);
-      }, async id => detail(id));
+      }, async id => ({ ...detail(id), data: { ...detail(id).data,
+        description: description.replace(/f2588fdaaacd4f7d975e615e64ec03d0/g, attachmentToken) } }));
     await assert.rejects(pollSource(source, ingress), /page two failed/);
     assert.equal(store.listPending(10).length, 2);
     failPageTwo = false;
     assert.equal(await pollSource(source, ingress), 3);
     assert.equal(store.listPending(10).length, 3);
+    attachmentToken = 'b'.repeat(32);
     assert.equal(await pollSource(source, ingress), 3);
     assert.equal(store.listPending(10).length, 3);
     assert.equal(store.db.prepare('SELECT count(*) AS n FROM task').get()?.n, 0);
@@ -68,7 +73,36 @@ test('two-page scan persists pending events, deduplicates repeats and recovers a
     const pending = reopened.listPending(10);
     assert.equal(pending.length, 3);
     assert.equal(reopened.get(pending[0]!.id)?.body, '[缺陷描述]：中文详情\n[重现步骤]：点击按钮');
+    assert.equal(reopened.get(pending[0]!.id)?.attachments[0]?.id, attachmentToken);
     reopened.close();
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('version five DevOps duplicates are archived without recreating the routed event', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-platform-devops-revision-'));
+  const path = join(directory, 'events.sqlite3');
+  const metadata = { [config.sourceId]: defectMetadataFields };
+  try {
+    const store = new SqliteStore(path, metadata);
+    store.registerSource(config.sourceId, 'devops-defect', 'fixture', true);
+    const parsed = parseDefectDetail(detail(1), 1, config.businessProjectId);
+    const event = normalizeDefect(parsed.item, config, parsed.description);
+    const first = store.accept({ ...event, revision: 'old-revision-1' }).eventId;
+    const second = store.accept({ ...event, revision: 'old-revision-2' }).eventId;
+    store.db.prepare("UPDATE source_event SET status='done' WHERE id=?").run(first);
+    store.db.prepare("UPDATE source_event SET status='needs_human' WHERE id=?").run(second);
+    store.db.exec('PRAGMA user_version=5');
+    store.close();
+
+    const upgraded = new SqliteStore(path, metadata);
+    try {
+      assert.deepEqual(upgraded.accept(event), { eventId: first, duplicate: true });
+      assert.equal(upgraded.get(second)?.status, 'done');
+      assert.deepEqual(upgraded.get(second)?.routingData, {
+        kind: 'ignored', reason: 'Duplicate DevOps defect snapshot', duplicateOf: first,
+      });
+      assert.equal(upgraded.db.prepare('SELECT count(*) AS n FROM source_event').get()?.n, 2);
+    } finally { upgraded.close(); }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -95,7 +129,7 @@ test('image reader only opens validated same-source references with bounded imag
   const reader = createDevopsAttachmentReader(config.sourceId, async () => ({ Authorization: 'Bearer test-only' }),
     async (input, init) => {
       assert.equal(String(input), imageUrl);
-      assert.equal(init?.redirect, 'error');
+      assert.equal(init?.redirect, 'manual');
       return new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': 'image/png' } });
     });
   const stream = await reader.open(config.sourceId, ref);
@@ -104,6 +138,32 @@ test('image reader only opens validated same-source references with bounded imag
   assert.deepEqual(chunks, [1, 2, 3]);
   await assert.rejects(reader.open('other-source', ref));
   await assert.rejects(reader.open(config.sourceId, { ...ref, sourceRef: 'https://evil.example/file' }));
+});
+
+test('DevOps image redirects only to its attachment host without forwarding credentials', async () => {
+  const ref = parseDescription(description).attachments[0]!;
+  let location = 'https://devops-obs.faw.cn/image.png?signature=fixture';
+  let downloads = 0;
+  const reader = createDevopsAttachmentReader(config.sourceId,
+    async () => ({ Authorization: 'Bearer test-only', Cookie: 'session=fixture' }),
+    async (input, init) => {
+      if (String(input) === imageUrl) {
+        assert.equal(new Headers(init?.headers).get('Authorization'), 'Bearer test-only');
+        assert.equal(init?.redirect, 'manual');
+        return new Response(null, { status: 302, headers: { location } });
+      }
+      downloads++;
+      assert.equal(String(input), location);
+      assert.equal(init?.headers, undefined);
+      assert.equal(init?.credentials, 'omit');
+      assert.equal(init?.redirect, 'error');
+      return new Response(new Uint8Array([1]), { headers: { 'Content-Type': 'image/png' } });
+    });
+  const stream = await reader.open(config.sourceId, ref);
+  assert.equal((await stream.getReader().read()).value?.[0], 1);
+  location = 'https://devops-obs.faw.cn.example.org/image.png';
+  await assert.rejects(reader.open(config.sourceId, ref), /Untrusted DevOps attachment redirect/);
+  assert.equal(downloads, 1);
 });
 
 test('configured DevOps task starts and reads list and detail through the registered handler', async () => {

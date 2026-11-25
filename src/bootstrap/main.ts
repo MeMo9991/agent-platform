@@ -26,6 +26,7 @@ import { createStage5OpenChange } from '../authorization/stage5-open-change.js';
 import { resolveReview } from '../authorization/policy/config.js';
 import { createPolicyAuditSink, decide, setPolicyAuditSink } from '../authorization/policy/evaluate.js';
 import { autoPrMandate, autoPrRuleRef } from '../authorization/auto-pr.js';
+import { scheduledMrApprovalCandidates } from '../authorization/scheduled-mr-approval.js';
 import { randomUUID } from 'node:crypto';
 import { authorizationHeaders as defaultAuthorizationHeaders } from './credentials/devops-credentials.js';
 import { configuredGroupVerifier, configuredLocalVerification, stage5PreflightRepositories } from './config/config.js';
@@ -147,6 +148,9 @@ for (const [repoKey, verifier] of Object.entries(repoGroupVerifiers)) groupCheck
 const functionalVerificationUrls = Object.fromEntries(platform.projectGroups.filter(group =>
   group.functionalVerificationUrl)
   .flatMap(group => group.repoKeys.map(repoKey => [repoKey, group.functionalVerificationUrl!] as const)));
+const investigationApprovalSources = new Set(config.schedules.tasks.map(task => task.id));
+const scheduledDefectSources = new Set(config.schedules.tasks.filter(task =>
+  task.enabled && task.kind === 'devops-defect-poll').map(task => task.id));
 const coordinator = createKernelCoordinator(runtime.store, trustedRepoBySource, platform.policyRef,
   'configured-source', agentKind, platform.repositories.map(repo => repo.repoKey),
   createTaskCandidateFinder(runtime.store), event => {
@@ -161,7 +165,8 @@ const coordinator = createKernelCoordinator(runtime.store, trustedRepoBySource, 
       configuredLocalVerification(repo, stage5WorkerEnabled)))), repoKey =>
     Boolean(!platform.projectGroups.some(group => group.repoKeys.includes(repoKey)) &&
       platform.repositories.find(repo => repo.repoKey === repoKey && repo.localChecks.length > 0)),
-  repoKey => stage5WritableRepos.has(repoKey), repoKey => Boolean(functionalVerificationUrls[repoKey]));
+  repoKey => stage5WritableRepos.has(repoKey), repoKey => Boolean(functionalVerificationUrls[repoKey]),
+  investigationApprovalSources);
 for (const row of runtime.store.db.prepare(`SELECT run.id, task.repo_key AS repoKey,
     (SELECT json_extract(record.payload_json,'$.summary') FROM task_record AS record
       WHERE record.run_id=run.id AND record.kind='agent_report' AND record.status='failed'
@@ -261,6 +266,7 @@ try {
       stage5OpenChange,
       stage5WritesEnabled,
       agentLinks,
+      investigationApprovalSources,
       settingsPaths: config.paths,
       settingsSnapshot: { platform: config.platform, schedules: config.schedules, revision: config.revision,
         capabilities: { stage5Worker: stage5WorkerEnabled, qoderWrite: Boolean(qoderRuntime && capabilities.qoderWrite),
@@ -310,6 +316,13 @@ if (stage5WritesEnabled) {
                 new Date().toISOString(), randomUUID(), { kind: 'system', id: 'auto-pr' });
           });
         }
+      }
+      for (const { taskId, version } of scheduledMrApprovalCandidates(runtime.store, platform.repositories,
+        scheduledDefectSources, stage5WritableRepos)) {
+        try {
+          const preflight = await stage5OpenChange.prepare(taskId, version);
+          if (preflight.kind === 'ready') await stage5OpenChange.execute(taskId, version);
+        } catch (error) { console.error(`Scheduled MR delivery failed for Task ${taskId}`, error); }
       }
       const tasks = runtime.store.db.prepare(`SELECT DISTINCT effect.task_id,task.repo_key FROM task_record AS effect
         JOIN task ON task.id=effect.task_id WHERE effect.kind='effect' AND effect.status='done'

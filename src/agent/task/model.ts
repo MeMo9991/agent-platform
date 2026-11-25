@@ -91,8 +91,10 @@ export const taskRecord = z.discriminatedUnion('kind', [
     disposition: z.enum(['accept_risk', 'false_positive']), reason: z.string().trim().min(1).max(2000),
     idempotencyKey: id, actor: actorRef.extend({ kind: z.literal('human') }) }),
   recordBase.extend({ kind: z.literal('approval'), requestId: id, action: action.or(z.literal('review')),
-    subjectSha: id, policyVersion: id,
-    idempotencyKey: id, actor: actorRef.extend({ kind: z.literal('human') }), decision: z.enum(['approve', 'reject']) }),
+    subjectSha: id.optional(), policyVersion: id,
+    idempotencyKey: id, actor: actorRef.extend({ kind: z.literal('human') }), decision: z.enum(['approve', 'reject']) })
+    .refine(value => Boolean(value.subjectSha || (value.action === 'investigate' && value.eventId)),
+      'Approval must identify its event or reviewed commit'),
   recordBase.extend({ kind: z.literal('effect'), action, idempotencyKey: id,
     status: z.enum(['pending', 'done', 'uncertain', 'failed']), subjectSha: id.optional(),
     request: z.object({ repoKey: id, sourceBranch: id.optional(), targetBranch: id,

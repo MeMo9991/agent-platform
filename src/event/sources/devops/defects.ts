@@ -18,19 +18,26 @@ export const defectMetadataFields = ['businessProjectId', 'statusId', 'descripti
 export type DefectSourceConfig = { sourceId: string; businessProjectId: number; pageSize?: number };
 export type RepositorySelection = { repoKey: string; reason: 'repository-name' | 'file-name' | 'default' };
 
+export function defectRevision(event: Pick<NormalizedEvent, 'title' | 'body' | 'attachments' | 'metaData'>): string {
+  const { gmtModified, descriptionId, statusId, priority, environment } = event.metaData;
+  // DevOps rotates the last segment of the download reference for the same file.
+  const files = event.attachments.map(ref => ref.sourceRef.replace(/^(devops-file\/[a-f0-9]{32})\/[a-f0-9]{32}$/, '$1'));
+  const facts = [gmtModified, event.title, event.body, files, descriptionId, statusId, priority, environment];
+  return createHash('sha256').update(JSON.stringify(facts)).digest('hex');
+}
+
 export function normalizeDefect(raw: z.infer<typeof defect>, config: DefectSourceConfig,
   detail: { body: string; attachments: NormalizedEvent['attachments'] }, selection?: RepositorySelection): NormalizedEvent {
   if (raw.businessProjectId !== config.businessProjectId) throw new Error(`Unexpected project for defect ${raw.id}`);
-  const revisionFacts = [raw.gmtModified, raw.subject, detail.body, detail.attachments, raw.descriptionId, raw.statusId, raw.priority, raw.environment];
-  return {
-    sourceId: config.sourceId, externalId: String(raw.id), objectKey: String(raw.id), kind: 'bug',
-    revision: createHash('sha256').update(JSON.stringify(revisionFacts)).digest('hex'),
+  const event = {
+    sourceId: config.sourceId, externalId: String(raw.id), objectKey: String(raw.id), kind: 'bug' as const,
     title: raw.subject, body: detail.body, repoKey: selection?.repoKey,
     attachments: detail.attachments,
     metaData: { businessProjectId: raw.businessProjectId, statusId: raw.statusId, descriptionId: raw.descriptionId,
       priority: raw.priority, environment: raw.environment, gmtCreated: raw.gmtCreated, gmtModified: raw.gmtModified,
       ...(selection ? { repositorySelection: selection.reason } : {}) },
   };
+  return { ...event, revision: defectRevision(event) };
 }
 
 export function parseDefectPage(payload: unknown, config: DefectSourceConfig, expectedPage: number): { items: z.infer<typeof defect>[]; nextCursor?: string } {

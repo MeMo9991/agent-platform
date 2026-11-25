@@ -215,6 +215,7 @@ export type DashboardOptions = { actorId: string; repoKeys: readonly string[];
   projectGroups?: Readonly<Record<string, { repoKeys: readonly string[]; defaultRepoKey?: string }>>;
   selectRepositoryByGroup?: Readonly<Record<string, (title: string, body: string) => { repoKey: string } | undefined>>;
   sourceRepoKeys?: Readonly<Record<string, readonly string[]>>;
+  investigationApprovalSources?: ReadonlySet<string>;
   imageDirectory: string; attachmentReaders: Readonly<Record<string, AttachmentReader>>;
   runners?: Readonly<Record<string, AgentRunner | undefined>>; workerCapacity?: number;
   evidenceRoot?: string; takeoverEvidence?: TakeoverEvidencePorts; settingsPaths?: SettingsPaths;
@@ -278,14 +279,38 @@ export async function handleDashboard(request: IncomingMessage, response: Server
       const { limit, offset } = page(url);
       const events = store.db.prepare("SELECT id FROM source_event WHERE status='needs_human' ORDER BY received_at,id LIMIT ? OFFSET ?")
         .all(limit, offset).map(row => safeEvent(store, String(row.id), options.sourceRepoKeys));
-      const requests = store.db.prepare("SELECT payload_json FROM task_record WHERE kind IN ('question','approval_request') AND status='open' ORDER BY at,id LIMIT ? OFFSET ?")
-        .all(limit, offset).map(row => safeRecord(JSON.parse(String(row.payload_json)), options.evidenceRoot ?? '', store));
-      const tasks = store.db.prepare("SELECT id FROM task WHERE state IN ('failed','blocked','paused','waiting_human') ORDER BY updated_at DESC,id LIMIT ? OFFSET ?")
+      const requests = store.db.prepare(`SELECT r.payload_json, t.title AS taskTitle FROM task_record r
+        JOIN task t ON t.id=r.task_id WHERE r.kind IN ('question','approval_request') AND r.status='open'
+        ORDER BY r.at,r.id LIMIT ? OFFSET ?`).all(limit, offset).map(row => ({
+          ...safeRecord(JSON.parse(String(row.payload_json)), options.evidenceRoot ?? '', store),
+          taskTitle: row.taskTitle,
+        }));
+      const tasks = store.db.prepare(`SELECT t.id FROM task t WHERE
+        (t.state IN ('failed','blocked') OR (t.state IN ('paused','waiting_human') AND EXISTS (
+          SELECT 1 FROM run r WHERE r.id=(
+            SELECT latest.id FROM run latest WHERE latest.task_id=t.id AND latest.iteration=t.iteration
+            ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
+          ) AND (r.status='failed' OR (r.status='paused' AND (
+            json_extract(r.payload_json,'$.processTerminationUnconfirmed')=1 OR EXISTS (
+              SELECT 1 FROM task_record failure WHERE failure.run_id=r.id
+              AND failure.kind='agent_report' AND failure.status='failed'
+            )
+          )))
+        ))) AND NOT EXISTS (
+          SELECT 1 FROM task_record request WHERE request.task_id=t.id AND request.status='open'
+          AND request.kind IN ('question','approval_request')
+        ) AND NOT EXISTS (
+          SELECT 1 FROM run active WHERE active.task_id=t.id AND active.status IN ('queued','running')
+        ) ORDER BY t.updated_at DESC,t.id LIMIT ? OFFSET ?`)
         .all(limit, offset).map(row => safeTask(store, String(row.id)));
+      const activeRuns = store.db.prepare(`SELECT r.id, r.task_id AS taskId, r.stage, t.title, t.repo_key AS repoKey
+        FROM run r JOIN task t ON t.id=r.task_id AND t.iteration=r.iteration WHERE r.status=?
+        ORDER BY r.priority DESC,r.created_at,r.id LIMIT ? OFFSET ?`);
       const notices = (options.agentLinks ?? []).filter(agent => !agent.linked).map(agent => ({
         id: `agent-link:${agent.kind}`, kind: 'agent', title: `智能体 ${agent.kind} 未连接`,
         detail: agent.detail, checkedAt: agent.checkedAt }));
-      send(response, 200, { events, requests, tasks, notices }); return true;
+      send(response, 200, { events, requests, tasks, notices,
+        running: activeRuns.all('running', limit, offset), queued: activeRuns.all('queued', limit, offset) }); return true;
     }
     if (request.method === 'GET' && path === '/api/tasks') {
       const { limit, offset } = page(url);
@@ -420,7 +445,9 @@ export async function handleDashboard(request: IncomingMessage, response: Server
     const eventMatch = /^\/api\/events\/([^/]+)$/.exec(path);
     if (request.method === 'GET' && eventMatch) {
       const event = safeEvent(store, decodeURIComponent(eventMatch[1]!), options.sourceRepoKeys);
-      send(response, event ? 200 : 404, event ?? { error: 'Event not found' }); return true;
+      send(response, event ? 200 : 404, event ? { ...event,
+        investigationApprovalRequired: options.investigationApprovalSources?.has(event.sourceId) ?? false,
+      } : { error: 'Event not found' }); return true;
     }
     const reviewMatch = /^\/api\/tasks\/([^/]+)\/content-reviews$/.exec(path);
     if (request.method === 'POST' && reviewMatch) {
@@ -501,6 +528,8 @@ export async function handleDashboard(request: IncomingMessage, response: Server
       const eventId = decodeURIComponent(routeMatch[1]!);
       const value = routeReviewDecision.parse({ ...(await readBody(request, 65_536) as Record<string, unknown>),
         eventId, actor: { kind: 'human', id: options.actorId }, at: new Date().toISOString() });
+      if (value.choice === 'new_task' && value.approveInvestigation && !roles.includes('approve'))
+        throw new Error('Approve role required');
       await coordinator.onSignal({ kind: 'human_response', response: { kind: 'route_decision', value } });
       const event = safeEvent(store, eventId, options.sourceRepoKeys);
       send(response, 200, { ok: true, event, taskId: event?.taskId });
