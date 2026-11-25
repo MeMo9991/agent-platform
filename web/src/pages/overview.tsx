@@ -1,14 +1,17 @@
 import { useEffect, useId, useState, type ReactNode } from 'react';
-import { RiAlertLine, RiChat3Line, RiInbox2Line, RiShieldCheckLine } from '@remixicon/react';
+import { RiAlertLine, RiFlashlightLine, RiInbox2Line, RiTimeLine } from '@remixicon/react';
+import { Focusable, Link, Tooltip, TooltipTrigger } from 'react-aria-components';
 import { api } from '../app/api';
 import type { Event, RecordItem, Task } from '../shared/types';
 
 type Overview = { pendingEvents: number; runningWorkers: number; enabledSources: number; workerCapacity: number | null };
 type InboxNotice = { id: string; title: string; detail: string; checkedAt: string };
-type Inbox = { events: Event[]; requests: RecordItem[]; tasks: Task[]; notices?: InboxNotice[] };
+type InboxRun = { id: string; taskId: string; stage: string; title: string; repoKey: string };
+type Inbox = { events: Event[]; requests: (RecordItem & { taskTitle?: string })[]; tasks: Task[];
+  notices?: InboxNotice[]; running?: InboxRun[]; queued?: InboxRun[] };
 const taskStates: Record<string, string> = { failed: '失败', blocked: '受阻', paused: '已暂停', waiting_human: '等待人工' };
 const approvalTitles: Record<string, string> = {
-  continue: '继续验证审批', functional_review: '功能验证异常审批', manual_delivery: '人工交付审批',
+  investigation: '开始调查审批', continue: '继续验证审批', functional_review: '功能验证异常审批', manual_delivery: '人工交付审批',
 };
 const actions: Record<string, string> = { open_pr: '提交 PR', merge: '合并', release: '发布', rollback: '回滚' };
 function requestTitle(request: RecordItem) {
@@ -32,15 +35,28 @@ function taskActionsUrl(id: string) {
   return `#/tasks/${encodeURIComponent(id)}/actions`;
 }
 
-function BoardCard({ title, meta, label, href }: { title: string; meta: string; label?: string; href?: string }) {
+function BoardCard({ title, meta, label, labelTone, href }: {
+  title: string; meta: string; label?: string; labelTone?: 'question' | 'approval'; href?: string;
+}) {
   const content = <>
-    <strong dir="auto">{title}</strong><span dir="auto">{meta}</span>
-    {label && <span className="inbox-card-label">{label}</span>}
+    <span className="inbox-card-title" dir="auto">{title}</span>
+    <span className="inbox-card-meta" dir="auto">{meta}</span>
+    {label && <span className="inbox-card-label" data-tone={labelTone}>{label}</span>}
   </>;
   return <li className="inbox-card">
-    {href ? <a href={href} className="inbox-card-action">{content}</a>
-      : <div className="inbox-card-content">{content}</div>}
+    <TooltipTrigger>
+      {href ? <Link href={href} className="inbox-card-action">{content}</Link>
+        : <Focusable><div className="inbox-card-content">{content}</div></Focusable>}
+      <Tooltip className="text-preview-tooltip">
+        <div dir="auto">{title}</div>
+        {meta && <div className="inbox-card-tooltip-meta" dir="auto">{meta}</div>}
+      </Tooltip>
+    </TooltipTrigger>
   </li>;
+}
+
+function RunCard({ run }: { run: InboxRun }) {
+  return <BoardCard title={run.title} meta={run.repoKey} label={run.stage} href={`#/tasks/${encodeURIComponent(run.taskId)}`} />;
 }
 
 export function OverviewPage() {
@@ -54,9 +70,6 @@ export function OverviewPage() {
     void refresh(); const timer = setInterval(refresh, 5000);
     return () => { live = false; clearInterval(timer); };
   }, []);
-  const questions = inbox?.requests.filter(request => request.kind === 'question') ?? [];
-  const approvals = inbox?.requests.filter(request => request.kind !== 'question') ?? [];
-  const taskTitle = new Map(inbox?.tasks.map(task => [task.id, task.title]));
   return <div className="stack overview"><header className="page-heading"><div>
     <h1>待办总览</h1></div>
     <span className="live-indicator"><span /> 每 5 秒更新</span></header>
@@ -69,19 +82,21 @@ export function OverviewPage() {
       <span>Worker 使用 {overview.runningWorkers} / {overview.workerCapacity ?? '—'}</span>
     </div>}
     {inbox && <div className="inbox-board">
-      <BoardColumn title="待处理事件" count={inbox.events.length + (inbox.notices?.length ?? 0)} tone="events" icon={RiInbox2Line}>
+      <BoardColumn title="待处理事件" count={inbox.events.length + inbox.requests.length + (inbox.notices?.length ?? 0)}
+        tone="events" icon={RiInbox2Line}>
         {inbox.notices?.map(item => <BoardCard key={item.id} title={item.title} meta={item.detail} label="未连接" />)}
-        {inbox.events.map(event => <BoardCard key={event.id} title={event.title} meta={event.sourceId}
+        {inbox.events.map(event => <BoardCard key={event.id} title={event.title} meta={event.sourceId} label="待路由"
           href={event.taskId ? taskActionsUrl(event.taskId) : `#/events/${encodeURIComponent(event.id)}`} />)}
+        {inbox.requests.map(request => <BoardCard key={request.id}
+          title={request.taskTitle ?? `任务 ${request.taskId.slice(0, 8)}`} meta={requestTitle(request)}
+          label={request.kind === 'question' ? '待回答' : '待审批'}
+          labelTone={request.kind === 'question' ? 'question' : 'approval'} href={taskActionsUrl(request.taskId)} />)}
       </BoardColumn>
-      <BoardColumn title="待回答" count={questions.length} tone="questions" icon={RiChat3Line}>
-        {questions.map(request => <BoardCard key={request.id} title={taskTitle.get(request.taskId) ?? requestTitle(request)}
-          meta={`任务 ${request.taskId.slice(0, 8)}`} href={taskActionsUrl(request.taskId)} />)}
+      <BoardColumn title="运行中" count={inbox.running?.length ?? 0} tone="running" icon={RiFlashlightLine}>
+        {inbox.running?.map(run => <RunCard key={run.id} run={run} />)}
       </BoardColumn>
-      <BoardColumn title="待审批" count={approvals.length} tone="approvals" icon={RiShieldCheckLine}>
-        {approvals.map(request => <BoardCard key={request.id} title={requestTitle(request)}
-          meta={taskTitle.get(request.taskId) ?? `任务 ${request.taskId.slice(0, 8)}`}
-          href={taskActionsUrl(request.taskId)} />)}
+      <BoardColumn title="排队中" count={inbox.queued?.length ?? 0} tone="queued" icon={RiTimeLine}>
+        {inbox.queued?.map(run => <RunCard key={run.id} run={run} />)}
       </BoardColumn>
       <BoardColumn title="受阻任务" count={inbox.tasks.length} tone="blocked" icon={RiAlertLine}>
         {inbox.tasks.map(task => <BoardCard key={task.id} title={task.title} meta={task.repoKey}

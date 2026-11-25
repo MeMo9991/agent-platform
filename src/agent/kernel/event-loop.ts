@@ -15,7 +15,8 @@ export interface EventLoopStore {
 
 export function createEventLoop(store: EventLoopStore, trustedRepoBySource: Readonly<Record<string, string | readonly string[]>>,
   policyVersion: string, ruleRef: string, agentKind: string, finder: TaskCandidateFinder, leaseMs = 60_000,
-  autoMandate?: (event: SourceEvent) => TaskMandate | undefined) {
+  autoMandate?: (event: SourceEvent) => TaskMandate | undefined,
+  investigationApprovalSources: ReadonlySet<string> = new Set()) {
   return { processOne(): boolean {
     const now = new Date();
     const event = store.claimEvent(now.toISOString(), new Date(now.getTime() + leaseMs).toISOString());
@@ -27,7 +28,7 @@ export function createEventLoop(store: EventLoopStore, trustedRepoBySource: Read
       policyVersion, ruleRef, finder.find, excludedTaskId, autoMandate);
     const owner = decision.kind === 'existing_task' ? store.getTask(decision.taskId) : undefined;
     const plan = planRoute(event, decision, owner, owner ? store.hasBusyRun(owner.id, owner.iteration) : false,
-      agentKind, now.toISOString());
+      agentKind, now.toISOString(), investigationApprovalSources.has(event.sourceId));
     store.commitRoute(event.id, plan, now.toISOString());
     return true;
   } };

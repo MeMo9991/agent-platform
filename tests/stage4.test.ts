@@ -274,6 +274,58 @@ test('human route can create a related Task from a closed candidate', async () =
   } finally { await server?.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('scheduled human routing can approve investigation once and requires both roles', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-platform-route-approval-'));
+  const sourceId = 'scheduled';
+  const store = new SqliteStore(':memory:', { [sourceId]: [] });
+  store.registerSource(sourceId, 'fixture', 'fixture', true);
+  const sources = new Set([sourceId]);
+  const coordinator = createKernelCoordinator(store, {}, 'p1', 'fixture', 'qoder', ['repo'],
+    createTaskCandidateFinder(store), undefined, undefined, undefined, undefined, undefined, undefined, undefined, sources);
+  try {
+    for (const canApprove of [false, true]) {
+      const server = await startLocalApi(store, coordinator, {
+        credentialFile: join(directory, 'token'), actorId: 'owner',
+        roles: canApprove ? ['route', 'approve'] : ['route'],
+        dashboard: { actorId: 'owner', repoKeys: ['repo'], investigationApprovalSources: sources,
+          imageDirectory: join(directory, 'images'), attachmentReaders: {} },
+      });
+      try {
+        const { eventId } = store.accept({ sourceId, externalId: String(canApprove), revision: '1',
+          kind: 'bug', title: 'Scheduled defect', body: '', attachments: [], metaData: {} });
+        coordinator.processPending();
+        const base = `http://127.0.0.1:${server.port}`;
+        const headers = { authorization: `Bearer ${readFileSync(join(directory, 'token'), 'utf8')}`,
+          'content-type': 'application/json' };
+        const event = await (await fetch(`${base}/api/events/${eventId}`, { headers })).json();
+        assert.equal(event.investigationApprovalRequired, true);
+        const decision = { eventId, choice: 'new_task', repoKey: 'repo', reason: 'Human routing',
+          idempotencyKey: `route-${canApprove}`, approveInvestigation: true };
+        const route = (path: string, approveInvestigation: boolean) =>
+          fetch(`${base}${path}`, { method: 'POST', headers, body: JSON.stringify({ ...decision, approveInvestigation }) });
+        const path = `/api/events/${eventId}/routes`;
+        if (!canApprove) {
+          assert.equal((await route('/routes', true)).status, 403);
+          const forbidden = await route(path, true);
+          assert.equal(forbidden.ok, false);
+          assert.equal((await forbidden.json()).error, 'Approve role required');
+          assert.equal(store.get(eventId)?.status, 'needs_human');
+        }
+        const response = await route(path, canApprove);
+        assert.equal(response.status, 200);
+        const { taskId } = await response.json();
+        assert.equal(store.getTask(taskId)?.state, canApprove ? 'queued' : 'waiting_human');
+        assert.equal((await (await route(path, canApprove)).json()).taskId, taskId);
+        assert.equal(store.db.prepare('SELECT count(*) AS n FROM run WHERE task_id=?').get(taskId)?.n, canApprove ? 1 : 0);
+        assert.equal(store.db.prepare("SELECT status FROM task_record WHERE task_id=? AND kind='approval_request'")
+          .get(taskId)?.status, canApprove ? 'approved' : 'open');
+        assert.equal(store.db.prepare("SELECT count(*) AS n FROM task_record WHERE task_id=? AND kind='approval'")
+          .get(taskId)?.n, canApprove ? 1 : 0);
+      } finally { await server.stop(); }
+    }
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('task detail withholds unreviewed Agent text and returns path-free development evidence', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'agent-platform-stage4-evidence-'));
   const store = new SqliteStore(':memory:');
@@ -393,6 +445,50 @@ test('task detail withholds unreviewed Agent text and returns path-free developm
     assert.equal(published.records.find((item: any) => item.id === 'review-secret').summary, '审查意见已人工核对');
     assert.doesNotMatch(JSON.stringify(published), /sensitive-review-value/);
     assert.doesNotMatch(JSON.stringify(published), /demo-secret|super-secret|question-secret|"resultRef"/);
+  } finally { await server?.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('inbox separates human requests, active runs and abnormal stops', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-platform-inbox-lanes-'));
+  const store = new SqliteStore(':memory:');
+  const coordinator = createKernelCoordinator(store, {}, 'p1', 'test', 'qoder', ['repo'], createTaskCandidateFinder(store));
+  let server: Awaited<ReturnType<typeof startLocalApi>> | undefined;
+  try {
+    const at = new Date().toISOString();
+    const cases = [
+      { id: 'question', state: 'waiting_human', run: 'waiting_human' },
+      { id: 'approval', state: 'blocked', run: 'failed' },
+      { id: 'abnormal', state: 'waiting_human', run: 'paused' },
+      { id: 'manual-pause', state: 'paused', run: 'paused' },
+      { id: 'running', state: 'investigating', run: 'running' },
+      { id: 'queued', state: 'queued', run: 'queued' },
+    ] as const;
+    for (const entry of cases) {
+      store.saveTask({ id: entry.id, title: `Title ${entry.id}`, scope: 'Investigate', repoKey: 'repo',
+        mandate: { sourceEventId: 'event', repoKey: 'repo', goal: 'Investigate', allowedActions: ['investigate'],
+          maxAutoRisk: 'low', policyVersion: 'p1', authority: { kind: 'trusted_rule', ruleRef: 'test' } },
+        state: entry.state, iteration: 1, priority: 0, createdAt: at, updatedAt: at });
+      store.saveRun({ id: `run-${entry.id}`, taskId: entry.id, iteration: 1, stage: 'investigate',
+        status: entry.run, priority: 0, attempt: 0, createdAt: at });
+    }
+    store.saveRecord({ id: 'request-question', taskId: 'question', runId: 'run-question', kind: 'question',
+      status: 'open', prompt: 'question-secret', at });
+    store.saveRecord({ id: 'request-approval', taskId: 'approval', kind: 'approval_request',
+      status: 'open', request: { kind: 'scope_change' }, at });
+    store.saveRecord({ id: 'failure', taskId: 'abnormal', runId: 'run-abnormal', kind: 'agent_report',
+      status: 'failed', summary: 'Preflight failed', at });
+    server = await startLocalApi(store, coordinator, { credentialFile: join(directory, 'token'),
+      actorId: 'owner', roles: ['route'], dashboard: { actorId: 'owner', repoKeys: ['repo'],
+        imageDirectory: join(directory, 'images'), attachmentReaders: {} } });
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/inbox`);
+    assert.equal(response.status, 200);
+    const inbox = await response.json();
+    assert.deepEqual(inbox.requests.map((row: { taskTitle: string }) => row.taskTitle).sort(),
+      ['Title approval', 'Title question']);
+    assert.doesNotMatch(JSON.stringify(inbox), /question-secret/);
+    assert.deepEqual(inbox.tasks.map((row: { id: string }) => row.id), ['abnormal']);
+    assert.deepEqual(inbox.running.map((row: { taskId: string }) => row.taskId), ['running']);
+    assert.deepEqual(inbox.queued.map((row: { taskId: string }) => row.taskId), ['queued']);
   } finally { await server?.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 

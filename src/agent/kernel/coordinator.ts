@@ -59,11 +59,19 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
   verificationConfigured: (repoKey: string) => boolean = () => true,
   developmentChecksRequired: (repoKey: string) => boolean = verificationConfigured,
   automaticDeliveryConfigured: (repoKey: string) => boolean = () => true,
-  functionalVerificationConfigured: (repoKey: string) => boolean = () => false): KernelCoordinator & {
+  functionalVerificationConfigured: (repoKey: string) => boolean = () => false,
+  investigationApprovalSources: ReadonlySet<string> = new Set()): KernelCoordinator & {
     offerFunctionalReview(runId: string, reason: string): void; processPending(limit?: number): number;
     resolveHumanRoute(value: z.infer<typeof routeReviewDecision>): string | undefined } {
-  const eventLoop = createEventLoop(store, trustedRepoBySource, policyVersion, ruleRef, agentKind, finder, 60_000, autoMandate);
+  const eventLoop = createEventLoop(store, trustedRepoBySource, policyVersion, ruleRef, agentKind, finder,
+    60_000, autoMandate, investigationApprovalSources);
   const actor = { kind: 'system' as const, id: 'kernel' };
+  function finishInvestigationApproval(task: Task, eventId: string, value: z.infer<typeof approvalDecision>): void {
+    const accepted = value.decision === 'approve';
+    store.saveTransition(task.id, accepted ? 'queued' : 'cancelled',
+      accepted ? '人工批准开始调查' : '人工驳回调查', value.at, randomUUID(), value.actor);
+    if (accepted) store.saveRun(queuedRun(task, 'investigate', eventId, randomUUID(), agentKind, value.at));
+  }
   function offerFunctionalReview(runId: string, reason: string): void {
     store.transaction(() => {
       const run = store.getRun(runId);
@@ -128,7 +136,8 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
           if (prior?.idempotencyKey === value.idempotencyKey && prior.actor.id === value.actor.id &&
               prior.choice === value.choice && prior.reason === value.reason &&
               (prior.choice !== 'new_task' || (value.choice === 'new_task' && prior.repoKey === value.repoKey &&
-                prior.parentTaskId === value.parentTaskId)) &&
+                prior.parentTaskId === value.parentTaskId &&
+                Boolean(prior.approveInvestigation) === Boolean(value.approveInvestigation))) &&
               (prior.choice !== 'existing_task' || (value.choice === 'existing_task' && prior.taskId === value.taskId)))
             return event.status === 'done' ? audit?.taskId : undefined;
           throw new Error('Route review is no longer open');
@@ -140,10 +149,20 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
         const decision = automatic && routed.kind === 'new_task' && automatic.repoKey === routed.repoKey
           ? { ...routed, mandate: automatic } : routed;
         const plan = planRoute(event, decision, owner, owner ? store.hasBusyRun(owner.id, owner.iteration) : false,
-          agentKind, value.at);
+          agentKind, value.at, investigationApprovalSources.has(event.sourceId));
+        const approveInvestigation = value.choice === 'new_task' && value.approveInvestigation;
+        if (approveInvestigation && !plan.investigationApprovalId)
+          throw new Error('This route does not require investigation approval');
         store.claimHumanRoute(event.id);
         const taskId = store.commitRoute(event.id, plan, value.at);
         store.auditHumanRoute(event.id, decision, value, taskId);
+        if (approveInvestigation && plan.investigationApprovalId) {
+          const approval = { requestId: plan.investigationApprovalId, actor: value.actor, decision: 'approve' as const,
+            at: value.at, idempotencyKey: `route-investigation:${plan.investigationApprovalId}` };
+          const approved = store.recordApproval(approval);
+          if (!approved) throw new Error('Investigation approval was not recorded');
+          finishInvestigationApproval(approved, event.id, approval);
+        }
         return taskId;
       });
     },
@@ -270,7 +289,9 @@ export function createKernelCoordinator(store: KernelStore, trustedRepoBySource:
             if (!approved) return;
             if (request.kind !== 'approval_request') throw new Error('Approval request changed');
             const approvedRequest = request.request as z.infer<typeof approvalRequest>;
-            if (approvedRequest.kind === 'action') {
+            if (approvedRequest.kind === 'investigation') {
+              finishInvestigationApproval(approved, approvedRequest.eventId, response.value);
+            } else if (approvedRequest.kind === 'action') {
               store.saveTransition(approved.id, 'ready_to_merge', 'Approved code-host action',
                 response.value.at, randomUUID(), response.value.actor);
             } else if (approvedRequest.kind === 'continue') {

@@ -9,11 +9,13 @@ export const answer = z.object({ questionId: id, actor: humanActor, content: z.s
 export const routeReviewRequest = z.object({ eventId: id, candidates: z.array(routeCandidate), reason: id });
 export const routeReviewDecision = z.discriminatedUnion('choice', [
   z.object({ choice: z.literal('existing_task'), eventId: id, taskId: id, actor: humanActor, at: timestamp, idempotencyKey: id, reason: id }),
-  z.object({ choice: z.literal('new_task'), eventId: id, repoKey: id, parentTaskId: id.optional(),
+  z.object({ choice: z.literal('new_task'), eventId: id, repoKey: id, parentTaskId: id.optional(), approveInvestigation: z.boolean().optional(),
     actor: humanActor, at: timestamp, idempotencyKey: id, reason: id }),
   z.object({ choice: z.literal('ignored'), eventId: id, actor: humanActor, at: timestamp, idempotencyKey: id, reason: id }),
 ]);
 export const approvalRequest = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('investigation'), id, taskId: id, eventId: id,
+    iteration: z.number().int().positive(), policyVersion: id, reason: id }),
   z.object({ kind: z.literal('scope_change'), id, taskId: id, iteration: z.number().int().positive(),
     proposedMandate: mandate, sourceSha: id, policyVersion: id }),
   z.object({ kind: z.literal('continue'), id, taskId: id, iteration: z.number().int().positive(),

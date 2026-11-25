@@ -218,23 +218,25 @@ function HumanAction({ taskId, version, record, onDone }: { taskId: string; vers
     release: '发布', rollback: '回滚' };
   const action = record.request?.action;
   const actionText = action ? actionLabels[action] ?? action
-    : record.request?.kind === 'functional_review' ? '跳过本次功能验收，进入 review'
+    : record.request?.kind === 'investigation' ? '开始调查'
+      : record.request?.kind === 'functional_review' ? '跳过本次功能验收，进入 review'
       : record.request?.proposedMandate?.allowedActions.join('、');
   return <div className="run-row task-run task-decision">
     <div className="task-run-heading"><strong>{isQuestion ? '问题' : '审批'}</strong>
       <Badge tone="warn">{isQuestion ? '待回答' : '待审批'}</Badge>
       <Chip color="gray" variant="caption">{isQuestion ? 'Agent 提问'
         : record.request?.kind === 'action' ? '动作审批'
+          : record.request?.kind === 'investigation' ? '开始调查审批'
           : record.request?.kind === 'continue' ? '继续验证审批'
             : record.request?.kind === 'functional_review' ? '功能验证异常审批'
             : record.request?.kind === 'manual_delivery' ? (record.request.verificationSkipped
               ? '未验证人工移交审批' : '人工交付审批') : '范围变更'}</Chip></div>
     {(record.request?.kind === 'continue' || record.request?.kind === 'manual_delivery' ||
-      record.request?.kind === 'functional_review') && record.request.reason &&
+      record.request?.kind === 'functional_review' || record.request?.kind === 'investigation') && record.request.reason &&
       <p className="task-review-summary">{record.request.reason}</p>}
     {record.prompt && <p className="task-review-summary">{record.prompt}</p>}
     {record.request && <dl className="task-run-meta">
-      <div><dt>受审 SHA</dt><dd><code>{record.request.sourceSha}</code></dd></div>
+      {record.request.sourceSha && <div><dt>受审 SHA</dt><dd><code>{record.request.sourceSha}</code></dd></div>}
       <div><dt>拟议动作</dt><dd>{actionText ?? '—'}</dd></div>
       {record.request.targetBranch && <div><dt>目标分支</dt><dd>{record.request.targetBranch}</dd></div>}
       {record.request.targetSha && <div><dt>目标 SHA</dt><dd><code>{record.request.targetSha}</code></dd></div>}
@@ -488,7 +490,8 @@ export function TaskDetailPage({ id, actorId, roles, stage5WritesEnabled, manual
       {handledApprovals.length > 0 && <Card><h2>已处理审批</h2>
         {handledApprovals.map(item => <div className="run-row task-run" key={item.id}>
           <div className="task-run-heading"><strong>{item.request?.kind === 'functional_review'
-            ? '功能验证异常：是否进入 review' : item.request?.kind ?? '审批请求'}</strong>
+            ? '功能验证异常：是否进入 review'
+            : item.request?.kind === 'investigation' ? '开始调查审批' : item.request?.kind ?? '审批请求'}</strong>
             <Badge>{item.status === 'approved' ? '已批准' : item.status === 'rejected' ? '已驳回' : '已失效'}</Badge></div>
           {item.request?.reason && <p className="task-review-summary">{item.request.reason}</p>}
           {item.request?.sourceSha && <p className="muted">固定 SHA：<code>{item.request.sourceSha}</code></p>}

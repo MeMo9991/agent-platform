@@ -106,7 +106,7 @@ test('review asks for one raw JSON verdict bound to the pinned SHA', async () =>
   const runner = createQoderRunner({ verified: true, launch(_command, args) {
     assert.equal(args[args.indexOf('--permission-mode') + 1], 'dont_ask');
     assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /one raw JSON object/);
-    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, new RegExp(`"subjectSha":"exactly ${sha}"`));
+    assert.match(args[args.indexOf('--append-system-prompt') + 1]!, new RegExp(`"subjectSha":"${sha}"`));
     assert.match(args[args.indexOf('--append-system-prompt') + 1]!, /Do not use Markdown, code fences, prose/);
     return { process: child, terminate: () => true, isTerminated: () => true };
   } }, directory);

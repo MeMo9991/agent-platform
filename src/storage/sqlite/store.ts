@@ -16,6 +16,8 @@ import { migration2 } from './migrations/002.js';
 import { migration3 } from './migrations/003.js';
 import { migration4 } from './migrations/004.js';
 import { migration5 } from './migrations/005.js';
+import { migrateDevopsRevisions } from './migrations/006.js';
+import { defectRevision } from '../../event/sources/devops/defects.js';
 import { approvalRequest, approvalDecision, answer } from '../../interaction/model.js';
 import type { routeReviewDecision } from '../../interaction/model.js';
 import type { RoutePlan } from '../../agent/kernel/task-loop.js';
@@ -38,6 +40,7 @@ export class SqliteStore implements EventRepository {
         if (version < 3) this.db.exec(migration3);
         if (version < 4) this.db.exec(migration4);
         if (version < 5) this.db.exec(migration5);
+        if (version < 6) migrateDevopsRevisions(this.db, id => this.get(id));
         this.db.exec(`PRAGMA user_version=${schemaVersion}`);
       });
     } catch (error) { this.db.close(); throw error; }
@@ -61,11 +64,20 @@ export class SqliteStore implements EventRepository {
     const value = normalizedEvent.parse(input);
     validateMetadataFields(value, this.allowedMetaDataFields);
     return this.transaction(() => {
-      const source = this.db.prepare('SELECT enabled FROM event_source WHERE id=?').get(value.sourceId);
+      const source = this.db.prepare('SELECT enabled,kind FROM event_source WHERE id=?').get(value.sourceId);
       if (source?.enabled !== 1) throw new Error(`Source ${value.sourceId} is not registered or enabled`);
       const existing = this.db.prepare('SELECT id FROM source_event WHERE source_id=? AND external_id=? AND revision=?')
         .get(value.sourceId, value.externalId, value.revision);
-      if (existing) return { eventId: String(existing.id), duplicate: true };
+      if (existing) {
+        const eventId = String(existing.id);
+        if (source.kind === 'devops-defect' && value.kind === 'bug' && value.attachments.length &&
+            value.revision === defectRevision(value)) {
+          const attachments = JSON.stringify(value.attachments);
+          this.db.prepare('UPDATE source_event SET attachments_json=? WHERE id=? AND attachments_json<>?')
+            .run(attachments, eventId, attachments);
+        }
+        return { eventId, duplicate: true };
+      }
       const eventId = randomUUID();
       this.db.prepare(`INSERT INTO source_event
         (id,source_id,external_id,revision,kind,title,body,thread_key,object_key,repo_key,url,occurred_at,attachments_json,meta_data,status,received_at)
@@ -165,13 +177,15 @@ export class SqliteStore implements EventRepository {
         if (decision.mandate.sourceEventId !== eventId || decision.mandate.repoKey !== decision.repoKey ||
             (decision.mandate.authority.kind !== 'trusted_rule' &&
               decision.mandate.authority.kind !== 'auto_pr')) throw new Error('Invalid intake Mandate');
-        if (!plan.task || !plan.run || plan.task.id !== plan.run.taskId || plan.taskId !== plan.task.id ||
+        const expectedStates = plan.investigationApprovalId ? 'triaged,waiting_human' : 'triaged,queued';
+        if (!plan.task || plan.taskId !== plan.task.id ||
             plan.task.repoKey !== decision.repoKey || plan.task.mandate.sourceEventId !== eventId ||
             plan.task.parentTaskId !== decision.parentTaskId ||
             JSON.stringify(plan.task.mandate) !== JSON.stringify(decision.mandate) ||
             plan.task.state !== 'new' || plan.task.iteration !== 1 || plan.task.title !== event.title ||
-            plan.transitions?.map(item => item.state).join(',') !== 'triaged,queued' ||
-            plan.run.stage !== 'investigate' || plan.run.requestKey !== `${plan.task.id}:1:investigate:${eventId}`)
+            plan.transitions?.map(item => item.state).join(',') !== expectedStates ||
+            (plan.investigationApprovalId ? Boolean(plan.run) : !plan.run || plan.run.taskId !== plan.task.id ||
+              plan.run.stage !== 'investigate' || plan.run.requestKey !== `${plan.task.id}:1:investigate:${eventId}`))
           throw new Error('Invalid new Task route plan');
         if (decision.parentTaskId) {
           const related = this.getTask(decision.parentTaskId);
@@ -190,7 +204,11 @@ export class SqliteStore implements EventRepository {
             throw new Error('Invalid route subscription');
           this.saveSubscription(item);
         }
-        this.saveRun(plan.run);
+        if (plan.investigationApprovalId) {
+          this.saveApprovalRequest({ kind: 'investigation', id: plan.investigationApprovalId, taskId, eventId,
+            iteration: initial.iteration, policyVersion: initial.mandate.policyVersion,
+            reason: '定时扫描发现此事件，请确认是否开始调查。' });
+        } else if (plan.run) this.saveRun(plan.run);
       } else {
         const owner = this.getTask(decision.taskId);
         if (!owner) throw new Error('Route owner task was not found');
@@ -358,7 +376,8 @@ export class SqliteStore implements EventRepository {
           .get(request.taskId, request.iteration, request.sourceSha) : undefined;
       if (!current || current.state !== 'waiting_human' ||
           (request.kind !== 'action' && current.iteration !== request.iteration) ||
-          (request.kind === 'functional_review'
+          (request.kind === 'investigation' ? !this.investigationApprovalReady(current, request.eventId)
+            : request.kind === 'functional_review'
             ? !this.functionalReviewReady(request.taskId, request.runId, request.iteration, request.sourceSha)
             : request.kind === 'continue' || request.kind === 'manual_delivery' ? !continueRun
             : stageFive ? reviewedSha !== request.sourceSha : current.baseRef !== request.sourceSha) ||
@@ -381,6 +400,11 @@ export class SqliteStore implements EventRepository {
       this.saveRecord({ id: request.id, taskId: request.taskId, kind: 'approval_request', request, status: 'open',
         at: new Date().toISOString() });
     });
+  }
+  private investigationApprovalReady(current: Task, eventId: string): boolean {
+    return current.iteration === 1 && current.mandate.sourceEventId === eventId &&
+      current.mandate.allowedActions.includes('investigate') &&
+      !this.db.prepare('SELECT 1 FROM run WHERE task_id=? LIMIT 1').get(current.id);
   }
   latestReview(taskId: string): Extract<TaskRecord, { kind: 'review' }> | undefined {
     const current = this.getTask(taskId);
@@ -506,17 +530,18 @@ export class SqliteStore implements EventRepository {
           .get(request.taskId, request.iteration, request.sourceSha) : undefined;
       if (!current || current.state !== 'waiting_human' ||
           (request.kind !== 'action' && current.iteration !== request.iteration) ||
-          (request.kind === 'functional_review'
+          (request.kind === 'investigation' ? !this.investigationApprovalReady(current, request.eventId)
+            : request.kind === 'functional_review'
             ? !this.functionalReviewReady(request.taskId, request.runId, request.iteration, request.sourceSha)
             : request.kind === 'continue' || request.kind === 'manual_delivery' ? !continueRun
             : stageFive ? this.latestReviewedSha(current.id) !== request.sourceSha : current.baseRef !== request.sourceSha) ||
           (request.kind === 'action' && this.latestReview(current.id)?.id !== request.reviewRecordId) ||
           current.mandate.policyVersion !== request.policyVersion) throw new Error('Approval request is stale');
       this.saveRecord({ id: randomUUID(), taskId: current.id, kind: 'approval', requestId: request.id,
-        action: request.kind === 'functional_review' ? 'review'
+        action: request.kind === 'investigation' ? 'investigate' : request.kind === 'functional_review' ? 'review'
           : request.kind === 'scope_change' || request.kind === 'continue' || request.kind === 'manual_delivery'
             ? 'edit' : request.action,
-        subjectSha: request.sourceSha,
+        ...(request.kind === 'investigation' ? { eventId: request.eventId } : { subjectSha: request.sourceSha }),
         policyVersion: request.policyVersion, actor: value.actor, decision: value.decision,
         idempotencyKey: value.idempotencyKey, at: value.at });
       const status = value.decision === 'approve' ? 'approved' : 'rejected';
@@ -529,6 +554,7 @@ export class SqliteStore implements EventRepository {
         if (changed.changes !== 1) throw new Error('Approval Task state changed');
         return next;
       }
+      if (request.kind === 'investigation') return current;
       return (request.kind === 'action' || request.kind === 'continue' ||
         request.kind === 'manual_delivery' || request.kind === 'functional_review') && value.decision === 'approve'
         ? current : undefined;

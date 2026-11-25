@@ -6,8 +6,61 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SqliteStore } from '../src/storage/sqlite/store.js';
 import { createStage5OpenChange } from '../src/authorization/stage5-open-change.js';
+import { scheduledMrApprovalCandidates } from '../src/authorization/scheduled-mr-approval.js';
 import { createKernelCoordinator } from './kernel-fixture.js';
 import type { CodeHost } from '../src/repository-ci/model.js';
+
+test('scheduled GitLab MR polling advances approved requests and skips rejected or started effects', () => {
+  const store = new SqliteStore(':memory:', { scheduled: [] });
+  try {
+    const at = new Date().toISOString();
+    const sourceSha = 'a'.repeat(40);
+    store.registerSource('scheduled', 'devops-defect', 'fixture', true);
+    const { eventId } = store.accept({ sourceId: 'scheduled', externalId: '1', revision: '1', kind: 'bug',
+      title: 'Defect', body: 'Repair', attachments: [], metaData: {} });
+    const mandate = { sourceEventId: eventId, repoKey: 'repo', goal: 'Repair',
+      allowedActions: ['investigate'] as ['investigate'], maxAutoRisk: 'low' as const,
+      policyVersion: 'v1', authority: { kind: 'trusted_rule' as const, ruleRef: 'fixture' } };
+    const actor = { kind: 'human' as const, id: 'owner' };
+    store.saveTask({ id: 'task', originEventId: eventId, repoKey: 'repo', title: 'Defect', scope: 'Repair',
+      mandate, baseRef: 'b'.repeat(40), state: 'waiting_human', iteration: 1, priority: 0, createdAt: at, updatedAt: at });
+    store.saveApprovalRequest({ kind: 'scope_change', id: 'edit-approval', taskId: 'task', iteration: 1,
+      sourceSha: 'b'.repeat(40), policyVersion: 'v1', proposedMandate: { ...mandate,
+        allowedActions: ['investigate', 'edit'], maxAutoRisk: 'high',
+        authority: { kind: 'human_approval', approvalRef: 'edit-approval' } } });
+    store.recordApproval({ requestId: 'edit-approval', decision: 'approve', actor, at, idempotencyKey: 'approve-edit' });
+    store.saveTransition('task', 'ready_to_merge', 'Review complete', at, 'transition', actor);
+    store.saveRecord({ id: 'review', taskId: 'task', runId: 'review-run', kind: 'review',
+      iteration: 1, subjectSha: sourceSha, verdict: 'pass', findings: [], at });
+    const repo = { repoKey: 'repo', provider: 'gitlab' as const, hostUrl: 'https://gitlab.example.test',
+      projectRef: 'team/repo', targetBranch: 'dev', requiredChecks: [], credentialsRef: 'env:FIXTURE',
+      localChecks: [], autoPr: { enabled: true, allowedPrefixes: [] } };
+    const sources = new Set(['scheduled']);
+    const writable = new Set(['repo']);
+    const candidates = () => scheduledMrApprovalCandidates(store, [repo], sources, writable);
+    const version = Number(store.db.prepare("SELECT version FROM task WHERE id='task'").get()?.version);
+    assert.deepEqual(candidates(), [{ taskId: 'task', version }]);
+    assert.deepEqual(scheduledMrApprovalCandidates(store, [repo], new Set(['other']), writable), []);
+    assert.deepEqual(scheduledMrApprovalCandidates(store, [repo], sources, new Set()), []);
+
+    store.saveRecord({ id: 'scope', taskId: 'task', kind: 'approval_request', status: 'approved',
+      request: { kind: 'scope_change', sourceSha }, at });
+    assert.deepEqual(candidates(), [{ taskId: 'task', version }]);
+    const request = { kind: 'action', action: 'open_pr', reviewRecordId: 'review', sourceSha };
+    store.saveRecord({ id: 'action', taskId: 'task', kind: 'approval_request', status: 'approved',
+      request, at });
+    assert.deepEqual(candidates(), [{ taskId: 'task', version }]);
+    store.saveRecord({ id: 'rejected-action', taskId: 'task', kind: 'approval_request', status: 'rejected', request, at });
+    assert.deepEqual(candidates(), []);
+    store.saveRecord({ id: 'later-approved', taskId: 'task', kind: 'approval_request', status: 'approved', request, at });
+    assert.deepEqual(candidates(), [{ taskId: 'task', version }]);
+    store.saveRecord({ id: 'effect', taskId: 'task', kind: 'effect', action: 'open_pr',
+      idempotencyKey: 'create-mr', status: 'pending', subjectSha: sourceSha, at });
+    assert.deepEqual(candidates(), []);
+    store.settleEffect('effect', 'uncertain');
+    assert.deepEqual(candidates(), []);
+  } finally { store.close(); }
+});
 
 test('opening a change requests approval for the reviewed SHA and rechecks the target', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'stage5-open-change-'));

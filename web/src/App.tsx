@@ -31,7 +31,8 @@ export default function App() {
     manualCloneRoot={config.manualCloneRoot} initialTab={segments[2] === 'actions' ? 'actions' : 'overview'} />
     : segments[0] === 'tasks' ? <TasksPage repoKeys={config.repoKeys} canDelete={config.roles.includes('command')} />
     : segments[0] === 'events' && segments[1] ? <EventPage id={decodeURIComponent(segments[1])} repoKeys={config.repoKeys}
-      unverifiedRepoKeys={config.unverifiedRepoKeys ?? []} canRoute={config.roles.includes('route')} />
+      unverifiedRepoKeys={config.unverifiedRepoKeys ?? []} canRoute={config.roles.includes('route')}
+      canApprove={config.roles.includes('approve')} />
     : segments[0] === 'new' ? config.roles.includes('submit') ? <ManualSubmit projectGroups={config.projectGroups} /> : <p>当前操作者没有提交任务权限。</p>
     : segments[0] === 'settings' ? config.roles.includes('configure') ? <SettingsPage /> : <p>当前操作者没有配置权限。</p> : <OverviewPage />;
   const navigation = [

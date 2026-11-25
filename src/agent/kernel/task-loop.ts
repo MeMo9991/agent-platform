@@ -57,10 +57,11 @@ export interface RoutePlan {
   taskId?: string;
   transitions?: readonly { state: TaskState; reason: string }[];
   subscriptions?: readonly Subscription[];
+  investigationApprovalId?: string;
 }
 
 export function planRoute(event: SourceEvent, decision: RouteDecision, owner: Task | undefined,
-  busy: boolean, agentKind: string, at: string): RoutePlan {
+  busy: boolean, agentKind: string, at: string, investigationApproval = false): RoutePlan {
   if (decision.kind === 'new_task') {
     const task = newTaskFromRoute(event, decision, randomUUID(), at);
     const subscriptions: Subscription[] = [];
@@ -69,9 +70,11 @@ export function planRoute(event: SourceEvent, decision: RouteDecision, owner: Ta
     if (event.threadKey) subscriptions.push({ taskId: task.id, sourceId: event.sourceId,
       targetKind: 'thread', targetKey: event.threadKey, mode: 'handle' });
     return { decision, task, taskId: task.id,
-      transitions: [{ state: 'triaged', reason: 'Trusted event accepted' },
-        { state: 'queued', reason: 'Investigation queued' }], subscriptions,
-      run: queuedRun(task, 'investigate', event.id, randomUUID(), agentKind, at) };
+      investigationApprovalId: investigationApproval ? randomUUID() : undefined,
+      transitions: [{ state: 'triaged', reason: 'Trusted event accepted' }, investigationApproval
+        ? { state: 'waiting_human', reason: '等待人工批准开始调查' }
+        : { state: 'queued', reason: 'Investigation queued' }], subscriptions,
+      run: investigationApproval ? undefined : queuedRun(task, 'investigate', event.id, randomUUID(), agentKind, at) };
   }
   if (decision.kind === 'existing_task') {
     if (!owner || owner.id !== decision.taskId) throw new Error('Route owner is missing');

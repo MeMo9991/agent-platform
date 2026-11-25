@@ -4,6 +4,7 @@ import { SqliteStore } from '../src/storage/sqlite/store.js';
 import { createEventIngress } from '../src/event/ingress.js';
 import { createEventLoop, createKernelCoordinator } from './kernel-fixture.js';
 import { createEventLoop as createEventLoopCore } from '../src/agent/kernel/event-loop.js';
+import { createKernelCoordinator as createKernelCoordinatorCore } from '../src/agent/kernel/coordinator.js';
 import { planRoute } from '../src/agent/kernel/task-loop.js';
 import { createTaskCandidateFinder } from '../src/agent/router/candidate-finder.js';
 import { investigationMandate } from '../src/authorization/model.js';
@@ -16,6 +17,41 @@ import { join } from 'node:path';
 const sourceId = 'local-fixture';
 const event = { sourceId, externalId: 'bug-1', revision: '1', kind: 'bug', title: '调查样本', body: '样本',
   objectKey: 'issue-1', repoKey: 'agent-platform', attachments: [], metaData: {} };
+
+for (const decision of ['approve', 'reject'] as const) {
+  test(`scheduled investigation requires approval before creating a Run (${decision})`, async () => {
+    const store = new SqliteStore(':memory:', { [sourceId]: [] });
+    try {
+      store.registerSource(sourceId, 'fixture', 'fixture', true);
+      const coordinator = createKernelCoordinatorCore(store, { [sourceId]: 'agent-platform' },
+        'p1', 'fixture', 'qoder', ['agent-platform'], createTaskCandidateFinder(store),
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, new Set([sourceId]));
+      const first = store.accept(event);
+      coordinator.processPending();
+      const taskId = String(store.db.prepare('SELECT id FROM task').get()?.id);
+      const requestId = String(store.db.prepare("SELECT id FROM task_record WHERE kind='approval_request'").get()?.id);
+      const approval = store.getRecord(requestId);
+      assert.equal(approval?.kind, 'approval_request');
+      assert.equal(approval.request.kind, 'investigation');
+      assert.equal(store.getTask(taskId)?.state, 'waiting_human');
+      store.accept({ ...event, revision: '2' });
+      coordinator.processPending();
+      assert.equal(store.db.prepare('SELECT count(*) AS n FROM run').get()?.n, 0);
+      assert.equal(store.db.prepare("SELECT count(*) AS n FROM task_record WHERE kind='approval_request'").get()?.n, 1);
+      const signal = { kind: 'human_response' as const, taskId,
+        response: { kind: 'approval_decision' as const, value: { requestId, decision,
+          actor: { kind: 'human' as const, id: 'owner' }, idempotencyKey: 'decision', at: new Date().toISOString() } } };
+      await coordinator.onSignal(signal);
+      await coordinator.onSignal(signal);
+      const runs = store.db.prepare('SELECT id FROM run').all();
+      assert.equal(runs.length, decision === 'approve' ? 1 : 0);
+      if (decision === 'approve') assert.equal(store.getRun(String(runs[0]?.id))?.requestKey,
+        `${taskId}:1:investigate:${first.eventId}`);
+      assert.equal(store.getTask(taskId)?.state, decision === 'approve' ? 'queued' : 'cancelled');
+      assert.equal(store.getRecord(requestId)?.status, decision === 'approve' ? 'approved' : 'rejected');
+    } finally { store.close(); }
+  });
+}
 
 function approveNewImageTask(store: SqliteStore, eventId: string): void {
   assert.equal(store.get(eventId)?.status, 'needs_human');

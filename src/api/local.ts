@@ -97,6 +97,9 @@ export function startLocalApi(store: SqliteStore, coordinator: KernelCoordinator
       }
       if (path === '/routes' && options.roles.includes('route')) {
         const value = routeReviewDecision.parse({ ...data, actor, at: new Date().toISOString() });
+        if (value.choice === 'new_task' && value.approveInvestigation && !options.roles.includes('approve')) {
+          json(response, 403, { error: 'Approve role required' }); return;
+        }
         await coordinator.onSignal({ kind: 'human_response', response: { kind: 'route_decision', value } });
         const routingData = store.get(value.eventId)?.routingData;
         const taskId = routingData && typeof routingData === 'object' && 'taskId' in routingData
