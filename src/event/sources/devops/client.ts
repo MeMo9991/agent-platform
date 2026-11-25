@@ -1,12 +1,12 @@
-import type { DefectSourceConfig } from './defects.js';
+import { defectStatuses, type DefectSourceConfig } from './defects.js';
 
-const baseUrl = 'https://devops.faw.cn/api/collaboration-center/api/scrum/item';
+const baseUrl = 'https://devops.faw.cn/api/collaboration-center/api/scrum';
 
 export function createDefectApiReaders(config: DefectSourceConfig,
   authorizationHeaders: () => Promise<HeadersInit>, request: typeof fetch = fetch): {
-    readPage(page: number): Promise<unknown>; readDetail(id: number): Promise<unknown>;
+    readPage(page: number): Promise<unknown>; readDetail(id: number): Promise<unknown>; readComments(id: number): Promise<unknown>;
   } {
-  async function post(path: 'list' | 'query', body: object): Promise<unknown> {
+  async function read(path: string, body?: object): Promise<unknown> {
     const headers = new Headers(await authorizationHeaders());
     if (!headers.get('Authorization')) throw new Error('Defect API authorization is unavailable');
     headers.set('Content-Type', 'application/json;charset=UTF-8');
@@ -17,14 +17,18 @@ export function createDefectApiReaders(config: DefectSourceConfig,
     headers.set('lang', 'zh-cn');
     headers.set('origin', 'https://iwork.faw.cn');
     headers.set('referer', 'https://iwork.faw.cn/');
-    const response = await request(`${baseUrl}/${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
+    const response = await request(`${baseUrl}/${path}`, { method: body ? 'POST' : 'GET', headers, redirect: 'error', body: JSON.stringify(body) });
     if (!response.ok) throw new Error(`Defect API returned HTTP ${response.status}`);
     return response.json();
   }
   return {
-    readPage: page => post('list', { itemOperateSource: 'DAYU_PROJECT', statusIdList: [3166016], userRelatedList: ['ASSIGN'],
+    readPage: page => read('item/list', { itemOperateSource: 'DAYU_PROJECT', statusIdList: [...defectStatuses], userRelatedList: ['ASSIGN'],
       group: false, pageSize: config.pageSize ?? 10, pageNum: page, itemType: 'DEFECT', businessProjectId: config.businessProjectId }),
-    readDetail: id => post('query', { itemOperateSource: 'DAYU_PROJECT', businessProjectId: String(config.businessProjectId),
+    readDetail: id => read('item/query', { itemOperateSource: 'DAYU_PROJECT', businessProjectId: String(config.businessProjectId),
       itemId: id, type: 'DEFECT', templateType: 'GENERAL' }),
+    readComments: id => read(`comment/treeList?${new URLSearchParams({
+      itemOperateSource: 'DAYU_PROJECT', businessProjectId: String(config.businessProjectId),
+      itemId: String(id), _t: String(Date.now()),
+    })}`),
   };
 }

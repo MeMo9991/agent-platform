@@ -653,15 +653,18 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
           attachmentRefs: event.attachments };
       });
       const attachmentPaths: string[] = [];
-      if (eventFacts.some(event => event.attachmentRefs.length)) {
-        const imageCount = eventFacts.reduce((count, event) => count +
-          event.attachmentRefs.filter(ref => ref.kind === 'image').length, 0);
-        if (imageCount > 8) throw new Error('Run has more than 8 images');
+      const attachments = new Map<string | number, { sourceId: string; ref: typeof eventFacts[number]['attachmentRefs'][number] }>();
+      for (const event of eventFacts) for (const ref of event.attachmentRefs) {
+        const key = ref.stableKey ? JSON.stringify([event.sourceId, ref.stableKey]) : attachments.size;
+        attachments.set(key, { sourceId: event.sourceId, ref });
+      }
+      if (attachments.size) {
+        if (attachments.size > 8) throw new Error('Run has more than 8 images');
         if (runner.capabilities().attachments !== 'supported') throw new Error('Agent attachment capability is unavailable');
         attachmentDirectory = resolve(workspace.path, '.git', 'agent-input');
         let totalBytes = 0;
-        for (const event of eventFacts) for (const ref of event.attachmentRefs) {
-          const staged = await stageImage(workspace.path, event.sourceId, ref, 20 * 1024 * 1024 - totalBytes);
+        for (const { sourceId, ref } of attachments.values()) {
+          const staged = await stageImage(workspace.path, sourceId, ref, 20 * 1024 * 1024 - totalBytes);
           totalBytes += staged.bytes;
           attachmentPaths.push(staged.path);
         }
@@ -709,8 +712,8 @@ export function createWorkerManager(input: { store: SqliteStore; coordinator: Ke
           developmentEvidence };
       }
       let reopenEvidence;
-      const reopenedRow = input.store.db.prepare("SELECT id FROM task_record WHERE task_id=? AND kind='reopen' ORDER BY at DESC,id DESC LIMIT 1")
-        .get(task.id);
+      const reopenedRow = input.store.db.prepare("SELECT id FROM task_record WHERE task_id=? AND kind='reopen' AND json_extract(payload_json,'$.nextIteration')=? ORDER BY at DESC,id DESC LIMIT 1")
+        .get(task.id, task.iteration);
       if (reopenedRow && claimed.stage !== 'review') {
         const record = input.store.getRecord(String(reopenedRow.id));
         if (record?.kind !== 'reopen' || record.nextIteration !== task.iteration)

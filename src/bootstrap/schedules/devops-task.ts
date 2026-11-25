@@ -15,6 +15,6 @@ export function createDevopsDefectTask(platform: PlatformConfig, ingress: EventI
     if (task.kind !== 'devops-defect-poll') throw new Error('Expected DevOps defect scan');
     const config = { sourceId: task.id, businessProjectId: task.businessProjectId, pageSize: task.pageSize };
     const readers = createDefectApiReaders(config, authorizationHeaders, request);
-    await pollSource(createDefectSource(config, readers.readPage, readers.readDetail, selectors[task.projectKey]), ingress);
+    await pollSource(createDefectSource(config, readers.readPage, readers.readDetail, selectors[task.projectKey], readers.readComments), ingress);
   };
 }

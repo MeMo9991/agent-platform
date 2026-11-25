@@ -18,6 +18,8 @@ const next: Partial<Record<TaskState, TaskState[]>> = {
   blocked: ['queued', 'waiting_human', 'cancelled', 'closed'],
   failed: ['queued', 'waiting_human', 'cancelled', 'closed'],
 };
+export const continuationReopenStates = new Set<TaskState>(['merged', 'released', 'closed']);
+
 export type TaskTransitionResult = { task: Task; record: Extract<TaskRecord, { kind: 'state_change' }> };
 export function transitionTask(value: Task, to: TaskState, reason: string, at: string, recordId: string,
   actor: z.infer<typeof actorRef>): TaskTransitionResult {
